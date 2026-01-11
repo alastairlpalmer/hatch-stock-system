@@ -7,6 +7,9 @@ import dotenv from 'dotenv';
 // Load environment variables
 dotenv.config();
 
+// Import database utilities
+import { testConnection } from './utils/db.js';
+
 // Import routes
 import productsRouter from './routes/products.js';
 import warehousesRouter from './routes/warehouses.js';
@@ -77,6 +80,16 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// Database health check
+app.get('/health/db', async (req, res) => {
+  const isConnected = await testConnection();
+  if (isConnected) {
+    res.json({ status: 'ok', database: 'connected' });
+  } else {
+    res.status(503).json({ status: 'error', database: 'disconnected' });
+  }
+});
+
 // API routes
 app.use('/api/auth', authRouter);
 app.use('/api/products', productsRouter);
@@ -98,17 +111,33 @@ app.use(errorHandler);
 
 // ============ START SERVER ============
 
-app.listen(PORT, () => {
-  console.log(`
+const startServer = async () => {
+  // Test database connection on startup
+  console.log('Testing database connection...');
+  const dbConnected = await testConnection();
+
+  if (!dbConnected) {
+    console.error('⚠️  Warning: Database connection failed. API will start but database operations will fail.');
+  }
+
+  app.listen(PORT, () => {
+    console.log(`
 ╔═══════════════════════════════════════════════════════════╗
 ║                                                           ║
 ║   🚀 Hatch Stock Management API                          ║
 ║                                                           ║
 ║   Server running on: http://localhost:${PORT}              ║
 ║   Environment: ${process.env.NODE_ENV || 'development'}                           ║
+║   Database: ${dbConnected ? 'Connected' : 'NOT CONNECTED'}                           ║
 ║                                                           ║
 ╚═══════════════════════════════════════════════════════════╝
-  `);
+    `);
+  });
+};
+
+startServer().catch(err => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
 });
 
 export default app;
