@@ -43,6 +43,16 @@ app.use(cors({
     // Allow requests with no origin (mobile apps, curl, etc.)
     if (!origin) return callback(null, true);
 
+    // Allow all Vercel preview deployments for this project
+    if (origin.includes('hatch-stock-system') && origin.includes('vercel.app')) {
+      return callback(null, true);
+    }
+
+    // Allow localhost for development
+    if (origin.includes('localhost')) {
+      return callback(null, true);
+    }
+
     if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
       callback(null, true);
     } else {
