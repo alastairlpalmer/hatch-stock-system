@@ -196,9 +196,22 @@ export default function SalesOverview() {
     e.target.value = '';
   };
 
+  // Normalize sales data - handle both CSV import format and database format
+  const normalizeSale = (sale) => ({
+    ...sale,
+    productId: sale.productId || sale.sku,
+    productName: sale.productName || sale.product_name || 'Unknown',
+    category: sale.category || sale.product?.category || '',
+    price: sale.price ?? sale.charged ?? 0,
+    charged: sale.charged ?? sale.price ?? 0,
+    costPrice: sale.costPrice ?? sale.cost_price ?? 0,
+    isFreeVend: sale.isFreeVend ?? (sale.charged === 0),
+    quantity: sale.quantity || 1,
+  });
+
   // Filter sales by date
   const getFilteredSales = () => {
-    let sales = data.salesData || [];
+    let sales = (data.salesData || []).map(normalizeSale);
     if (dateFilter.start) {
       const start = new Date(dateFilter.start);
       sales = sales.filter(s => new Date(s.timestamp) >= start);
@@ -530,12 +543,11 @@ export default function SalesOverview() {
                     <div>
                       <span className="text-zinc-300">{imp.filename}</span>
                       <div className="text-xs text-zinc-500 mt-0.5">
-                        {new Date(imp.importedAt).toLocaleString('en-GB')}
+                        {new Date(imp.importedAt || imp.imported_at).toLocaleString('en-GB')}
                       </div>
                     </div>
                     <div className="flex gap-4 text-sm">
-                      <span className="text-zinc-400">{imp.salesCount} sales</span>
-                      <span className="text-emerald-400">+{imp.productsAdded} products</span>
+                      <span className="text-zinc-400">{imp.recordsAdded || imp.records_added || imp.salesCount || 0} sales</span>
                     </div>
                   </div>
                 ))}
