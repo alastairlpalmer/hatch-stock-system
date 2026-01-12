@@ -20,9 +20,21 @@ router.get('/', asyncHandler(async (req, res) => {
     where,
     orderBy: { timestamp: 'desc' },
     take: parseInt(limit),
+    include: {
+      product: {
+        select: { category: true }
+      }
+    }
   });
 
-  res.json(sales);
+  // Flatten product category into sale object
+  const salesWithCategory = sales.map(sale => ({
+    ...sale,
+    category: sale.product?.category || null,
+    product: undefined, // Remove nested product object
+  }));
+
+  res.json(salesWithCategory);
 }));
 
 // Import sales from CSV data

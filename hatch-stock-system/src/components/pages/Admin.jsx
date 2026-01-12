@@ -525,7 +525,7 @@ function AdminRoutes() {
     setForm({
       name: route.name,
       type: route.type || 'route',
-      locations: route.locations || []
+      locations: route.locationIds || route.locations || []
     });
     setEditingId(route.id);
     setShowForm(true);
@@ -595,7 +595,8 @@ function AdminRoutes() {
   const getRouteCapacity = (route) => {
     if (route.type === 'adhoc') return null;
     let total = 0;
-    (route.locations || []).forEach(locId => {
+    const locationIds = route.locationIds || route.locations || [];
+    locationIds.forEach(locId => {
       const locConfig = data.locationConfig?.[locId] || {};
       Object.values(locConfig).forEach(config => {
         if (config.maxStock) total += config.maxStock;
@@ -721,13 +722,14 @@ function AdminRoutes() {
             ) : (
               routes.filter(r => r.type !== 'adhoc').map(route => {
                 const capacity = getRouteCapacity(route);
+                const routeLocationIds = route.locationIds || route.locations || [];
                 return (
                   <div key={route.id} className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4">
                     <div className="flex items-start justify-between mb-3">
                       <div>
                         <h4 className="font-medium text-zinc-200">{route.name}</h4>
                         <div className="text-xs text-zinc-500 mt-1">
-                          {route.locations?.length || 0} locations
+                          {routeLocationIds.length} locations
                           {capacity > 0 && <span className="ml-2 text-emerald-400">Max capacity: {capacity} units</span>}
                         </div>
                       </div>
@@ -737,11 +739,11 @@ function AdminRoutes() {
                       </div>
                     </div>
                     <div className="border-t border-zinc-800 pt-3">
-                      {(!route.locations || route.locations.length === 0) ? (
+                      {routeLocationIds.length === 0 ? (
                         <span className="text-zinc-500 text-sm">No locations assigned</span>
                       ) : (
                         <div className="flex flex-wrap gap-1">
-                          {route.locations.map((locId, idx) => (
+                          {routeLocationIds.map((locId, idx) => (
                             <span key={locId} className="text-xs bg-zinc-800 px-2 py-1 rounded text-zinc-400 flex items-center gap-1">
                               <span className="text-emerald-400">{idx + 1}.</span>
                               {getLocationName(locId)}
