@@ -165,6 +165,8 @@ export default function Orders() {
   };
 
   // Generate Order - Analyze low stock and suggest items
+  // Only suggests items where shortage >= 50% of maxStock
+  // Rounds order quantities up to box sizes (unitsPerBox)
   const analyzeAndSuggestOrder = (locationId) => {
     const location = data.locations.find(l => l.id === locationId);
     if (!location) return [];
@@ -184,42 +186,57 @@ export default function Orders() {
       const config = locConfig[product.sku] || {};
       const minStock = config.minStock || 0;
       const maxStock = config.maxStock || 0;
+      const unitsPerBox = product.unitsPerBox || 1;
 
-      let needsOrder = false;
+      // Skip if no maxStock is configured
+      if (maxStock <= 0) continue;
+
+      // Calculate shortage
+      const shortage = maxStock - currentStock;
+      const shortagePercentage = (shortage / maxStock) * 100;
+
+      // Only suggest if shortage >= 50% of maxStock
+      if (shortagePercentage < 50) continue;
+
+      // Determine priority based on current stock vs minStock
       let priority = 'normal';
-      let suggestedQty = 0;
-
       if (minStock > 0 && currentStock <= minStock) {
-        needsOrder = true;
         priority = 'critical';
-        suggestedQty = maxStock > 0 ? maxStock - currentStock : minStock * 2;
       } else if (minStock > 0 && currentStock <= minStock * 1.5) {
-        needsOrder = true;
         priority = 'warning';
-        suggestedQty = maxStock > 0 ? maxStock - currentStock : Math.ceil(minStock * 1.5);
+      } else {
+        priority = 'warning'; // Still warning since it's below 50% threshold
       }
 
-      if (needsOrder && suggestedQty > 0) {
-        suggestions.push({
-          sku: product.sku,
-          name: product.name,
-          category: product.category,
-          currentStock,
-          minStock,
-          maxStock,
-          suggestedQty,
-          orderQty: suggestedQty,
-          unitPrice: product.unitCost || 0,
-          priority,
-          selected: true
-        });
-      }
+      // Round up to nearest box size
+      const rawOrderQty = shortage;
+      const boxesNeeded = Math.ceil(rawOrderQty / unitsPerBox);
+      const orderQty = boxesNeeded * unitsPerBox;
+
+      suggestions.push({
+        sku: product.sku,
+        name: product.name,
+        category: product.category,
+        currentStock,
+        minStock,
+        maxStock,
+        shortage,
+        shortagePercentage: Math.round(shortagePercentage),
+        unitsPerBox,
+        boxesNeeded,
+        suggestedQty: rawOrderQty,
+        orderQty,
+        unitPrice: product.unitCost || 0,
+        priority,
+        selected: true
+      });
     }
 
     return suggestions.sort((a, b) => {
       if (a.priority === 'critical' && b.priority !== 'critical') return -1;
       if (b.priority === 'critical' && a.priority !== 'critical') return 1;
-      return a.name.localeCompare(b.name);
+      // Then sort by shortage percentage (highest first)
+      return b.shortagePercentage - a.shortagePercentage;
     });
   };
 
@@ -881,9 +898,12 @@ Return ONLY valid JSON with this exact structure (no markdown, no explanation):
                         {item.priority === 'critical' ? 'CRITICAL' : 'LOW'}
                       </span>
                       <span className="text-xs bg-zinc-700 px-1.5 py-0.5 rounded text-zinc-400">{item.category || 'Other'}</span>
+                      <span className="text-xs bg-teal-500/20 text-teal-400 px-1.5 py-0.5 rounded">{item.shortagePercentage}% short</span>
                     </div>
                     <p className="text-sm text-zinc-200 mt-1">{item.name}</p>
-                    <p className="text-xs text-zinc-500">Current: {item.currentStock} | Min: {item.minStock} | Max: {item.maxStock || '-'}</p>
+                    <p className="text-xs text-zinc-500">
+                      Stock: {item.currentStock}/{item.maxStock} | Need: {item.shortage} | Box: {item.unitsPerBox} units ({item.boxesNeeded} boxes)
+                    </p>
                   </div>
                   <div className="text-center">
                     <p className="text-zinc-500 text-xs">Order Qty</p>
