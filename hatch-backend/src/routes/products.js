@@ -52,7 +52,7 @@ router.get('/:sku', asyncHandler(async (req, res) => {
 
 // Create product
 router.post('/', asyncHandler(async (req, res) => {
-  const { sku, name, category, unitCost, salePrice } = req.body;
+  const { sku, name, description, category, unitCost, salePrice, unitsPerBox, barcode, preferredSupplierId } = req.body;
 
   if (!sku || !name) {
     return res.status(400).json({ error: 'SKU and name are required' });
@@ -62,9 +62,13 @@ router.post('/', asyncHandler(async (req, res) => {
     data: {
       sku,
       name,
-      category,
+      description: description || null,
+      category: category || null,
       unitCost: unitCost ? parseFloat(unitCost) : null,
       salePrice: salePrice ? parseFloat(salePrice) : null,
+      unitsPerBox: unitsPerBox ? parseInt(unitsPerBox) : 1,
+      barcode: barcode || null,
+      preferredSupplierId: preferredSupplierId || null,
     },
   });
 
@@ -73,15 +77,19 @@ router.post('/', asyncHandler(async (req, res) => {
 
 // Update product
 router.put('/:sku', asyncHandler(async (req, res) => {
-  const { name, category, unitCost, salePrice } = req.body;
+  const { name, description, category, unitCost, salePrice, unitsPerBox, barcode, preferredSupplierId } = req.body;
 
   const product = await prisma.product.update({
     where: { sku: req.params.sku },
     data: {
       ...(name && { name }),
-      ...(category !== undefined && { category }),
+      ...(description !== undefined && { description: description || null }),
+      ...(category !== undefined && { category: category || null }),
       ...(unitCost !== undefined && { unitCost: unitCost ? parseFloat(unitCost) : null }),
       ...(salePrice !== undefined && { salePrice: salePrice ? parseFloat(salePrice) : null }),
+      ...(unitsPerBox !== undefined && { unitsPerBox: unitsPerBox ? parseInt(unitsPerBox) : 1 }),
+      ...(barcode !== undefined && { barcode: barcode || null }),
+      ...(preferredSupplierId !== undefined && { preferredSupplierId: preferredSupplierId || null }),
     },
   });
 
@@ -114,15 +122,23 @@ router.post('/import', asyncHandler(async (req, res) => {
         create: {
           sku: product.sku,
           name: product.name,
-          category: product.category,
+          description: product.description || null,
+          category: product.category || null,
           unitCost: product.unitCost ? parseFloat(product.unitCost) : null,
           salePrice: product.salePrice ? parseFloat(product.salePrice) : null,
+          unitsPerBox: product.unitsPerBox ? parseInt(product.unitsPerBox) : 1,
+          barcode: product.barcode || null,
+          preferredSupplierId: product.preferredSupplierId || null,
         },
         update: {
           name: product.name,
-          category: product.category,
+          description: product.description || null,
+          category: product.category || null,
           unitCost: product.unitCost ? parseFloat(product.unitCost) : null,
           salePrice: product.salePrice ? parseFloat(product.salePrice) : null,
+          unitsPerBox: product.unitsPerBox ? parseInt(product.unitsPerBox) : 1,
+          barcode: product.barcode || null,
+          preferredSupplierId: product.preferredSupplierId || null,
         },
       });
       results.created++;

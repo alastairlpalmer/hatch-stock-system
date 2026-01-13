@@ -15,21 +15,26 @@ datasource db {
 // ============ PRODUCTS ============
 
 model Product {
-  sku       String   @id
-  name      String
-  category  String?
-  unitCost  Float?   @map("unit_cost")
-  salePrice Float?   @map("sale_price")
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  sku                 String   @id
+  name                String
+  description         String?
+  category            String?
+  unitCost            Float?   @map("unit_cost")
+  salePrice           Float?   @map("sale_price")
+  unitsPerBox         Int?     @default(1) @map("units_per_box")
+  barcode             String?
+  preferredSupplierId String?  @map("preferred_supplier_id")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
 
   // Relations
-  warehouseStock  WarehouseStock[]
-  locationStock   LocationStock[]
-  stockBatches    StockBatch[]
-  orderItems      OrderItem[]
-  sales           Sale[]
-  locationConfigs LocationConfig[]
+  preferredSupplier Supplier?          @relation(fields: [preferredSupplierId], references: [id])
+  warehouseStock    WarehouseStock[]
+  locationStock     LocationStock[]
+  stockBatches      StockBatch[]
+  orderItems        OrderItem[]
+  sales             Sale[]
+  locationConfigs   LocationConfig[]
 
   @@map("products")
 }
@@ -149,7 +154,8 @@ model Supplier {
   createdAt DateTime @default(now()) @map("created_at")
 
   // Relations
-  orders Order[]
+  orders   Order[]
+  products Product[]
 
   @@map("suppliers")
 }
