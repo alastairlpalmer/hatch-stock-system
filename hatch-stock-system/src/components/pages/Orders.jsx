@@ -48,9 +48,14 @@ function OrderCard({ order, data, onEdit }) {
       <div className="mt-3 flex flex-wrap gap-2">
         {order.items.slice(0, expanded ? undefined : 3).map((item, i) => {
           const product = data.products.find(p => p.sku === item.sku);
+          const unitsPerBox = product?.unitsPerBox || 1;
+          const boxes = unitsPerBox > 1 ? Math.ceil(item.quantity / unitsPerBox) : null;
           return (
             <span key={i} className="text-xs bg-zinc-800 px-2 py-1 rounded">
               {product?.name || item.sku} × {item.quantity}
+              {boxes && unitsPerBox > 1 && (
+                <span className="text-teal-400 ml-1">({boxes} box{boxes > 1 ? 'es' : ''})</span>
+              )}
               {item.unitPrice > 0 && <span className="text-zinc-500 ml-1">@ £{item.unitPrice.toFixed(2)}</span>}
             </span>
           );
@@ -379,9 +384,10 @@ export default function Orders() {
   <table>
     <thead>
       <tr>
-        <th style="width: 40%">Product</th>
+        <th style="width: 35%">Product</th>
         <th>Current Stock</th>
         <th>Order Qty</th>
+        <th>Boxes</th>
         <th>Unit Price</th>
         <th>Line Total</th>
       </tr>
@@ -397,6 +403,7 @@ export default function Orders() {
           </td>
           <td>${item.currentStock} / ${item.maxStock || '-'}</td>
           <td><strong>${item.orderQty}</strong></td>
+          <td>${item.boxesNeeded} × ${item.unitsPerBox}</td>
           <td>£${item.unitPrice.toFixed(2)}</td>
           <td>£${(item.orderQty * item.unitPrice).toFixed(2)}</td>
         </tr>
@@ -408,6 +415,10 @@ export default function Orders() {
     <div class="total-row">
       <span>Items:</span>
       <span>${selectedItems.length}</span>
+    </div>
+    <div class="total-row">
+      <span>Total Boxes:</span>
+      <span>${selectedItems.reduce((a, i) => a + i.boxesNeeded, 0)}</span>
     </div>
     <div class="total-row">
       <span>Total Units:</span>
