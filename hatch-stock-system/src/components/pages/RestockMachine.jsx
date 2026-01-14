@@ -45,11 +45,20 @@ export default function RestockMachine() {
     return hoursSince < 24;
   };
 
+  // Variance reason options
+  const varianceReasons = [
+    { value: 'theft', label: 'Suspected Theft' },
+    { value: 'swap', label: 'Wrong Item Taken (Swap)' },
+    { value: 'damaged', label: 'Damaged/Expired' },
+    { value: 'malfunction', label: 'Machine Malfunction' },
+    { value: 'unknown', label: 'Unknown' },
+  ];
+
   // Initialize stock check with expected values
   const startStockCheck = () => {
     const counts = {};
     getLocationProducts().forEach(p => {
-      counts[p.sku] = { counted: '', expected: locationStock[p.sku] || 0 };
+      counts[p.sku] = { counted: '', expected: locationStock[p.sku] || 0, reason: '' };
     });
     setStockCheckCounts(counts);
     setStep('stockcheck');
@@ -63,12 +72,18 @@ export default function RestockMachine() {
 
     try {
       const checkId = `sc-${Date.now()}`;
-      const items = Object.entries(stockCheckCounts).map(([sku, data]) => ({
-        sku,
-        expected: data.expected,
-        counted: parseInt(data.counted) || 0,
-        variance: (parseInt(data.counted) || 0) - data.expected
-      }));
+      const items = Object.entries(stockCheckCounts).map(([sku, itemData]) => {
+        const counted = parseInt(itemData.counted) || 0;
+        const variance = counted - itemData.expected;
+        return {
+          sku,
+          expected: itemData.expected,
+          counted,
+          variance,
+          // Include reason for negative variances (shrinkage)
+          reason: variance < 0 ? (itemData.reason || 'unknown') : null,
+        };
+      });
 
       await submitStockCheck({
         id: checkId,
@@ -317,19 +332,21 @@ export default function RestockMachine() {
 
               <div className="space-y-2">
                 <div className="grid grid-cols-12 gap-2 text-xs text-zinc-500 font-medium px-2">
-                  <div className="col-span-5">Product</div>
+                  <div className="col-span-4">Product</div>
                   <div className="col-span-2 text-center">Expected</div>
                   <div className="col-span-2 text-center">Counted</div>
-                  <div className="col-span-3 text-center">Variance</div>
+                  <div className="col-span-2 text-center">Variance</div>
+                  <div className="col-span-2 text-center">Reason</div>
                 </div>
 
                 {getLocationProducts().map(product => {
-                  const counts = stockCheckCounts[product.sku] || { counted: '', expected: 0 };
+                  const counts = stockCheckCounts[product.sku] || { counted: '', expected: 0, reason: '' };
                   const counted = parseInt(counts.counted) || 0;
-                  const variance = counted - counts.expected;
+                  const variance = counts.counted !== '' ? counted - counts.expected : null;
+                  const hasNegativeVariance = variance !== null && variance < 0;
                   return (
-                    <div key={product.sku} className="grid grid-cols-12 gap-2 items-center py-2 border-b border-zinc-800 last:border-0">
-                      <div className="col-span-5">
+                    <div key={product.sku} className={`grid grid-cols-12 gap-2 items-center py-2 border-b border-zinc-800 last:border-0 ${hasNegativeVariance ? 'bg-red-500/5' : ''}`}>
+                      <div className="col-span-4">
                         <span className="text-zinc-200">{product.name}</span>
                         <div className="text-zinc-600 text-xs">{product.sku}</div>
                       </div>
@@ -348,13 +365,32 @@ export default function RestockMachine() {
                           className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-sm text-center focus:outline-none focus:border-emerald-500"
                         />
                       </div>
-                      <div className="col-span-3 text-center">
-                        {counts.counted !== '' && (
+                      <div className="col-span-2 text-center">
+                        {variance !== null && (
                           <span className={`text-sm font-medium ${
                             variance === 0 ? 'text-emerald-400' : variance > 0 ? 'text-blue-400' : 'text-red-400'
                           }`}>
                             {variance > 0 ? '+' : ''}{variance}
                           </span>
+                        )}
+                      </div>
+                      <div className="col-span-2">
+                        {hasNegativeVariance ? (
+                          <select
+                            value={counts.reason || ''}
+                            onChange={e => setStockCheckCounts({
+                              ...stockCheckCounts,
+                              [product.sku]: { ...counts, reason: e.target.value }
+                            })}
+                            className="w-full bg-zinc-800 border border-red-700/50 rounded px-1 py-1.5 text-xs focus:outline-none focus:border-red-500"
+                          >
+                            <option value="">Select...</option>
+                            {varianceReasons.map(r => (
+                              <option key={r.value} value={r.value}>{r.label}</option>
+                            ))}
+                          </select>
+                        ) : (
+                          <span className="text-zinc-600 text-xs">-</span>
                         )}
                       </div>
                     </div>

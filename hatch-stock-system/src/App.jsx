@@ -11,6 +11,7 @@ import Inventory from './components/pages/Inventory';
 import RemoveStock from './components/pages/RemoveStock';
 import RestockMachine from './components/pages/RestockMachine';
 import History from './components/pages/History';
+import Shrinkage from './components/pages/Shrinkage';
 import Admin from './components/pages/Admin';
 
 // Import layout components
@@ -92,6 +93,7 @@ function App() {
             {activeTab === 'remove' && <RemoveStock />}
             {activeTab === 'restock' && <RestockMachine />}
             {activeTab === 'history' && <History />}
+            {activeTab === 'shrinkage' && <Shrinkage />}
             {activeTab === 'admin' && <Admin />}
           </div>
         </main>
