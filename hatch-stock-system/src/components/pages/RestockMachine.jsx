@@ -20,8 +20,8 @@ export default function RestockMachine() {
   const location = data.locations.find(l => l.id === selectedLocation);
   const locationStock = data.locationStock[selectedLocation] || {};
   const locationConfig = data.locationConfig[selectedLocation] || {};
-  const machineRestocks = data.machineRestocks || [];
-  const stockChecks = data.stockChecks || [];
+  const machineRestocks = data.restockHistory || data.machineRestocks || [];
+  const stockChecks = data.stockCheckHistory || data.stockChecks || [];
 
   // Get products assigned to this location
   const getLocationProducts = () => {

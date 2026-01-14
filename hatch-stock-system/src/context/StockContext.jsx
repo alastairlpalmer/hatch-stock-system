@@ -666,9 +666,17 @@ export function StockProvider({ children }) {
     const result = await inventoryService.recordRestock(restock);
     // Refresh location stock
     const stockData = await inventoryService.getLocationStock(restock.locationId);
+    // Add restock to local history for immediate display
+    const newRestock = {
+      ...result,
+      ...restock,
+      id: result.id,
+      timestamp: result.createdAt || new Date().toISOString(),
+    };
     setData(prev => ({
       ...prev,
       locationStock: { ...prev.locationStock, [restock.locationId]: stockData },
+      restockHistory: [...prev.restockHistory, newRestock],
     }));
     return result;
   }, [data, isOfflineMode, saveData]);
@@ -704,11 +712,18 @@ export function StockProvider({ children }) {
       return newStockCheck;
     }
     const result = await inventoryService.submitStockCheck(stockCheck);
-    // Refresh location stock
+    // Refresh location stock - this is the key update that sets stock to counted values
     const stockData = await inventoryService.getLocationStock(stockCheck.locationId);
+    // Also add the stock check to local history for immediate display
+    const newStockCheck = {
+      ...result,
+      timestamp: result.createdAt || new Date().toISOString(),
+      totalVariance: stockCheck.items.reduce((sum, item) => sum + Math.abs(item.counted - item.expected), 0),
+    };
     setData(prev => ({
       ...prev,
       locationStock: { ...prev.locationStock, [stockCheck.locationId]: stockData },
+      stockCheckHistory: [...prev.stockCheckHistory, newStockCheck],
     }));
     return result;
   }, [data, isOfflineMode, saveData]);
