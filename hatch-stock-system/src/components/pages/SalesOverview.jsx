@@ -2,11 +2,17 @@ import React, { useState } from 'react';
 import { useStock } from '../../context/StockContext';
 
 export default function SalesOverview() {
-  const { data, importSales, bulkImportProducts } = useStock();
+  const { data, importSales, bulkImportProducts, updateLocationStock } = useStock();
   const [activeSubTab, setActiveSubTab] = useState('overview');
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState(null);
   const [dateFilter, setDateFilter] = useState({ start: '', end: '' });
+
+  // Stock sync state
+  const [showStockSync, setShowStockSync] = useState(false);
+  const [stockDeductions, setStockDeductions] = useState([]);
+  const [locationMappings, setLocationMappings] = useState({});
+  const [syncingStock, setSyncingStock] = useState(false);
 
   // Parse Vendlive CSV format
   const parseVendliveCSV = (csvText) => {
@@ -69,6 +75,11 @@ export default function SalesOverview() {
       if (seenTransactions.has(saleKey)) continue;
       seenTransactions.add(saleKey);
 
+      // Get location info
+      const venueName = values[cols.venueName]?.trim() || '';
+      const machineName = values[cols.machineName]?.trim() || '';
+      const locationKey = machineName || venueName || 'Unknown';
+
       // Add to sales
       sales.push({
         id: saleKey,
@@ -82,7 +93,10 @@ export default function SalesOverview() {
         costPrice,
         charged: charged === 'Free Vend' ? 0 : price,
         isFreeVend: charged === 'Free Vend',
-        quantity: 1
+        quantity: 1,
+        locationName: locationKey,
+        venueName,
+        machineName
       });
 
       // Track products
@@ -187,6 +201,11 @@ export default function SalesOverview() {
         productsAdded: newProductCount,
         productsUpdated: updatedProductCount
       });
+
+      // Calculate stock deductions from new sales
+      if (newSales.length > 0) {
+        calculateStockDeductions(newSales);
+      }
     } catch (error) {
       console.error('Import error:', error);
       setImportResult({ success: false, error: error.message });
@@ -194,6 +213,100 @@ export default function SalesOverview() {
 
     setImporting(false);
     e.target.value = '';
+  };
+
+  // Calculate stock deductions from sales data
+  const calculateStockDeductions = (sales) => {
+    // Group sales by location and product
+    const deductionMap = new Map();
+    const uniqueLocations = new Set();
+
+    sales.forEach(sale => {
+      const locKey = sale.locationName || 'Unknown';
+      uniqueLocations.add(locKey);
+
+      const key = `${locKey}|${sale.sku}`;
+      if (deductionMap.has(key)) {
+        deductionMap.get(key).quantity += sale.quantity || 1;
+      } else {
+        deductionMap.set(key, {
+          locationName: locKey,
+          sku: sale.sku,
+          productName: sale.productName,
+          quantity: sale.quantity || 1
+        });
+      }
+    });
+
+    // Auto-match locations by name
+    const mappings = {};
+    uniqueLocations.forEach(locName => {
+      const matchedLoc = data.locations.find(l =>
+        l.name.toLowerCase().includes(locName.toLowerCase()) ||
+        locName.toLowerCase().includes(l.name.toLowerCase())
+      );
+      if (matchedLoc) {
+        mappings[locName] = matchedLoc.id;
+      }
+    });
+
+    setLocationMappings(mappings);
+    setStockDeductions(Array.from(deductionMap.values()));
+
+    // Show sync modal if there are deductions
+    if (deductionMap.size > 0) {
+      setShowStockSync(true);
+    }
+  };
+
+  // Apply stock deductions to location stock
+  const applyStockDeductions = async () => {
+    setSyncingStock(true);
+
+    try {
+      // Group deductions by mapped location
+      const updatesByLocation = new Map();
+
+      stockDeductions.forEach(deduction => {
+        const mappedLocationId = locationMappings[deduction.locationName];
+        if (!mappedLocationId) return; // Skip unmapped locations
+
+        if (!updatesByLocation.has(mappedLocationId)) {
+          updatesByLocation.set(mappedLocationId, []);
+        }
+        updatesByLocation.get(mappedLocationId).push(deduction);
+      });
+
+      // Apply updates
+      for (const [locationId, deductions] of updatesByLocation) {
+        const currentStock = data.locationStock[locationId] || {};
+
+        for (const deduction of deductions) {
+          const currentQty = currentStock[deduction.sku] || 0;
+          const newQty = Math.max(0, currentQty - deduction.quantity);
+          await updateLocationStock(locationId, deduction.sku, newQty);
+        }
+      }
+
+      setShowStockSync(false);
+      setStockDeductions([]);
+      setImportResult(prev => ({
+        ...prev,
+        stockSynced: true,
+        locationsUpdated: updatesByLocation.size
+      }));
+    } catch (error) {
+      console.error('Stock sync error:', error);
+    }
+
+    setSyncingStock(false);
+  };
+
+  const updateLocationMapping = (locationName, locationId) => {
+    setLocationMappings(prev => ({
+      ...prev,
+      [locationName]: locationId
+    }));
   };
 
   // Normalize sales data - handle both CSV import format and database format
@@ -292,10 +405,126 @@ export default function SalesOverview() {
               <strong>Import successful!</strong> {importResult.salesImported} sales imported, {importResult.salesSkipped} duplicates skipped.
               {importResult.productsAdded > 0 && ` ${importResult.productsAdded} new products added.`}
               {importResult.productsUpdated > 0 && ` ${importResult.productsUpdated} products updated.`}
+              {importResult.stockSynced && ` Stock updated for ${importResult.locationsUpdated} location(s).`}
             </div>
           ) : (
             <div className="text-red-300 text-sm">Import failed: {importResult.error}</div>
           )}
+        </div>
+      )}
+
+      {/* Stock Sync Modal */}
+      {showStockSync && (
+        <div className="bg-zinc-900/50 border border-teal-800 rounded-lg p-6 space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="font-medium text-zinc-200">Sync Location Stock</h3>
+              <p className="text-zinc-500 text-sm mt-1">Deduct sold items from location stock</p>
+            </div>
+            <button onClick={() => setShowStockSync(false)} className="text-zinc-500 hover:text-zinc-300 text-xl">×</button>
+          </div>
+
+          {/* Location Mapping */}
+          <div className="bg-zinc-800/30 rounded-lg p-4">
+            <h4 className="text-sm font-medium text-zinc-300 mb-3">Match Sales Locations to Your Locations</h4>
+            <div className="space-y-2">
+              {[...new Set(stockDeductions.map(d => d.locationName))].map(locName => (
+                <div key={locName} className="flex items-center gap-3">
+                  <span className="text-sm text-zinc-400 w-48 truncate">{locName}</span>
+                  <span className="text-zinc-600">→</span>
+                  <select
+                    value={locationMappings[locName] || ''}
+                    onChange={(e) => updateLocationMapping(locName, e.target.value)}
+                    className="flex-1 bg-zinc-800 border border-zinc-700 rounded px-3 py-1.5 text-sm"
+                  >
+                    <option value="">-- Skip (don't deduct) --</option>
+                    {data.locations.map(loc => (
+                      <option key={loc.id} value={loc.id}>{loc.name}</option>
+                    ))}
+                  </select>
+                  {locationMappings[locName] && (
+                    <span className="text-emerald-400 text-xs">✓ Mapped</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Deductions Preview */}
+          <div className="bg-zinc-800/30 rounded-lg p-4">
+            <h4 className="text-sm font-medium text-zinc-300 mb-3">
+              Stock Deductions Preview ({stockDeductions.filter(d => locationMappings[d.locationName]).length} items will be deducted)
+            </h4>
+            <div className="max-h-60 overflow-y-auto space-y-1">
+              {stockDeductions.map((deduction, idx) => {
+                const isMapped = !!locationMappings[deduction.locationName];
+                const mappedLocation = data.locations.find(l => l.id === locationMappings[deduction.locationName]);
+                const currentStock = data.locationStock[locationMappings[deduction.locationName]]?.[deduction.sku] || 0;
+
+                return (
+                  <div
+                    key={idx}
+                    className={`flex items-center justify-between p-2 rounded text-sm ${
+                      isMapped ? 'bg-teal-500/10 border border-teal-500/30' : 'bg-zinc-800/50 opacity-50'
+                    }`}
+                  >
+                    <div className="flex-1 min-w-0">
+                      <span className="text-zinc-200">{deduction.productName}</span>
+                      <span className="text-zinc-500 ml-2 text-xs">({deduction.sku})</span>
+                    </div>
+                    <div className="flex items-center gap-4">
+                      <span className="text-zinc-500 text-xs">{deduction.locationName}</span>
+                      {isMapped ? (
+                        <>
+                          <span className="text-zinc-400">{currentStock}</span>
+                          <span className="text-red-400">-{deduction.quantity}</span>
+                          <span className="text-emerald-400">= {Math.max(0, currentStock - deduction.quantity)}</span>
+                        </>
+                      ) : (
+                        <span className="text-zinc-600 text-xs">Skipped</span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Summary Stats */}
+          <div className="grid grid-cols-3 gap-4">
+            <div className="bg-zinc-800/50 rounded-lg p-3 text-center">
+              <div className="text-xl font-bold text-zinc-300">{stockDeductions.length}</div>
+              <div className="text-xs text-zinc-500">Total Deductions</div>
+            </div>
+            <div className="bg-zinc-800/50 rounded-lg p-3 text-center">
+              <div className="text-xl font-bold text-emerald-400">
+                {stockDeductions.filter(d => locationMappings[d.locationName]).length}
+              </div>
+              <div className="text-xs text-zinc-500">Will Apply</div>
+            </div>
+            <div className="bg-zinc-800/50 rounded-lg p-3 text-center">
+              <div className="text-xl font-bold text-red-400">
+                {stockDeductions.filter(d => locationMappings[d.locationName]).reduce((a, d) => a + d.quantity, 0)}
+              </div>
+              <div className="text-xs text-zinc-500">Units to Deduct</div>
+            </div>
+          </div>
+
+          <div className="flex gap-3 pt-4 border-t border-zinc-800">
+            <button
+              onClick={applyStockDeductions}
+              disabled={syncingStock || stockDeductions.filter(d => locationMappings[d.locationName]).length === 0}
+              className="flex-1 px-4 py-3 bg-teal-600 text-white rounded-lg text-sm font-medium hover:bg-teal-500 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {syncingStock ? 'Syncing...' : 'Apply Stock Deductions'}
+            </button>
+            <button
+              onClick={() => setShowStockSync(false)}
+              className="px-4 py-3 bg-zinc-800 text-zinc-400 rounded-lg text-sm hover:bg-zinc-700"
+            >
+              Skip
+            </button>
+          </div>
         </div>
       )}
 
