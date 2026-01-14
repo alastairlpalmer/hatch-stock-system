@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import { useStock } from '../../context/StockContext';
 
-function OrderCard({ order, data, onEdit }) {
+function OrderCard({ order, data, onEdit, onDelete }) {
   const [expanded, setExpanded] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const supplier = data.suppliers.find(s => s.id === order.supplierId);
   const warehouse = data.warehouses.find(w => w.id === order.warehouseId);
 
@@ -100,12 +101,38 @@ function OrderCard({ order, data, onEdit }) {
           {expanded ? 'Show less' : 'Show details'}
         </button>
         {order.status === 'pending' && (
-          <button
-            onClick={onEdit}
-            className="text-xs text-emerald-400 hover:text-emerald-300"
-          >
-            Edit
-          </button>
+          <>
+            <button
+              onClick={onEdit}
+              className="text-xs text-emerald-400 hover:text-emerald-300"
+            >
+              Edit
+            </button>
+            {!confirmDelete ? (
+              <button
+                onClick={() => setConfirmDelete(true)}
+                className="text-xs text-red-400 hover:text-red-300"
+              >
+                Delete
+              </button>
+            ) : (
+              <span className="flex items-center gap-2">
+                <span className="text-xs text-zinc-500">Delete?</span>
+                <button
+                  onClick={() => { onDelete(order.id); setConfirmDelete(false); }}
+                  className="text-xs text-red-400 hover:text-red-300 font-medium"
+                >
+                  Yes
+                </button>
+                <button
+                  onClick={() => setConfirmDelete(false)}
+                  className="text-xs text-zinc-400 hover:text-zinc-300"
+                >
+                  No
+                </button>
+              </span>
+            )}
+          </>
         )}
       </div>
     </div>
@@ -113,7 +140,7 @@ function OrderCard({ order, data, onEdit }) {
 }
 
 export default function Orders() {
-  const { data, createOrder, updateOrder, bulkImportProducts, addSupplier } = useStock();
+  const { data, createOrder, updateOrder, deleteOrder, bulkImportProducts, addSupplier } = useStock();
   const [showForm, setShowForm] = useState(false);
   const [editingOrder, setEditingOrder] = useState(null);
   const [showInvoiceUpload, setShowInvoiceUpload] = useState(false);
@@ -1285,7 +1312,7 @@ Return ONLY valid JSON with this exact structure (no markdown, no explanation):
         ) : (
           <div className="space-y-3">
             {pendingOrders.map(order => (
-              <OrderCard key={order.id} order={order} data={data} onEdit={() => startEdit(order)} />
+              <OrderCard key={order.id} order={order} data={data} onEdit={() => startEdit(order)} onDelete={deleteOrder} />
             ))}
           </div>
         )}
@@ -1297,7 +1324,7 @@ Return ONLY valid JSON with this exact structure (no markdown, no explanation):
           <h3 className="text-sm font-medium text-zinc-400">Completed Orders ({completedOrders.length})</h3>
           <div className="space-y-3">
             {completedOrders.slice(-5).reverse().map(order => (
-              <OrderCard key={order.id} order={order} data={data} onEdit={() => startEdit(order)} />
+              <OrderCard key={order.id} order={order} data={data} onEdit={() => startEdit(order)} onDelete={deleteOrder} />
             ))}
           </div>
         </div>
