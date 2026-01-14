@@ -40,12 +40,15 @@ export default function Admin() {
 }
 
 function AdminProducts() {
-  const { data, addProduct, updateProduct, deleteProduct } = useStock();
+  const { data, addProduct, updateProduct, deleteProduct, bulkImportProducts } = useStock();
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState({ sku: '', name: '', description: '', unitCost: '', unitsPerBox: '', preferredSupplierId: '', category: '', barcode: '' });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [showImport, setShowImport] = useState(false);
+  const [importPreview, setImportPreview] = useState([]);
+  const [importStats, setImportStats] = useState({ total: 0, new: 0, existing: 0 });
 
   const resetForm = () => {
     setForm({ sku: '', name: '', description: '', unitCost: '', unitsPerBox: '', preferredSupplierId: '', category: '', barcode: '' });
@@ -116,16 +119,203 @@ function AdminProducts() {
     }
   };
 
+  // CSV Import functions
+  const parseCSV = (text) => {
+    const lines = text.split('\n');
+    if (lines.length < 2) return [];
+
+    // Parse header - handle quoted fields
+    const parseCSVLine = (line) => {
+      const result = [];
+      let current = '';
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        if (char === '"') {
+          inQuotes = !inQuotes;
+        } else if (char === ',' && !inQuotes) {
+          result.push(current.trim());
+          current = '';
+        } else {
+          current += char;
+        }
+      }
+      result.push(current.trim());
+      return result;
+    };
+
+    const headers = parseCSVLine(lines[0]);
+    const products = [];
+
+    for (let i = 1; i < lines.length; i++) {
+      if (!lines[i].trim()) continue;
+      const values = parseCSVLine(lines[i]);
+      const row = {};
+      headers.forEach((h, idx) => {
+        row[h] = values[idx] || '';
+      });
+
+      // Map Vendlive columns to our product format
+      if (row.id && row.name) {
+        products.push({
+          sku: row.id.toString(),
+          name: row.name,
+          category: row.category_name || '',
+          unitCost: parseFloat(row.cost_price) || 0,
+          salePrice: parseFloat(row.price) || 0,
+          description: '', // Vendlive description has HTML, skip for now
+          isNew: !data.products.some(p => p.sku === row.id.toString()),
+          selected: true
+        });
+      }
+    }
+    return products;
+  };
+
+  const handleFileUpload = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const text = ev.target?.result;
+      const products = parseCSV(text);
+      const newCount = products.filter(p => p.isNew).length;
+      const existingCount = products.filter(p => !p.isNew).length;
+
+      setImportPreview(products);
+      setImportStats({ total: products.length, new: newCount, existing: existingCount });
+      setShowImport(true);
+    };
+    reader.readAsText(file);
+  };
+
+  const toggleImportItem = (idx) => {
+    const items = [...importPreview];
+    items[idx].selected = !items[idx].selected;
+    setImportPreview(items);
+  };
+
+  const executeImport = async () => {
+    const selectedProducts = importPreview.filter(p => p.selected);
+    if (selectedProducts.length === 0) return;
+
+    setLoading(true);
+    setError(null);
+    try {
+      await bulkImportProducts(selectedProducts.map(p => ({
+        sku: p.sku,
+        name: p.name,
+        category: p.category,
+        unitCost: p.unitCost,
+        salePrice: p.salePrice,
+        description: p.description
+      })));
+      setShowImport(false);
+      setImportPreview([]);
+    } catch (err) {
+      setError(err.message || 'Failed to import products');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const getSupplierName = (id) => data.suppliers.find(s => s.id === id)?.name || '-';
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <p className="text-zinc-500 text-sm">Manage product catalog</p>
-        <button onClick={() => { resetForm(); setShowForm(!showForm); }} className="px-4 py-2 bg-emerald-600 text-white rounded text-sm font-medium hover:bg-emerald-500">
-          {showForm ? 'Cancel' : '+ Add Product'}
-        </button>
+        <div className="flex gap-2">
+          <label className="px-4 py-2 bg-teal-600 text-white rounded text-sm font-medium hover:bg-teal-500 cursor-pointer">
+            Import CSV
+            <input
+              type="file"
+              accept=".csv"
+              onChange={handleFileUpload}
+              className="hidden"
+            />
+          </label>
+          <button onClick={() => { resetForm(); setShowForm(!showForm); }} className="px-4 py-2 bg-emerald-600 text-white rounded text-sm font-medium hover:bg-emerald-500">
+            {showForm ? 'Cancel' : '+ Add Product'}
+          </button>
+        </div>
       </div>
+
+      {/* CSV Import Preview Modal */}
+      {showImport && (
+        <div className="bg-zinc-900/50 border border-teal-800 rounded-lg p-6 space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="font-medium text-zinc-200">Import Vendlive Products</h3>
+              <p className="text-zinc-500 text-sm mt-1">Review products before importing</p>
+            </div>
+            <button onClick={() => setShowImport(false)} className="text-zinc-500 hover:text-zinc-300 text-xl">×</button>
+          </div>
+
+          <div className="grid grid-cols-3 gap-4">
+            <div className="bg-zinc-800/50 rounded-lg p-3 text-center">
+              <div className="text-xl font-bold text-zinc-300">{importStats.total}</div>
+              <div className="text-xs text-zinc-500">Total Products</div>
+            </div>
+            <div className="bg-zinc-800/50 rounded-lg p-3 text-center">
+              <div className="text-xl font-bold text-emerald-400">{importStats.new}</div>
+              <div className="text-xs text-zinc-500">New Products</div>
+            </div>
+            <div className="bg-zinc-800/50 rounded-lg p-3 text-center">
+              <div className="text-xl font-bold text-yellow-400">{importStats.existing}</div>
+              <div className="text-xs text-zinc-500">Will Update</div>
+            </div>
+          </div>
+
+          <div className="space-y-2 max-h-80 overflow-y-auto">
+            {importPreview.map((product, idx) => (
+              <div
+                key={product.sku}
+                className={`flex items-center gap-3 p-3 rounded-lg border transition-all ${
+                  product.selected
+                    ? product.isNew
+                      ? 'bg-emerald-500/5 border-emerald-500/30'
+                      : 'bg-yellow-500/5 border-yellow-500/30'
+                    : 'bg-zinc-800/30 border-zinc-700 opacity-50'
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={product.selected}
+                  onChange={() => toggleImportItem(idx)}
+                  className="w-4 h-4 rounded border-zinc-600"
+                />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className={`text-xs px-1.5 py-0.5 rounded ${
+                      product.isNew ? 'bg-emerald-500/20 text-emerald-400' : 'bg-yellow-500/20 text-yellow-400'
+                    }`}>
+                      {product.isNew ? 'NEW' : 'UPDATE'}
+                    </span>
+                    <span className="text-xs bg-zinc-700 px-1.5 py-0.5 rounded text-zinc-400">{product.category || 'Other'}</span>
+                  </div>
+                  <p className="text-sm text-zinc-200 mt-1 truncate">{product.name}</p>
+                  <p className="text-xs text-zinc-500">SKU: {product.sku} | Cost: £{product.unitCost.toFixed(2)} | Price: £{product.salePrice.toFixed(2)}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="flex gap-3 pt-4 border-t border-zinc-800">
+            <button
+              onClick={executeImport}
+              disabled={loading || importPreview.filter(p => p.selected).length === 0}
+              className="flex-1 px-4 py-3 bg-teal-600 text-white rounded-lg text-sm font-medium hover:bg-teal-500 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {loading ? 'Importing...' : `Import ${importPreview.filter(p => p.selected).length} Products`}
+            </button>
+            <button onClick={() => setShowImport(false)} className="px-4 py-3 bg-zinc-800 text-zinc-400 rounded-lg text-sm hover:bg-zinc-700">
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
 
       {error && (
         <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 text-red-400 text-sm">
