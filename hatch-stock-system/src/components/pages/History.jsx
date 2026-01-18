@@ -1,9 +1,14 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useStock } from '../../context/StockContext';
 
 export default function History() {
-  const { data } = useStock();
+  const { data, loadRemovalHistory } = useStock();
   const [tab, setTab] = useState('removals');
+
+  // Load removal history on mount
+  useEffect(() => {
+    loadRemovalHistory();
+  }, [loadRemovalHistory]);
 
   const getWarehouseName = (id) => data.warehouses.find(w => w.id === id)?.name || id;
   const getLocationName = (id) => data.locations.find(l => l.id === id)?.name || id;
@@ -49,25 +54,32 @@ export default function History() {
               {data.removals.length === 0 ? (
                 <tr><td colSpan={6} className="px-4 py-8 text-center text-zinc-600">No removals yet</td></tr>
               ) : (
-                data.removals.slice().reverse().map((r, i) => (
-                  <tr key={i} className="border-b border-zinc-800/50">
-                    <td className="px-4 py-3 text-zinc-500 text-xs">{new Date(r.timestamp).toLocaleDateString('en-GB')}</td>
-                    <td className="px-4 py-3 text-zinc-200">{getProductName(r.sku)}</td>
-                    <td className="text-right px-4 py-3 text-red-400">-{r.quantity}</td>
-                    <td className="px-4 py-3 text-zinc-400 text-xs">
-                      {getWarehouseName(r.fromLocation)} → {r.routeName || getRouteName(r.toLocation)}
-                      {r.notes && <div className="text-zinc-600 mt-0.5">{r.notes}</div>}
-                    </td>
-                    <td className="px-4 py-3 text-zinc-500">{r.takenBy}</td>
-                    <td className="px-4 py-3">
-                      {r.isAdhoc ? (
-                        <span className="text-xs bg-purple-500/20 text-purple-400 px-2 py-0.5 rounded">Ad-hoc</span>
-                      ) : (
-                        <span className="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded">Restock</span>
-                      )}
-                    </td>
-                  </tr>
-                ))
+                data.removals.slice().reverse().flatMap((r, i) => {
+                  // Handle new format with items array
+                  const items = r.items || [{ sku: r.sku, quantity: r.quantity }];
+                  const timestamp = r.createdAt || r.timestamp;
+                  const fromWarehouse = r.warehouseId || r.fromLocation;
+
+                  return items.map((item, j) => (
+                    <tr key={`${i}-${j}`} className="border-b border-zinc-800/50">
+                      <td className="px-4 py-3 text-zinc-500 text-xs">{new Date(timestamp).toLocaleDateString('en-GB')}</td>
+                      <td className="px-4 py-3 text-zinc-200">{getProductName(item.sku)}</td>
+                      <td className="text-right px-4 py-3 text-red-400">-{item.quantity}</td>
+                      <td className="px-4 py-3 text-zinc-400 text-xs">
+                        {getWarehouseName(fromWarehouse)} → {r.routeName || getRouteName(r.routeId || r.toLocation)}
+                        {r.notes && j === 0 && <div className="text-zinc-600 mt-0.5">{r.notes}</div>}
+                      </td>
+                      <td className="px-4 py-3 text-zinc-500">{r.takenBy}</td>
+                      <td className="px-4 py-3">
+                        {r.isAdhoc ? (
+                          <span className="text-xs bg-purple-500/20 text-purple-400 px-2 py-0.5 rounded">Ad-hoc</span>
+                        ) : (
+                          <span className="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded">Restock</span>
+                        )}
+                      </td>
+                    </tr>
+                  ));
+                })
               )}
             </tbody>
           </table>
