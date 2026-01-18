@@ -19,6 +19,10 @@ export default function Inventory() {
     unitCost: ''
   });
 
+  // Edit Stock states
+  const [editingStock, setEditingStock] = useState(null); // { warehouseId, sku, currentQty }
+  const [editStockQty, setEditStockQty] = useState('');
+
   // CSV Upload states
   const [showCsvUpload, setShowCsvUpload] = useState(false);
   const [csvProcessing, setCsvProcessing] = useState(false);
@@ -121,13 +125,39 @@ export default function Inventory() {
         });
       }
 
-      // Update stock
-      const currentQty = (data.stock[addStockForm.warehouseId] || {})[addStockForm.sku] || 0;
-      await updateWarehouseStock(addStockForm.warehouseId, addStockForm.sku, currentQty + qty);
+      // Update stock (pass qty as delta, not absolute value)
+      await updateWarehouseStock(addStockForm.warehouseId, addStockForm.sku, qty, true);
 
       setShowAddStock(false);
     } catch (err) {
       setError(err.message || 'Failed to add stock');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Edit stock handler
+  const openEditStock = (warehouseId, sku, currentQty) => {
+    setEditingStock({ warehouseId, sku, currentQty });
+    setEditStockQty(currentQty.toString());
+    setError(null);
+  };
+
+  const handleEditStockSubmit = async () => {
+    if (!editingStock) return;
+
+    const newQty = parseInt(editStockQty) || 0;
+    if (newQty < 0) return;
+
+    setLoading(true);
+    setError(null);
+
+    try {
+      // Set absolute quantity (isDelta = false)
+      await updateWarehouseStock(editingStock.warehouseId, editingStock.sku, newQty, false);
+      setEditingStock(null);
+    } catch (err) {
+      setError(err.message || 'Failed to update stock');
     } finally {
       setLoading(false);
     }
@@ -397,7 +427,7 @@ export default function Inventory() {
       {showAddStock && (
         <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-6 space-y-4">
           <div className="flex items-center justify-between">
-            <h3 className="font-medium text-zinc-200">Add Stock Manually</h3>
+            <h3 className="font-medium text-zinc-200">Add Stock</h3>
             <button onClick={() => setShowAddStock(false)} className="text-zinc-500 hover:text-zinc-300 text-xl">x</button>
           </div>
 
@@ -413,52 +443,57 @@ export default function Inventory() {
               </select>
             </div>
             <div>
-              <label className="block text-xs text-zinc-500 mb-1">SKU *</label>
-              <input
-                type="text"
+              <label className="block text-xs text-zinc-500 mb-1">Product *</label>
+              <select
                 value={addStockForm.sku}
                 onChange={e => {
                   const sku = e.target.value;
-                  const existing = data.products.find(p => p.sku === sku);
-                  setAddStockForm({
-                    ...addStockForm,
-                    sku,
-                    productName: existing?.name || addStockForm.productName,
-                    category: existing?.category || addStockForm.category,
-                    unitCost: existing?.unitCost?.toString() || addStockForm.unitCost
-                  });
+                  if (sku === '__new__') {
+                    setAddStockForm({ ...addStockForm, sku: '', productName: '', category: 'Other', unitCost: '' });
+                  } else {
+                    const existing = data.products.find(p => p.sku === sku);
+                    setAddStockForm({
+                      ...addStockForm,
+                      sku,
+                      productName: existing?.name || '',
+                      category: existing?.category || 'Other',
+                      unitCost: existing?.unitCost?.toString() || ''
+                    });
+                  }
                 }}
-                placeholder="e.g., PROD-001"
                 className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm"
-                list="existing-skus"
-              />
-              <datalist id="existing-skus">
-                {data.products.map(p => <option key={p.sku} value={p.sku}>{p.name}</option>)}
-              </datalist>
+              >
+                <option value="">Select a product...</option>
+                {data.products.map(p => (
+                  <option key={p.sku} value={p.sku}>{p.name} ({p.sku})</option>
+                ))}
+                <option value="__new__">+ Add New Product</option>
+              </select>
             </div>
-            <div>
-              <label className="block text-xs text-zinc-500 mb-1">Product Name {!data.products.find(p => p.sku === addStockForm.sku) && '*'}</label>
-              <input
-                type="text"
-                value={addStockForm.productName}
-                onChange={e => setAddStockForm({ ...addStockForm, productName: e.target.value })}
-                placeholder="Product name"
-                disabled={!!data.products.find(p => p.sku === addStockForm.sku)}
-                className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm disabled:opacity-50"
-              />
-            </div>
-            <div>
-              <label className="block text-xs text-zinc-500 mb-1">Quantity *</label>
-              <input
-                type="number"
-                value={addStockForm.quantity}
-                onChange={e => setAddStockForm({ ...addStockForm, quantity: e.target.value })}
-                placeholder="0"
-                className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm"
-              />
-            </div>
-            {!data.products.find(p => p.sku === addStockForm.sku) && (
+
+            {/* New product fields */}
+            {addStockForm.sku === '' && (
               <>
+                <div>
+                  <label className="block text-xs text-zinc-500 mb-1">New SKU *</label>
+                  <input
+                    type="text"
+                    value={addStockForm.sku}
+                    onChange={e => setAddStockForm({ ...addStockForm, sku: e.target.value })}
+                    placeholder="e.g., PROD-001"
+                    className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-zinc-500 mb-1">Product Name *</label>
+                  <input
+                    type="text"
+                    value={addStockForm.productName}
+                    onChange={e => setAddStockForm({ ...addStockForm, productName: e.target.value })}
+                    placeholder="Product name"
+                    className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm"
+                  />
+                </div>
                 <div>
                   <label className="block text-xs text-zinc-500 mb-1">Category</label>
                   <select
@@ -486,12 +521,28 @@ export default function Inventory() {
                 </div>
               </>
             )}
+
+            <div>
+              <label className="block text-xs text-zinc-500 mb-1">Quantity to Add *</label>
+              <input
+                type="number"
+                value={addStockForm.quantity}
+                onChange={e => setAddStockForm({ ...addStockForm, quantity: e.target.value })}
+                placeholder="0"
+                className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm"
+              />
+            </div>
           </div>
 
           {addStockForm.sku && data.products.find(p => p.sku === addStockForm.sku) && (
             <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-3">
               <p className="text-emerald-400 text-sm">
-                Existing product found: <strong>{data.products.find(p => p.sku === addStockForm.sku)?.name}</strong>
+                Adding to existing product: <strong>{data.products.find(p => p.sku === addStockForm.sku)?.name}</strong>
+                {addStockForm.warehouseId && (
+                  <span className="text-zinc-400 ml-2">
+                    (Current stock: {(data.stock[addStockForm.warehouseId] || {})[addStockForm.sku] || 0})
+                  </span>
+                )}
               </p>
             </div>
           )}
@@ -506,6 +557,66 @@ export default function Inventory() {
             </button>
             <button
               onClick={() => setShowAddStock(false)}
+              className="px-4 py-2 bg-zinc-700 text-zinc-300 rounded text-sm hover:bg-zinc-600"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Stock Modal */}
+      {editingStock && (
+        <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-6 space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="font-medium text-zinc-200">Adjust Stock Level</h3>
+            <button onClick={() => setEditingStock(null)} className="text-zinc-500 hover:text-zinc-300 text-xl">x</button>
+          </div>
+
+          <div className="bg-zinc-800/50 rounded-lg p-4">
+            <p className="text-zinc-400 text-sm">
+              <span className="text-zinc-500">Product:</span>{' '}
+              <span className="text-zinc-200">{data.products.find(p => p.sku === editingStock.sku)?.name || editingStock.sku}</span>
+            </p>
+            <p className="text-zinc-400 text-sm mt-1">
+              <span className="text-zinc-500">Warehouse:</span>{' '}
+              <span className="text-zinc-200">{data.warehouses.find(w => w.id === editingStock.warehouseId)?.name}</span>
+            </p>
+            <p className="text-zinc-400 text-sm mt-1">
+              <span className="text-zinc-500">Current Stock:</span>{' '}
+              <span className="text-emerald-400 font-medium">{editingStock.currentQty}</span>
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-xs text-zinc-500 mb-1">New Quantity</label>
+            <input
+              type="number"
+              value={editStockQty}
+              onChange={e => setEditStockQty(e.target.value)}
+              placeholder="0"
+              min="0"
+              className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm"
+            />
+            {editStockQty && parseInt(editStockQty) !== editingStock.currentQty && (
+              <p className="text-xs mt-1 text-zinc-500">
+                Change: <span className={parseInt(editStockQty) > editingStock.currentQty ? 'text-emerald-400' : 'text-red-400'}>
+                  {parseInt(editStockQty) > editingStock.currentQty ? '+' : ''}{parseInt(editStockQty) - editingStock.currentQty}
+                </span>
+              </p>
+            )}
+          </div>
+
+          <div className="flex gap-3 pt-4 border-t border-zinc-800">
+            <button
+              onClick={handleEditStockSubmit}
+              disabled={editStockQty === '' || parseInt(editStockQty) < 0 || loading}
+              className="px-4 py-2 bg-emerald-600 text-white rounded text-sm font-medium hover:bg-emerald-500 disabled:opacity-50"
+            >
+              {loading ? 'Saving...' : 'Save'}
+            </button>
+            <button
+              onClick={() => setEditingStock(null)}
               className="px-4 py-2 bg-zinc-700 text-zinc-300 rounded text-sm hover:bg-zinc-600"
             >
               Cancel
@@ -793,12 +904,13 @@ export default function Inventory() {
                     <th className="text-right px-4 py-3 text-zinc-500 font-medium">Quantity</th>
                     <th className="text-center px-4 py-3 text-zinc-500 font-medium">Earliest Expiry</th>
                     <th className="text-right px-4 py-3 text-zinc-500 font-medium">Value</th>
+                    <th className="text-right px-4 py-3 text-zinc-500 font-medium"></th>
                   </tr>
                 </thead>
                 <tbody>
                   {Object.keys(getStockForWarehouse(selectedWarehouse)).length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="px-4 py-8 text-center text-zinc-600">
+                      <td colSpan={6} className="px-4 py-8 text-center text-zinc-600">
                         No stock in this warehouse. Use "Add Stock" or "Upload CSV" to add inventory.
                       </td>
                     </tr>
@@ -823,6 +935,14 @@ export default function Inventory() {
                             )}
                           </td>
                           <td className="text-right px-4 py-3 text-zinc-400">{value.toFixed(2)}</td>
+                          <td className="text-right px-4 py-3">
+                            <button
+                              onClick={() => openEditStock(selectedWarehouse, sku, qty)}
+                              className="text-emerald-400 hover:text-emerald-300 text-sm"
+                            >
+                              Edit
+                            </button>
+                          </td>
                         </tr>
                       );
                     })

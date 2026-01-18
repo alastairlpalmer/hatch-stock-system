@@ -217,11 +217,12 @@ export function StockProvider({ children }) {
       return;
     }
     await inventoryService.updateWarehouseStock(warehouseId, sku, quantity, isDelta);
-    // Refresh stock data
-    const stockData = await inventoryService.getWarehouseStock(warehouseId);
+    // Refresh stock data - getWarehouseStock returns { warehouseId: { sku: qty } }
+    const allStockData = await inventoryService.getWarehouseStock(warehouseId);
+    const stockForWarehouse = allStockData[warehouseId] || {};
     setData(prev => ({
       ...prev,
-      stock: { ...prev.stock, [warehouseId]: stockData },
+      stock: { ...prev.stock, [warehouseId]: stockForWarehouse },
     }));
   }, [data, isOfflineMode, saveData]);
 
