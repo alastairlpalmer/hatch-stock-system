@@ -23,7 +23,8 @@ export default function RemoveStock() {
   const getRouteLocations = () => {
     if (!selectedRoute) return [];
     if (isAdhocRoute) return [];
-    return selectedRoute.locations.map(locId => data.locations.find(l => l.id === locId)).filter(Boolean);
+    const locationIds = selectedRoute.locationIds || [];
+    return locationIds.map(locId => data.locations.find(l => l.id === locId)).filter(Boolean);
   };
 
   // Get assigned products for all locations in route
@@ -193,7 +194,7 @@ export default function RemoveStock() {
               <option value="">Select route</option>
               <optgroup label="Restock Routes">
                 {routes.filter(r => r.type !== 'adhoc').map(r => (
-                  <option key={r.id} value={r.id}>{r.name} ({r.locations?.length || 0} locations)</option>
+                  <option key={r.id} value={r.id}>{r.name} ({r.locationIds?.length || 0} locations)</option>
                 ))}
               </optgroup>
               <optgroup label="Ad-hoc">
