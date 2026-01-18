@@ -133,7 +133,7 @@ export default function RemoveStock() {
         }));
 
       await recordStockRemoval({
-        fromWarehouse: form.fromWarehouse,
+        warehouseId: form.fromWarehouse,
         routeId: form.routeId,
         routeName: selectedRoute?.name,
         targetLocation: isAdhocRoute ? null : targetLocation,
