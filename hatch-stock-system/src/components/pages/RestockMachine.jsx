@@ -37,11 +37,11 @@ export default function RestockMachine() {
     if (!selectedLocation) return false;
     const recentCheck = stockChecks
       .filter(sc => sc.locationId === selectedLocation)
-      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))[0];
+      .sort((a, b) => new Date(b.createdAt || b.timestamp) - new Date(a.createdAt || a.timestamp))[0];
 
     if (!recentCheck) return false;
 
-    const hoursSince = (Date.now() - new Date(recentCheck.timestamp).getTime()) / (1000 * 60 * 60);
+    const hoursSince = (Date.now() - new Date(recentCheck.createdAt || recentCheck.timestamp).getTime()) / (1000 * 60 * 60);
     return hoursSince < 24;
   };
 
@@ -89,7 +89,7 @@ export default function RestockMachine() {
         id: checkId,
         locationId: selectedLocation,
         locationName: location?.name,
-        checkedBy: restockerName,
+        performedBy: restockerName,
         items
       });
 
@@ -161,10 +161,10 @@ export default function RestockMachine() {
       await recordRestock({
         locationId: selectedLocation,
         locationName: location?.name,
-        restockerName,
+        performedBy: restockerName,
         stockCheckId,
         items: validItems,
-        image: uploadedImage,
+        photoUrl: uploadedImage,
         imageOverride: override && !uploadedImage
       });
 
@@ -568,19 +568,19 @@ export default function RestockMachine() {
                 </div>
                 <div>
                   <span className="text-zinc-500">Restocked by:</span>
-                  <span className="text-zinc-200 ml-2">{viewingRestock.restockerName}</span>
+                  <span className="text-zinc-200 ml-2">{viewingRestock.performedBy || viewingRestock.restockerName}</span>
                 </div>
                 <div>
                   <span className="text-zinc-500">Date:</span>
                   <span className="text-zinc-200 ml-2">
-                    {new Date(viewingRestock.timestamp).toLocaleString('en-GB')}
+                    {new Date(viewingRestock.createdAt || viewingRestock.timestamp).toLocaleString('en-GB')}
                   </span>
                 </div>
                 <div>
                   <span className="text-zinc-500">Photo:</span>
                   {viewingRestock.imageOverride ? (
                     <span className="text-emerald-400 ml-2">Overridden (no photo)</span>
-                  ) : viewingRestock.image ? (
+                  ) : (viewingRestock.photoUrl || viewingRestock.image) ? (
                     <span className="text-emerald-400 ml-2">Included</span>
                   ) : (
                     <span className="text-zinc-600 ml-2">None</span>
@@ -608,11 +608,11 @@ export default function RestockMachine() {
                 </table>
               </div>
 
-              {viewingRestock.image && (
+              {(viewingRestock.photoUrl || viewingRestock.image) && (
                 <div className="border-t border-zinc-800 pt-4">
                   <h4 className="text-sm font-medium text-zinc-400 mb-3">Machine Photo</h4>
                   <img
-                    src={viewingRestock.image}
+                    src={viewingRestock.photoUrl || viewingRestock.image}
                     alt="Restocked machine"
                     className="max-w-full max-h-96 rounded border border-zinc-700"
                   />
@@ -643,20 +643,20 @@ export default function RestockMachine() {
                     machineRestocks.slice().reverse().map(restock => (
                       <tr key={restock.id} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
                         <td className="px-4 py-3 text-zinc-400 text-xs">
-                          {new Date(restock.timestamp).toLocaleDateString('en-GB')}
+                          {new Date(restock.createdAt || restock.timestamp).toLocaleDateString('en-GB')}
                           <div className="text-zinc-600">
-                            {new Date(restock.timestamp).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
+                            {new Date(restock.createdAt || restock.timestamp).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
                           </div>
                         </td>
                         <td className="px-4 py-3 text-zinc-200">{restock.locationName}</td>
-                        <td className="px-4 py-3 text-zinc-400">{restock.restockerName}</td>
+                        <td className="px-4 py-3 text-zinc-400">{restock.performedBy || restock.restockerName}</td>
                         <td className="text-right px-4 py-3 text-emerald-400">
                           +{restock.items.reduce((acc, i) => acc + i.quantity, 0)}
                         </td>
                         <td className="text-center px-4 py-3">
                           {restock.imageOverride ? (
                             <span className="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded">Override</span>
-                          ) : restock.image ? (
+                          ) : (restock.photoUrl || restock.image) ? (
                             <span className="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded">OK</span>
                           ) : (
                             <span className="text-zinc-600">-</span>
@@ -704,13 +704,13 @@ export default function RestockMachine() {
                 stockChecks.slice().reverse().map(check => (
                   <tr key={check.id} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
                     <td className="px-4 py-3 text-zinc-400 text-xs">
-                      {new Date(check.timestamp).toLocaleDateString('en-GB')}
+                      {new Date(check.createdAt || check.timestamp).toLocaleDateString('en-GB')}
                       <div className="text-zinc-600">
-                        {new Date(check.timestamp).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
+                        {new Date(check.createdAt || check.timestamp).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
                       </div>
                     </td>
                     <td className="px-4 py-3 text-zinc-200">{check.locationName}</td>
-                    <td className="px-4 py-3 text-zinc-400">{check.checkedBy}</td>
+                    <td className="px-4 py-3 text-zinc-400">{check.performedBy || check.checkedBy}</td>
                     <td className="text-right px-4 py-3 text-zinc-300">{check.items.length}</td>
                     <td className="text-right px-4 py-3">
                       <span className={`${check.totalVariance === 0 ? 'text-emerald-400' : 'text-emerald-400'}`}>

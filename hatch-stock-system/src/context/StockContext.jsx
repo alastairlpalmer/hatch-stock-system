@@ -54,7 +54,7 @@ export function StockProvider({ children }) {
   const initializeData = async () => {
     try {
       // Try to load from backend first
-      const [products, warehouses, locations, suppliers, routes, orders, sales, salesImports, warehouseStock] = await Promise.all([
+      const [products, warehouses, locations, suppliers, routes, orders, sales, salesImports, warehouseStock, removals] = await Promise.all([
         productsService.getAll(),
         warehousesService.getAll(),
         locationsService.getAll(),
@@ -64,20 +64,28 @@ export function StockProvider({ children }) {
         salesService.getAll(),
         salesService.getImportHistory(),
         inventoryService.getWarehouseStock(),
+        inventoryService.getRemovalHistory(),
       ]);
 
-      // Load location stock and config for each location
+      // Load location stock, config, and history for each location
       const locationStock = {};
       const locationConfig = {};
+      let allStockChecks = [];
+      let allRestocks = [];
 
       await Promise.all(locations.map(async (loc) => {
         try {
-          const [stock, config] = await Promise.all([
+          const [stock, config, stockChecks, restocks] = await Promise.all([
             inventoryService.getLocationStock(loc.id),
             inventoryService.getLocationConfig(loc.id),
+            inventoryService.getStockCheckHistory(loc.id),
+            inventoryService.getRestockHistory(loc.id),
           ]);
           locationStock[loc.id] = stock;
           locationConfig[loc.id] = config;
+          // Add location info to history records for display
+          allStockChecks = [...allStockChecks, ...stockChecks.map(sc => ({ ...sc, locationId: loc.id, locationName: loc.name }))];
+          allRestocks = [...allRestocks, ...restocks.map(r => ({ ...r, locationId: loc.id, locationName: loc.name }))];
         } catch (e) {
           console.log(`Failed to load stock/config for location ${loc.id}`);
         }
@@ -96,6 +104,9 @@ export function StockProvider({ children }) {
         stock: warehouseStock,
         locationStock,
         locationConfig,
+        removals,
+        stockCheckHistory: allStockChecks,
+        restockHistory: allRestocks,
       }));
 
       setSyncStatus({ status: 'connected', lastSaved: new Date() });
