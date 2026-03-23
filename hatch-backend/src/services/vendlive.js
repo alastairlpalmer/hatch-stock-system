@@ -79,14 +79,14 @@ export async function getOrderSales(config, { startId, startDate, endDate, pageS
   const client = createClient(config);
 
   const params = new URLSearchParams();
-  params.set('accountId', config.accountId);
-  params.set('pageSize', String(pageSize));
-  if (startId) params.set('startId', String(startId));
-  if (startDate) params.set('startDate', startDate);
-  if (endDate) params.set('endDate', endDate);
+  if (pageSize) params.set('page_size', String(pageSize));
+  if (startId) params.set('start_id', String(startId));
+  if (startDate) params.set('start_date', startDate);
+  if (endDate) params.set('end_date', endDate);
 
   let allResults = [];
-  let url = `/order-sales/?${params.toString()}`;
+  const queryString = params.toString();
+  let url = `/order-sales/${queryString ? '?' + queryString : ''}`;
   let pageCount = 0;
   const MAX_PAGES = 100; // Safety limit
 
