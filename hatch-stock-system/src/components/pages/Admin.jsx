@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useStock } from '../../context/StockContext';
+import AdminVendlive from './AdminVendlive';
 
 export default function Admin() {
   const [adminTab, setAdminTab] = useState('products');
@@ -15,6 +16,7 @@ export default function Admin() {
           { id: 'locations', label: 'Locations' },
           { id: 'routes', label: 'Restock Routes' },
           { id: 'suppliers', label: 'Suppliers' },
+          { id: 'vendlive', label: 'VendLive' },
           { id: 'data', label: 'Data Management' }
         ].map(tab => (
           <button
@@ -34,6 +36,7 @@ export default function Admin() {
       {adminTab === 'locations' && <AdminLocations />}
       {adminTab === 'routes' && <AdminRoutes />}
       {adminTab === 'suppliers' && <AdminSuppliers />}
+      {adminTab === 'vendlive' && <AdminVendlive />}
       {adminTab === 'data' && <AdminData />}
     </div>
   );

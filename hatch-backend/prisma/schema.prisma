@@ -78,11 +78,12 @@ model Location {
   createdAt DateTime @default(now()) @map("created_at")
 
   // Relations
-  stock         LocationStock[]
-  configs       LocationConfig[]
-  restocks      RestockRecord[]
-  stockChecks   StockCheck[]
-  assignedItems LocationAssignment[]
+  stock           LocationStock[]
+  configs         LocationConfig[]
+  restocks        RestockRecord[]
+  stockChecks     StockCheck[]
+  assignedItems   LocationAssignment[]
+  machineMappings VendliveMachineMapping[]
 
   @@map("locations")
 }
@@ -263,6 +264,19 @@ model Sale {
   timestamp     DateTime
   importedAt    DateTime @default(now()) @map("imported_at")
 
+  // VendLive integration fields
+  vendliveOrderSaleId   Int?     @unique @map("vendlive_order_sale_id")
+  vendliveProductSaleId Int?     @map("vendlive_product_sale_id")
+  vendliveMachineId     Int?     @map("vendlive_machine_id")
+  vendStatus            String?  @map("vend_status")
+  discountValue         Float?   @map("discount_value")
+  vatRate               Float?   @map("vat_rate")
+  vatAmount             Float?   @map("vat_amount")
+  promotionId           Int?     @map("promotion_id")
+  voucherCode           String?  @map("voucher_code")
+  isRefunded            Boolean  @default(false) @map("is_refunded")
+  syncSource            String?  @map("sync_source") // 'webhook' | 'poll' | 'csv_import'
+
   product Product? @relation(fields: [sku], references: [sku])
 
   @@map("sales")
@@ -276,6 +290,52 @@ model SalesImport {
   importedAt   DateTime @default(now()) @map("imported_at")
 
   @@map("sales_imports")
+}
+
+// ============ VENDLIVE INTEGRATION ============
+
+model VendliveConfig {
+  id                 String    @id @default("default")
+  apiToken           String?   @map("api_token")
+  accountId          String?   @map("account_id")
+  baseUrl            String    @default("https://vendlive.com/api/2.0") @map("base_url")
+  webhookSecret      String?   @map("webhook_secret")
+  salesSyncEnabled   Boolean   @default(false) @map("sales_sync_enabled")
+  pollIntervalMin    Int       @default(15) @map("poll_interval_min")
+  autoCreateProducts Boolean   @default(true) @map("auto_create_products")
+  lastPollSaleId     Int?      @map("last_poll_sale_id")
+  lastPollAt         DateTime? @map("last_poll_at")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  @@map("vendlive_config")
+}
+
+model VendliveMachineMapping {
+  id                String   @id @default(uuid())
+  vendliveMachineId Int      @unique @map("vendlive_machine_id")
+  machineName       String   @map("machine_name")
+  locationId        String?  @map("location_id")
+  autoCreated       Boolean  @default(false) @map("auto_created")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  location Location? @relation(fields: [locationId], references: [id])
+
+  @@map("vendlive_machine_mappings")
+}
+
+model VendliveSyncLog {
+  id           String   @id @default(uuid())
+  syncType     String   @map("sync_type") // 'webhook' | 'poll' | 'manual'
+  status       String   // 'success' | 'error' | 'partial'
+  salesCreated Int      @default(0) @map("sales_created")
+  salesSkipped Int      @default(0) @map("sales_skipped")
+  salesErrored Int      @default(0) @map("sales_errored")
+  errorMessage String?  @map("error_message")
+  metadata     Json?
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@map("vendlive_sync_logs")
 }
 
 // ============ USERS (Optional Auth) ============

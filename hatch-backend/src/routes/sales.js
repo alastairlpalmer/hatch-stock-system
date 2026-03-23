@@ -91,6 +91,7 @@ router.post('/import', asyncHandler(async (req, res) => {
         locationName: sale.locationName,
         machineName: sale.machineName,
         timestamp: new Date(sale.timestamp),
+        syncSource: 'csv_import',
       },
     });
 

@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useStock } from '../../context/StockContext';
+import { vendliveService } from '../../services/vendlive.service';
 
 export default function SalesOverview() {
   const { data, importSales, bulkImportProducts, updateLocationStock } = useStock();
@@ -7,6 +8,12 @@ export default function SalesOverview() {
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState(null);
   const [dateFilter, setDateFilter] = useState({ start: '', end: '' });
+
+  // VendLive sync status
+  const [syncStatus, setSyncStatus] = useState(null);
+  useEffect(() => {
+    vendliveService.getSyncStatus().then(setSyncStatus).catch(() => {});
+  }, []);
 
   // Stock sync state
   const [showStockSync, setShowStockSync] = useState(false);
@@ -380,9 +387,38 @@ export default function SalesOverview() {
       <div className="flex items-center justify-between flex-wrap gap-4">
         <div>
           <h2 className="text-xl font-semibold">Sales Overview</h2>
-          <p className="text-zinc-500 text-sm mt-1">Track vending machine sales from Vendlive exports</p>
+          <p className="text-zinc-500 text-sm mt-1">Track vending machine sales</p>
         </div>
-        <div className="flex items-center gap-3">
+      </div>
+
+      {/* VendLive Sync Status Bar */}
+      {syncStatus && (
+        <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg px-4 py-3 flex items-center justify-between flex-wrap gap-3">
+          <div className="flex items-center gap-3">
+            <div className={`w-2 h-2 rounded-full ${syncStatus.active ? 'bg-emerald-400 animate-pulse' : syncStatus.connected ? 'bg-zinc-500' : 'bg-zinc-700'}`} />
+            <span className="text-sm text-zinc-300">
+              {syncStatus.active ? 'VendLive Sync Active' : syncStatus.connected ? 'VendLive Sync Inactive' : 'VendLive Not Configured'}
+            </span>
+          </div>
+          <div className="flex items-center gap-6 text-sm">
+            {syncStatus.lastSaleAt && (
+              <span className="text-zinc-500">Last sale: {new Date(syncStatus.lastSaleAt).toLocaleString('en-GB')}</span>
+            )}
+            {syncStatus.active && (
+              <span className="text-emerald-400">
+                Today: {syncStatus.todaySalesCount} sales / £{(syncStatus.todaySalesRevenue || 0).toFixed(2)}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Manual CSV Import (Legacy) */}
+      <details className="bg-zinc-900/50 border border-zinc-800 rounded-lg">
+        <summary className="px-4 py-3 text-sm text-zinc-400 cursor-pointer hover:text-zinc-200">
+          Manual CSV Import (Legacy)
+        </summary>
+        <div className="px-4 pb-4 pt-1 flex items-center gap-3">
           <label className={`px-4 py-2 rounded text-sm font-medium cursor-pointer transition-colors ${
             importing ? 'bg-zinc-700 text-zinc-400' : 'bg-emerald-600 text-white hover:bg-emerald-500'
           }`}>
@@ -396,7 +432,7 @@ export default function SalesOverview() {
             />
           </label>
         </div>
-      </div>
+      </details>
 
       {importResult && (
         <div className={`p-4 rounded-lg ${importResult.success ? 'bg-emerald-900/20 border border-emerald-900/50' : 'bg-red-900/20 border border-red-900/50'}`}>
@@ -725,6 +761,7 @@ export default function SalesOverview() {
                 <th className="text-right px-4 py-3 text-zinc-500 font-medium">Price</th>
                 <th className="text-right px-4 py-3 text-zinc-500 font-medium">Charged</th>
                 <th className="text-left px-4 py-3 text-zinc-500 font-medium">Type</th>
+                <th className="text-left px-4 py-3 text-zinc-500 font-medium">Source</th>
               </tr>
             </thead>
             <tbody>
@@ -745,6 +782,13 @@ export default function SalesOverview() {
                         <span className="text-xs bg-purple-500/20 text-purple-400 px-2 py-0.5 rounded">Free</span>
                       ) : (
                         <span className="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded">Paid</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      {sale.syncSource === 'webhook' || sale.syncSource === 'poll' ? (
+                        <span className="text-xs bg-teal-500/20 text-teal-400 px-2 py-0.5 rounded">VL</span>
+                      ) : (
+                        <span className="text-xs bg-zinc-700 text-zinc-400 px-2 py-0.5 rounded">CSV</span>
                       )}
                     </td>
                   </tr>

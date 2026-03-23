@@ -19,11 +19,15 @@ import ordersRouter from './routes/orders.js';
 import suppliersRouter from './routes/suppliers.js';
 import routesRouter from './routes/routes.js';
 import salesRouter from './routes/sales.js';
+import vendliveRouter from './routes/vendlive.js';
 import authRouter from './routes/auth.js';
 
 // Import middleware
 import { errorHandler } from './middleware/errorHandler.js';
 import { authMiddleware } from './middleware/auth.js';
+
+// Import scheduler
+import { startScheduler } from './scheduler.js';
 
 const app = express();
 const PORT = process.env.PORT || 8000;
@@ -110,6 +114,7 @@ app.use('/api/orders', ordersRouter);
 app.use('/api/suppliers', suppliersRouter);
 app.use('/api/routes', routesRouter);
 app.use('/api/sales', salesRouter);
+app.use('/api/vendlive', vendliveRouter);
 
 // 404 handler
 app.use((req, res) => {
@@ -142,6 +147,11 @@ const startServer = async () => {
 ║                                                           ║
 ╚═══════════════════════════════════════════════════════════╝
     `);
+
+    // Start VendLive poll scheduler
+    if (dbConnected) {
+      startScheduler();
+    }
   });
 };
 

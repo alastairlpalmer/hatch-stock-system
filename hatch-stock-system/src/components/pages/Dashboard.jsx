@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { useStock } from '../../context/StockContext';
+import { vendliveService } from '../../services/vendlive.service';
 
 function StatCard({ label, value, accent }) {
   const colors = {
@@ -61,6 +62,12 @@ export default function Dashboard() {
   const expiryAlertCount = expiredBatches.length + criticalBatches.length;
 
   // Find low stock at locations
+  // VendLive status
+  const [vlStatus, setVlStatus] = useState(null);
+  useEffect(() => {
+    vendliveService.getSyncStatus().then(setVlStatus).catch(() => {});
+  }, []);
+
   const lowStockLocations = data.locations.map(loc => {
     const locStock = data.locationStock[loc.id] || {};
     const locConfig = data.locationConfig[loc.id] || {};
@@ -83,6 +90,20 @@ export default function Dashboard() {
         <StatCard label="30d Profit" value={`£${totalSalesProfit.toFixed(2)}`} accent="teal" />
         <StatCard label="Expiry Alerts" value={expiryAlertCount} accent={expiryAlertCount > 0 ? 'red' : 'emerald'} />
       </div>
+
+      {vlStatus?.connected && (
+        <div className="flex items-center gap-2 text-sm">
+          <div className={`w-2 h-2 rounded-full ${vlStatus.active ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-500'}`} />
+          <span className="text-zinc-400">
+            VendLive {vlStatus.active ? 'Connected' : 'Inactive'}
+          </span>
+          {vlStatus.active && vlStatus.todaySalesCount > 0 && (
+            <span className="text-zinc-500 ml-2">
+              ({vlStatus.todaySalesCount} sales today)
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Expiry Alerts */}
       {(expiredBatches.length > 0 || criticalBatches.length > 0) && (
