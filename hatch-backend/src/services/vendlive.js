@@ -79,10 +79,11 @@ export async function getOrderSales(config, { startId, startDate, endDate, pageS
   const client = createClient(config);
 
   const params = new URLSearchParams();
-  if (pageSize) params.set('page_size', String(pageSize));
-  if (startId) params.set('start_id', String(startId));
-  if (startDate) params.set('start_date', startDate);
-  if (endDate) params.set('end_date', endDate);
+  if (config.accountId) params.set('accountId', config.accountId);
+  if (pageSize) params.set('pageSize', String(pageSize));
+  if (startId) params.set('startId', String(startId));
+  if (startDate) params.set('startDate', startDate);
+  if (endDate) params.set('endDate', endDate);
 
   let allResults = [];
   const queryString = params.toString();
