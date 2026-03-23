@@ -75,9 +75,10 @@ export async function getMachines(config) {
  * Fetch order sales with pagination support.
  * Returns all results across pages.
  */
-export async function getOrderSales(config, { startId, startDate, endDate, pageSize = 100 } = {}) {
+export async function getOrderSales(config, { startId, startDate, endDate, pageSize } = {}) {
   const client = createClient(config);
 
+  // Build query params - only include if explicitly provided
   const params = new URLSearchParams();
   if (config.accountId) params.set('accountId', config.accountId);
   if (pageSize) params.set('pageSize', String(pageSize));
@@ -87,28 +88,39 @@ export async function getOrderSales(config, { startId, startDate, endDate, pageS
 
   let allResults = [];
   const queryString = params.toString();
-  let url = `/order-sales/${queryString ? '?' + queryString : ''}`;
+  let url = queryString ? `/order-sales/?${queryString}` : '/order-sales/';
   let pageCount = 0;
   const MAX_PAGES = 100; // Safety limit
 
+  console.log(`VendLive polling: starting fetch from ${url}`);
+
   while (url && pageCount < MAX_PAGES) {
-    const data = await requestWithRetry(client, 'get', url);
-    const results = data?.results || data?.data || [];
-    if (Array.isArray(results)) {
-      allResults = allResults.concat(results);
-    }
-    url = data?.next || data?.links?.next || null;
-    // If next is a full URL, extract the path
-    if (url && url.startsWith('http')) {
-      try {
-        const parsed = new URL(url);
-        url = parsed.pathname + parsed.search;
-      } catch {
-        // If URL parsing fails, use as-is
+    try {
+      console.log(`VendLive polling: fetching page ${pageCount + 1} from ${url}`);
+      const data = await requestWithRetry(client, 'get', url);
+      const results = data?.results || data?.data || [];
+      console.log(`VendLive polling: page ${pageCount + 1} returned ${results.length} results (total so far: ${allResults.length + results.length})`);
+      if (Array.isArray(results)) {
+        allResults = allResults.concat(results);
       }
+      url = data?.next || null;
+      // If next is a full URL, extract the path
+      if (url && url.startsWith('http')) {
+        try {
+          const parsed = new URL(url);
+          url = parsed.pathname + parsed.search;
+        } catch {
+          // If URL parsing fails, use as-is
+        }
+      }
+      pageCount++;
+    } catch (err) {
+      console.error(`VendLive polling: error on page ${pageCount + 1}: ${err.response?.status} ${err.message}`);
+      console.error(`VendLive polling: URL was: ${url}`);
+      throw err;
     }
-    pageCount++;
   }
 
+  console.log(`VendLive polling: complete. ${allResults.length} total results across ${pageCount} pages`);
   return { results: allResults, pageCount };
 }
