@@ -16,7 +16,7 @@ function createClient(config) {
   return axios.create({
     baseURL: config.baseUrl || 'https://vendlive.com/api/2.0',
     headers: {
-      'Authorization': `Token ${token}`,
+      'Authorization': `${token}`,
       'Content-Type': 'application/json',
     },
     timeout: 30000,
