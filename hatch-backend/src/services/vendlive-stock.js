@@ -24,6 +24,8 @@ function aggregateChannelStock(channels) {
         sku,
         productName,
         costPrice,
+        category: product.category?.name || null,
+        salePrice: parseFloat(channel?.productPrice) || null,
         totalStock: 0,
         channelCount: 0,
         channels: [],
@@ -73,14 +75,52 @@ export async function syncMachineStock(vendliveMachineId, locationId, config, sy
     hatchStockMap[ls.sku] = { quantity: ls.quantity, unitCost: ls.product?.unitCost || 0 };
   }
 
-  // 3. Compare and calculate variance for each product
+  // 3. Bulk-check which products exist in Hatch
+  const allSkus = Object.keys(vendliveStock);
+  const existingProducts = await prisma.product.findMany({
+    where: { sku: { in: allSkus } },
+    select: { sku: true },
+  });
+  const existingSkuSet = new Set(existingProducts.map(p => p.sku));
+
+  // Auto-create missing products if enabled
+  const autoCreate = config.autoCreateProducts ?? false;
+  const missingSkus = allSkus.filter(sku => !existingSkuSet.has(sku));
+
+  if (missingSkus.length > 0 && autoCreate) {
+    for (const sku of missingSkus) {
+      const vl = vendliveStock[sku];
+      await prisma.product.create({
+        data: {
+          sku,
+          name: vl.productName,
+          category: vl.category || null,
+          unitCost: vl.costPrice || null,
+          salePrice: vl.salePrice || null,
+        },
+      }).catch(() => {}); // Ignore if race condition
+      existingSkuSet.add(sku);
+    }
+    console.log(`Stock sync: auto-created ${missingSkus.length} products`);
+  } else if (missingSkus.length > 0) {
+    console.log(`Stock sync: ${missingSkus.length} products not in Hatch (auto-create disabled): ${missingSkus.slice(0, 5).join(', ')}`);
+  }
+
+  // 4. Compare and calculate variance for each product
   const items = [];
   let totalVariance = 0;
   let varianceCost = 0;
   let productsUpdated = 0;
+  let productsSkipped = 0;
 
   // Process all products from VendLive
   for (const [sku, vl] of Object.entries(vendliveStock)) {
+    // Skip products that don't exist in Hatch
+    if (!existingSkuSet.has(sku)) {
+      productsSkipped++;
+      continue;
+    }
+
     const confirmed = Math.round(vl.totalStock); // VendLive's confirmed stock
     const expected = hatchStockMap[sku]?.quantity ?? 0; // Hatch's expected stock
     const variance = expected - confirmed; // Positive = shrinkage, negative = overage
@@ -94,7 +134,7 @@ export async function syncMachineStock(vendliveMachineId, locationId, config, sy
       confirmed,
       variance,
       unitCost,
-      varianceCost: variance > 0 ? cost : -cost, // Positive cost for shrinkage
+      varianceCost: variance > 0 ? cost : -cost,
     });
 
     if (variance !== 0) {
@@ -102,7 +142,7 @@ export async function syncMachineStock(vendliveMachineId, locationId, config, sy
       varianceCost += variance > 0 ? cost : -cost;
     }
 
-    // 4. Update LocationStock to match VendLive's confirmed quantity
+    // 5. Update LocationStock to match VendLive's confirmed quantity
     await prisma.locationStock.upsert({
       where: { locationId_sku: { locationId, sku } },
       update: { quantity: confirmed },
@@ -151,11 +191,12 @@ export async function syncMachineStock(vendliveMachineId, locationId, config, sy
     stockCheckId = stockCheck.id;
   }
 
-  console.log(`Stock sync: machine ${vendliveMachineId} complete. ${productsUpdated} products, variance: ${totalVariance} units, £${varianceCost.toFixed(2)}`);
+  console.log(`Stock sync: machine ${vendliveMachineId} complete. ${productsUpdated} updated, ${productsSkipped} skipped, variance: ${totalVariance} units, £${varianceCost.toFixed(2)}`);
 
   return {
     syncId: stockSync.id,
     productsUpdated,
+    productsSkipped,
     totalVariance,
     varianceCost,
     stockCheckId,
