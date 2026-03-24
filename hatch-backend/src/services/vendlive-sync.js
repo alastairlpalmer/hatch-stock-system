@@ -102,29 +102,16 @@ export async function processVendliveOrder(orderData, syncSource, config) {
         continue;
       }
 
-      // Idempotency check: look for existing sale with same order+product sale IDs
-      const existingSale = await prisma.sale.findFirst({
-        where: {
-          vendliveOrderSaleId: orderData.orderSaleId,
-          vendliveProductSaleId: item.productSaleId,
-        },
-      });
-
-      if (existingSale) {
-        result.skipped++;
-        continue;
-      }
-
       // Look up product by SKU (product_external_id)
       const sku = item.productExternalId;
       let product = await prisma.product.findUnique({ where: { sku } });
 
       if (!product && config?.autoCreateProducts) {
-        // Auto-create product
+        // Auto-create product with real name if available
         product = await prisma.product.create({
           data: {
             sku,
-            name: sku, // Will be updated when more data is available
+            name: item.productName || sku,
             unitCost: item.costPrice || null,
             salePrice: item.price || null,
           },
@@ -152,32 +139,41 @@ export async function processVendliveOrder(orderData, syncSource, config) {
       // Determine the charged amount — use totalPaid if discounted, otherwise price
       const charged = item.totalPaid > 0 ? item.totalPaid : item.price;
 
-      // Create Sale record
+      // Upsert Sale record — handles re-syncs gracefully
       const saleId = `vl-${orderData.orderSaleId}-${item.productSaleId}`;
-      await prisma.sale.create({
-        data: {
-          id: saleId,
-          sku: product.sku,
-          productName: product.name,
-          quantity: 1,
-          charged,
-          costPrice: item.costPrice || product.unitCost || null,
-          paymentMethod: null,
-          locationName,
-          machineName: orderData.machineName,
-          timestamp: new Date(item.timestamp || orderData.createdAt),
-          vendliveOrderSaleId: orderData.orderSaleId,
-          vendliveProductSaleId: item.productSaleId,
-          vendliveMachineId: item.machineId || null,
-          vendStatus: item.vendStatusName || null,
-          discountValue: item.discountValue || null,
-          vatRate: item.vatRate || null,
-          vatAmount: item.vatAmount || null,
-          promotionId: item.promotionId || null,
-          voucherCode: item.voucherCode || null,
-          isRefunded: item.isRefunded || false,
-          syncSource,
+      const saleData = {
+        id: saleId,
+        sku: product.sku,
+        productName: item.productName || product.name,
+        quantity: 1,
+        charged,
+        costPrice: item.costPrice || product.unitCost || null,
+        paymentMethod: null,
+        locationName,
+        machineName: orderData.machineName,
+        timestamp: new Date(item.timestamp || orderData.createdAt),
+        vendliveOrderSaleId: orderData.orderSaleId,
+        vendliveProductSaleId: item.productSaleId,
+        vendliveMachineId: item.machineId || null,
+        vendStatus: item.vendStatusName || null,
+        discountValue: item.discountValue || null,
+        vatRate: item.vatRate || null,
+        vatAmount: item.vatAmount || null,
+        promotionId: item.promotionId || null,
+        voucherCode: item.voucherCode || null,
+        isRefunded: item.isRefunded || false,
+        syncSource,
+      };
+
+      await prisma.sale.upsert({
+        where: {
+          vendliveOrderSaleId_vendliveProductSaleId: {
+            vendliveOrderSaleId: orderData.orderSaleId,
+            vendliveProductSaleId: item.productSaleId,
+          },
         },
+        create: saleData,
+        update: {}, // Already exists, no update needed
       });
 
       result.created++;

@@ -265,7 +265,7 @@ model Sale {
   importedAt    DateTime @default(now()) @map("imported_at")
 
   // VendLive integration fields
-  vendliveOrderSaleId   Int?     @unique @map("vendlive_order_sale_id")
+  vendliveOrderSaleId   Int?     @map("vendlive_order_sale_id")
   vendliveProductSaleId Int?     @map("vendlive_product_sale_id")
   vendliveMachineId     Int?     @map("vendlive_machine_id")
   vendStatus            String?  @map("vend_status")
@@ -279,6 +279,7 @@ model Sale {
 
   product Product? @relation(fields: [sku], references: [sku])
 
+  @@unique([vendliveOrderSaleId, vendliveProductSaleId])
   @@map("sales")
 }
 
