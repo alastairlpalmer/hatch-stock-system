@@ -1,4 +1,5 @@
 import express from 'express';
+import axios from 'axios';
 import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { encrypt, decrypt, hasEncryptionKey } from '../utils/encryption.js';
@@ -230,6 +231,45 @@ router.post('/webhook/sales', async (req, res) => {
     }).catch(() => {}); // Don't let logging errors propagate
   }
 });
+
+// ============ DIAGNOSTICS ============
+
+// GET /api/vendlive/debug-order-sales — bypass all sync logic, test VendLive API directly
+router.get('/debug-order-sales', asyncHandler(async (req, res) => {
+  const config = await prisma.vendliveConfig.findUnique({ where: { id: 'default' } });
+  if (!config?.apiToken) {
+    return res.json({ error: 'No API token configured' });
+  }
+
+  const token = decrypt(config.apiToken);
+  const baseUrl = config.baseUrl || 'https://vendlive.com/api/2.0';
+  const url = `${baseUrl}/order-sales/`;
+  const results = {};
+
+  // Try with Token prefix
+  try {
+    const resp = await axios.get(url, {
+      headers: { 'Authorization': `Token ${token}`, 'Content-Type': 'application/json' },
+      timeout: 15000,
+    });
+    results.tokenPrefix = { status: resp.status, count: resp.data?.count, resultsLength: resp.data?.results?.length };
+  } catch (err) {
+    results.tokenPrefix = { status: err.response?.status, error: err.message, data: err.response?.data };
+  }
+
+  // Try with raw token
+  try {
+    const resp = await axios.get(url, {
+      headers: { 'Authorization': token, 'Content-Type': 'application/json' },
+      timeout: 15000,
+    });
+    results.rawToken = { status: resp.status, count: resp.data?.count, resultsLength: resp.data?.results?.length };
+  } catch (err) {
+    results.rawToken = { status: err.response?.status, error: err.message, data: err.response?.data };
+  }
+
+  res.json({ url, baseUrl: config.baseUrl, deployVersion: '2024-03-24-debug', results });
+}));
 
 // ============ SYNC ============
 

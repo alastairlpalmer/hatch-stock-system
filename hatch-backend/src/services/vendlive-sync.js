@@ -39,17 +39,28 @@ export function normalizeWebhookPayload(body) {
 
 /**
  * Normalize a polling response entry (camelCase) into the common internal format.
- * Poll returns: { id, productSales: [...], machine, locationName, ... }
+ * Real VendLive API returns:
+ *   { id, productSales: [...], machine: { id, friendlyName }, locationName, charged, createdAt }
+ *   Each productSale: { id, product: { id, name, externalId, category: { name } },
+ *     device: { id, name }, vendStatus, timestamp, price, costPrice, ... }
  */
 export function normalizePollPayload(entry) {
   const orderSaleId = parseInt(entry.id);
   const productSales = entry.productSales || entry.order_product_sales || [];
 
+  // machine can be an object { id, friendlyName } or a string
+  const machineObj = typeof entry.machine === 'object' && entry.machine !== null ? entry.machine : null;
+
   const items = productSales.map(item => ({
     productSaleId: parseInt(item.id),
-    productExternalId: item.productExternalId || item.product_external_id || (item.product?.externalId) || String(item.productId || item.product_id || item.product?.id),
-    machineId: item.machineId || item.machine_id,
-    vendStatusName: item.vendStatusName || item.vend_status_name,
+    // Real API: item.product.externalId is often null, fall back to item.product.id
+    productExternalId: item.product?.externalId || String(item.product?.id || item.productId || item.product_id || ''),
+    productName: item.product?.name || null,
+    productCategory: item.product?.category?.name || null,
+    // machineId from the item, or from the parent entry's machine object
+    machineId: item.machineId || item.machine_id || item.device?.id || machineObj?.id || null,
+    // vendStatus (camelCase in real API) or vendStatusName or vend_status_name
+    vendStatusName: item.vendStatus || item.vendStatusName || item.vend_status_name,
     timestamp: item.timestamp,
     price: parseFloat(item.price) || 0,
     costPrice: parseFloat(item.costPrice || item.cost_price) || 0,
@@ -65,7 +76,8 @@ export function normalizePollPayload(entry) {
 
   return {
     orderSaleId,
-    machineName: entry.machine || entry.machineName || null,
+    machineName: machineObj?.friendlyName || (typeof entry.machine === 'string' ? entry.machine : null) || entry.machineName || null,
+    machineVendliveId: machineObj?.id || null,
     locationName: entry.locationName || entry.location_name || entry.location || null,
     charged: entry.charged,
     createdAt: entry.createdAt || entry.created_at,
