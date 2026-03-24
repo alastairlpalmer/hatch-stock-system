@@ -312,7 +312,7 @@ model VendliveConfig {
   // Stock sync fields
   stockSyncEnabled     Boolean   @default(false) @map("stock_sync_enabled")
   stockPollIntervalMin Int       @default(10) @map("stock_poll_interval_min")
-  restockMovementTypes String    @default("restock,refill,addition") @map("restock_movement_types")
+  restockMovementTypes String    @default("In") @map("restock_movement_types")
   autoShrinkageCalc    Boolean   @default(true) @map("auto_shrinkage_calc")
   createdAt            DateTime  @default(now()) @map("created_at")
   updatedAt            DateTime  @updatedAt @map("updated_at")

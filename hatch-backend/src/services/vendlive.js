@@ -121,27 +121,48 @@ export async function getOrderSales(config, { startId, startDate, endDate, pageS
  * Fetch stock movements for a machine with pagination support.
  * Returns all results across pages.
  */
-export async function getStockMovements(config, { machineId, startDate, endDate, page, pageSize } = {}) {
+export async function getStockMovements(config, { machineId, startDate, endDate, pageSize, singlePage = false } = {}) {
   const client = createClient(config);
 
   const params = new URLSearchParams();
   if (machineId) params.set('machineId', String(machineId));
   if (startDate) params.set('startDate', startDate);
   if (endDate) params.set('endDate', endDate);
-  if (page) params.set('page', String(page));
   if (pageSize) params.set('pageSize', String(pageSize));
 
   const queryString = params.toString();
-  const url = queryString ? `/stock-movements/?${queryString}` : '/stock-movements/';
+  let url = queryString ? `/stock-movements/?${queryString}` : '/stock-movements/';
 
   console.log(`VendLive stock: fetching movements from ${url}`);
-  const data = await requestWithRetry(client, 'get', url);
 
-  return data;
+  // Single page mode for discovery/proxy endpoints
+  if (singlePage) {
+    const data = await requestWithRetry(client, 'get', url);
+    return data;
+  }
+
+  // Full pagination mode for sync
+  let allResults = [];
+  let pageCount = 0;
+  const MAX_PAGES = 50;
+
+  while (url && pageCount < MAX_PAGES) {
+    const data = await requestWithRetry(client, 'get', url);
+    const results = data?.results || data?.data || [];
+    if (Array.isArray(results)) {
+      allResults = allResults.concat(results);
+    }
+    url = data?.next || null;
+    pageCount++;
+  }
+
+  console.log(`VendLive stock: fetched ${allResults.length} movements across ${pageCount} pages`);
+  return { results: allResults, pageCount };
 }
 
 /**
- * Fetch channel data (planogram + stock levels) for a machine.
+ * Fetch all channel data (planogram + stock levels) for a machine.
+ * Handles pagination to get all channels.
  */
 export async function getChannels(config, { machineId } = {}) {
   const client = createClient(config);
@@ -150,12 +171,26 @@ export async function getChannels(config, { machineId } = {}) {
   if (machineId) params.set('machineId', String(machineId));
 
   const queryString = params.toString();
-  const url = queryString ? `/channels/?${queryString}` : '/channels/';
+  let url = queryString ? `/channels/?${queryString}` : '/channels/';
+  let allResults = [];
+  let pageCount = 0;
+  const MAX_PAGES = 20;
 
   console.log(`VendLive stock: fetching channels from ${url}`);
-  const data = await requestWithRetry(client, 'get', url);
 
-  return data;
+  while (url && pageCount < MAX_PAGES) {
+    const data = await requestWithRetry(client, 'get', url);
+    const results = data?.results || data?.data || [];
+    if (Array.isArray(results)) {
+      allResults = allResults.concat(results);
+    }
+    // Use next URL as-is (axios ignores baseURL for absolute URLs)
+    url = data?.next || null;
+    pageCount++;
+  }
+
+  console.log(`VendLive stock: fetched ${allResults.length} channels across ${pageCount} pages`);
+  return allResults;
 }
 
 /**
