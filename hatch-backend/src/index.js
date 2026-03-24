@@ -20,6 +20,7 @@ import suppliersRouter from './routes/suppliers.js';
 import routesRouter from './routes/routes.js';
 import salesRouter from './routes/sales.js';
 import vendliveRouter from './routes/vendlive.js';
+import vendliveStockRouter from './routes/vendlive-stock.js';
 import authRouter from './routes/auth.js';
 
 // Import middleware
@@ -115,6 +116,7 @@ app.use('/api/suppliers', suppliersRouter);
 app.use('/api/routes', routesRouter);
 app.use('/api/sales', salesRouter);
 app.use('/api/vendlive', vendliveRouter);
+app.use('/api/vendlive/stock', vendliveStockRouter);
 
 // 404 handler
 app.use((req, res) => {

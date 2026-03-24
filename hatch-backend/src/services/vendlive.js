@@ -116,3 +116,64 @@ export async function getOrderSales(config, { startId, startDate, endDate, pageS
   console.log(`VendLive polling: complete. ${allResults.length} total results across ${pageCount} pages`);
   return { results: allResults, pageCount };
 }
+
+/**
+ * Fetch stock movements for a machine with pagination support.
+ * Returns all results across pages.
+ */
+export async function getStockMovements(config, { machineId, startDate, endDate, page, pageSize } = {}) {
+  const client = createClient(config);
+
+  const params = new URLSearchParams();
+  if (machineId) params.set('machineId', String(machineId));
+  if (startDate) params.set('startDate', startDate);
+  if (endDate) params.set('endDate', endDate);
+  if (page) params.set('page', String(page));
+  if (pageSize) params.set('pageSize', String(pageSize));
+
+  const queryString = params.toString();
+  const url = queryString ? `/stock-movements/?${queryString}` : '/stock-movements/';
+
+  console.log(`VendLive stock: fetching movements from ${url}`);
+  const data = await requestWithRetry(client, 'get', url);
+
+  return data;
+}
+
+/**
+ * Fetch channel data (planogram + stock levels) for a machine.
+ */
+export async function getChannels(config, { machineId } = {}) {
+  const client = createClient(config);
+
+  const params = new URLSearchParams();
+  if (machineId) params.set('machineId', String(machineId));
+
+  const queryString = params.toString();
+  const url = queryString ? `/channels/?${queryString}` : '/channels/';
+
+  console.log(`VendLive stock: fetching channels from ${url}`);
+  const data = await requestWithRetry(client, 'get', url);
+
+  return data;
+}
+
+/**
+ * Fetch stock report with optional predictions.
+ */
+export async function getStockReport(config, { machineId, predictions, restockDay } = {}) {
+  const client = createClient(config);
+
+  const params = new URLSearchParams();
+  if (machineId) params.set('machineId', String(machineId));
+  if (predictions) params.set('predictions', 'true');
+  if (restockDay) params.set('restockDay', restockDay);
+
+  const queryString = params.toString();
+  const url = queryString ? `/stock-report/?${queryString}` : '/stock-report/';
+
+  console.log(`VendLive stock: fetching stock report from ${url}`);
+  const data = await requestWithRetry(client, 'get', url);
+
+  return data;
+}

@@ -78,12 +78,13 @@ model Location {
   createdAt DateTime @default(now()) @map("created_at")
 
   // Relations
-  stock           LocationStock[]
-  configs         LocationConfig[]
-  restocks        RestockRecord[]
-  stockChecks     StockCheck[]
-  assignedItems   LocationAssignment[]
-  machineMappings VendliveMachineMapping[]
+  stock               LocationStock[]
+  configs             LocationConfig[]
+  restocks            RestockRecord[]
+  stockChecks         StockCheck[]
+  assignedItems       LocationAssignment[]
+  machineMappings     VendliveMachineMapping[]
+  vendliveStockSyncs  VendliveStockSync[]
 
   @@map("locations")
 }
@@ -227,11 +228,13 @@ model RestockRecord {
 }
 
 model StockCheck {
-  id          String   @id @default(uuid())
-  locationId  String   @map("location_id")
-  performedBy String?  @map("performed_by")
-  items       Json     // [{ sku, expected, counted, variance }]
-  createdAt   DateTime @default(now()) @map("created_at")
+  id                  String   @id @default(uuid())
+  locationId          String   @map("location_id")
+  performedBy         String?  @map("performed_by")
+  items               Json     // [{ sku, expected, counted, variance }]
+  source              String?  // 'manual' | 'vendlive'
+  vendliveStockSyncId String?  @map("vendlive_stock_sync_id")
+  createdAt           DateTime @default(now()) @map("created_at")
 
   location Location @relation(fields: [locationId], references: [id])
 
@@ -296,18 +299,23 @@ model SalesImport {
 // ============ VENDLIVE INTEGRATION ============
 
 model VendliveConfig {
-  id                 String    @id @default("default")
-  apiToken           String?   @map("api_token")
-  accountId          String?   @map("account_id")
-  baseUrl            String    @default("https://vendlive.com/api/2.0") @map("base_url")
-  webhookSecret      String?   @map("webhook_secret")
-  salesSyncEnabled   Boolean   @default(false) @map("sales_sync_enabled")
-  pollIntervalMin    Int       @default(15) @map("poll_interval_min")
-  autoCreateProducts Boolean   @default(true) @map("auto_create_products")
-  lastPollSaleId     Int?      @map("last_poll_sale_id")
-  lastPollAt         DateTime? @map("last_poll_at")
-  createdAt          DateTime  @default(now()) @map("created_at")
-  updatedAt          DateTime  @updatedAt @map("updated_at")
+  id                   String    @id @default("default")
+  apiToken             String?   @map("api_token")
+  accountId            String?   @map("account_id")
+  baseUrl              String    @default("https://vendlive.com/api/2.0") @map("base_url")
+  webhookSecret        String?   @map("webhook_secret")
+  salesSyncEnabled     Boolean   @default(false) @map("sales_sync_enabled")
+  pollIntervalMin      Int       @default(15) @map("poll_interval_min")
+  autoCreateProducts   Boolean   @default(true) @map("auto_create_products")
+  lastPollSaleId       Int?      @map("last_poll_sale_id")
+  lastPollAt           DateTime? @map("last_poll_at")
+  // Stock sync fields
+  stockSyncEnabled     Boolean   @default(false) @map("stock_sync_enabled")
+  stockPollIntervalMin Int       @default(10) @map("stock_poll_interval_min")
+  restockMovementTypes String    @default("restock,refill,addition") @map("restock_movement_types")
+  autoShrinkageCalc    Boolean   @default(true) @map("auto_shrinkage_calc")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
 
   @@map("vendlive_config")
 }
@@ -337,6 +345,35 @@ model VendliveSyncLog {
   createdAt    DateTime @default(now()) @map("created_at")
 
   @@map("vendlive_sync_logs")
+}
+
+// ============ VENDLIVE STOCK SYNC ============
+
+model VendliveStockSync {
+  id                String   @id @default(uuid())
+  vendliveMachineId Int      @map("vendlive_machine_id")
+  locationId        String?  @map("location_id")
+  syncType          String   @map("sync_type") // 'restock_detected' | 'manual_pull' | 'scheduled'
+  status            String   // 'success' | 'error'
+  productsUpdated   Int      @default(0) @map("products_updated")
+  totalVariance     Int      @default(0) @map("total_variance")
+  varianceCost      Float    @default(0) @map("variance_cost")
+  metadata          Json?
+  errorMessage      String?  @map("error_message")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  location Location? @relation(fields: [locationId], references: [id])
+
+  @@map("vendlive_stock_syncs")
+}
+
+model VendliveMovementTracker {
+  vendliveMachineId Int      @id @map("vendlive_machine_id")
+  lastMovementId    Int      @map("last_movement_id")
+  lastMovementAt    DateTime @map("last_movement_at")
+  lastSyncAt        DateTime @map("last_sync_at")
+
+  @@map("vendlive_movement_trackers")
 }
 
 // ============ USERS (Optional Auth) ============
