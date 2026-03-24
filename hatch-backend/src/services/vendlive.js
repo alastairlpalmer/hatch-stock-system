@@ -103,16 +103,8 @@ export async function getOrderSales(config, { startId, startDate, endDate, pageS
       if (Array.isArray(results)) {
         allResults = allResults.concat(results);
       }
+      // Use the next URL as-is — axios ignores baseURL for absolute URLs
       url = data?.next || null;
-      // If next is a full URL, extract the path
-      if (url && url.startsWith('http')) {
-        try {
-          const parsed = new URL(url);
-          url = parsed.pathname + parsed.search;
-        } catch {
-          // If URL parsing fails, use as-is
-        }
-      }
       pageCount++;
     } catch (err) {
       console.error(`VendLive polling: error on page ${pageCount + 1}: ${err.response?.status} ${err.message}`);
