@@ -194,9 +194,11 @@ export async function processVendliveOrder(orderData, syncSource, config) {
 
 // ============ POLL SYNC ============
 
+const BATCH_SIZE = 50;
+
 /**
  * Run a poll-based sync against the VendLive order-sales API.
- * Fetches new sales since lastPollSaleId, processes them, and updates config.
+ * Uses batched DB operations to avoid exhausting the connection pool.
  */
 export async function runPollSync() {
   const config = await prisma.vendliveConfig.findUnique({ where: { id: 'default' } });
@@ -212,17 +214,149 @@ export async function runPollSync() {
       startId: config.lastPollSaleId || undefined,
     });
 
+    // Step 1: Normalize all entries and flatten into sale items
+    const allItems = [];
     for (const entry of results) {
       const orderData = normalizePollPayload(entry);
-      const result = await processVendliveOrder(orderData, 'poll', config);
-      totals.created += result.created;
-      totals.skipped += result.skipped;
-      totals.errored += result.errored;
-      totals.errors.push(...result.errors);
-
       if (orderData.orderSaleId > highestSaleId) {
         highestSaleId = orderData.orderSaleId;
       }
+      for (const item of orderData.items) {
+        // Skip non-successful vends
+        if (item.vendStatusName && item.vendStatusName !== 'Success') {
+          totals.skipped++;
+          continue;
+        }
+        allItems.push({ orderData, item });
+      }
+    }
+
+    console.log(`VendLive sync: ${results.length} orders, ${allItems.length} successful items to process`);
+
+    // Step 2: Pre-fetch all products and machine mappings in bulk
+    const uniqueSkus = [...new Set(allItems.map(({ item }) => item.productExternalId).filter(Boolean))];
+    const existingProducts = await prisma.product.findMany({
+      where: { sku: { in: uniqueSkus } },
+    });
+    const productMap = new Map(existingProducts.map(p => [p.sku, p]));
+
+    const uniqueMachineIds = [...new Set(allItems.map(({ item }) => item.machineId).filter(Boolean))];
+    const existingMappings = uniqueMachineIds.length > 0
+      ? await prisma.vendliveMachineMapping.findMany({
+          where: { vendliveMachineId: { in: uniqueMachineIds } },
+          include: { location: { select: { name: true } } },
+        })
+      : [];
+    const mappingMap = new Map(existingMappings.map(m => [m.vendliveMachineId, m]));
+
+    // Step 3: Auto-create missing products if enabled
+    if (config.autoCreateProducts) {
+      const missingSkus = uniqueSkus.filter(sku => !productMap.has(sku));
+      if (missingSkus.length > 0) {
+        // Find names from items for these SKUs
+        const skuNames = new Map();
+        for (const { item } of allItems) {
+          if (missingSkus.includes(item.productExternalId) && !skuNames.has(item.productExternalId)) {
+            skuNames.set(item.productExternalId, {
+              name: item.productName || item.productExternalId,
+              costPrice: item.costPrice || null,
+              salePrice: item.price || null,
+            });
+          }
+        }
+
+        for (const sku of missingSkus) {
+          const info = skuNames.get(sku) || { name: sku };
+          try {
+            const created = await prisma.product.create({
+              data: {
+                sku,
+                name: info.name,
+                unitCost: info.costPrice,
+                salePrice: info.salePrice,
+              },
+            });
+            productMap.set(sku, created);
+          } catch (err) {
+            if (err.code === 'P2002') {
+              // Race condition — another sync created it, fetch it
+              const existing = await prisma.product.findUnique({ where: { sku } });
+              if (existing) productMap.set(sku, existing);
+            }
+          }
+        }
+        console.log(`VendLive sync: auto-created ${missingSkus.length} products`);
+      }
+    }
+
+    // Step 4: Batch upsert sales in chunks using transactions
+    for (let i = 0; i < allItems.length; i += BATCH_SIZE) {
+      const chunk = allItems.slice(i, i + BATCH_SIZE);
+      const operations = [];
+
+      for (const { orderData, item } of chunk) {
+        const sku = item.productExternalId;
+        const product = productMap.get(sku);
+
+        if (!product) {
+          totals.errored++;
+          totals.errors.push(`Product SKU ${sku} not found`);
+          continue;
+        }
+
+        const mapping = item.machineId ? mappingMap.get(item.machineId) : null;
+        const locationName = mapping?.location?.name || orderData.locationName;
+        const charged = item.totalPaid > 0 ? item.totalPaid : item.price;
+        const saleId = `vl-${orderData.orderSaleId}-${item.productSaleId}`;
+
+        operations.push(
+          prisma.sale.upsert({
+            where: {
+              vendliveOrderSaleId_vendliveProductSaleId: {
+                vendliveOrderSaleId: orderData.orderSaleId,
+                vendliveProductSaleId: item.productSaleId,
+              },
+            },
+            create: {
+              id: saleId,
+              sku: product.sku,
+              productName: item.productName || product.name,
+              quantity: 1,
+              charged,
+              costPrice: item.costPrice || product.unitCost || null,
+              paymentMethod: null,
+              locationName,
+              machineName: orderData.machineName,
+              timestamp: new Date(item.timestamp || orderData.createdAt),
+              vendliveOrderSaleId: orderData.orderSaleId,
+              vendliveProductSaleId: item.productSaleId,
+              vendliveMachineId: item.machineId || null,
+              vendStatus: item.vendStatusName || null,
+              discountValue: item.discountValue || null,
+              vatRate: item.vatRate || null,
+              vatAmount: item.vatAmount || null,
+              promotionId: item.promotionId || null,
+              voucherCode: item.voucherCode || null,
+              isRefunded: item.isRefunded || false,
+              syncSource: 'poll',
+            },
+            update: {},
+          })
+        );
+      }
+
+      if (operations.length > 0) {
+        try {
+          await prisma.$transaction(operations);
+          totals.created += operations.length;
+        } catch (err) {
+          console.error(`VendLive sync: batch error at chunk ${Math.floor(i / BATCH_SIZE) + 1}: ${err.message}`);
+          totals.errored += operations.length;
+          totals.errors.push(`Batch ${Math.floor(i / BATCH_SIZE) + 1}: ${err.message}`);
+        }
+      }
+
+      console.log(`VendLive sync: processed chunk ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(allItems.length / BATCH_SIZE)}`);
     }
 
     // Update config with latest poll state
@@ -248,6 +382,7 @@ export async function runPollSync() {
       },
     });
 
+    console.log(`VendLive sync complete: ${totals.created} created, ${totals.skipped} skipped, ${totals.errored} errors`);
     return totals;
   } catch (err) {
     console.error('Poll sync error:', err.message);
