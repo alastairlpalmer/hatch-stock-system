@@ -6,11 +6,27 @@ const INITIAL_BACKOFF_MS = 1000;
 
 /**
  * Create an authenticated axios client for VendLive API calls.
+ *
+ * Throws an Error with a user-friendly message if:
+ *  - No apiToken is configured
+ *  - The encryption key is missing or wrong (decrypt throws)
+ *  - The stored ciphertext is corrupt
  */
 function createClient(config) {
-  const token = config.apiToken ? decrypt(config.apiToken) : null;
-  if (!token) {
+  if (!config.apiToken) {
     throw new Error('VendLive API token is not configured');
+  }
+
+  let token;
+  try {
+    token = decrypt(config.apiToken);
+  } catch (err) {
+    // Most likely cause: VENDLIVE_ENCRYPTION_KEY is missing from the environment
+    // or changed since the token was stored. Surface a clear message instead
+    // of crashing with a cryptic cipher error.
+    throw new Error(
+      `Failed to decrypt VendLive API token — check VENDLIVE_ENCRYPTION_KEY is set and matches the one used to store it. Underlying error: ${err.message}`
+    );
   }
 
   return axios.create({

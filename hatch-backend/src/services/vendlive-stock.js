@@ -113,7 +113,11 @@ export async function syncMachineStock(vendliveMachineId, locationId, config, sy
   let productsUpdated = 0;
   let productsSkipped = 0;
 
-  // Process all products from VendLive
+  // Build variance data AND prepare upsert operations in a single pass.
+  // Upserts are batched into $transaction chunks to avoid exhausting the
+  // connection pool (same pattern as runPollSync in vendlive-sync.js).
+  const upsertOperations = [];
+
   for (const [sku, vl] of Object.entries(vendliveStock)) {
     // Skip products that don't exist in Hatch
     if (!existingSkuSet.has(sku)) {
@@ -142,13 +146,26 @@ export async function syncMachineStock(vendliveMachineId, locationId, config, sy
       varianceCost += variance > 0 ? cost : -cost;
     }
 
-    // 5. Update LocationStock to match VendLive's confirmed quantity
-    await prisma.locationStock.upsert({
-      where: { locationId_sku: { locationId, sku } },
-      update: { quantity: confirmed },
-      create: { locationId, sku, quantity: confirmed },
-    });
-    productsUpdated++;
+    upsertOperations.push(
+      prisma.locationStock.upsert({
+        where: { locationId_sku: { locationId, sku } },
+        update: { quantity: confirmed },
+        create: { locationId, sku, quantity: confirmed },
+      })
+    );
+  }
+
+  // 5. Run upserts in batched transactions (chunks of STOCK_BATCH_SIZE)
+  const STOCK_BATCH_SIZE = 50;
+  for (let i = 0; i < upsertOperations.length; i += STOCK_BATCH_SIZE) {
+    const chunk = upsertOperations.slice(i, i + STOCK_BATCH_SIZE);
+    try {
+      await prisma.$transaction(chunk);
+      productsUpdated += chunk.length;
+    } catch (err) {
+      console.error(`Stock sync: batch ${Math.floor(i / STOCK_BATCH_SIZE) + 1} failed: ${err.message}`);
+      throw err; // Surface the error — caller logs and records in VendliveStockSync
+    }
   }
 
   // 5. If auto shrinkage calc is enabled and there's variance, create a StockCheck
@@ -185,6 +202,7 @@ export async function syncMachineStock(vendliveMachineId, locationId, config, sy
           expected: i.expected,
           counted: i.confirmed,
           variance: i.variance,
+          reason: 'unknown', // Operator can categorise later via Shrinkage page
         })),
       },
     });

@@ -1,5 +1,6 @@
 import express from 'express';
 import axios from 'axios';
+import crypto from 'crypto';
 import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { encrypt, decrypt, hasEncryptionKey } from '../utils/encryption.js';
@@ -7,6 +8,61 @@ import * as vendliveApi from '../services/vendlive.js';
 import { normalizeWebhookPayload, processVendliveOrder, runPollSync } from '../services/vendlive-sync.js';
 
 const router = express.Router();
+
+/**
+ * Verify a webhook signature using HMAC-SHA256.
+ *
+ * Supports the common pattern `X-<vendor>-Signature: sha256=<hex>` OR a bare
+ * hex string. The signature is computed as HMAC-SHA256 of the raw request body
+ * using the configured webhookSecret.
+ *
+ * Returns true if verification passes OR if no webhookSecret is configured
+ * (in which case validation is skipped with a warning — useful for initial
+ * setup where VendLive hasn't been told the secret yet).
+ */
+function verifyWebhookSignature(req, webhookSecret) {
+  if (!webhookSecret) {
+    console.warn('VendLive webhook: webhookSecret not configured, skipping signature validation');
+    return true;
+  }
+  if (!req.rawBody) {
+    console.error('VendLive webhook: no raw body captured for signature verification');
+    return false;
+  }
+
+  // Look for a signature in any of the common header names
+  const headerValue =
+    req.get('X-Vendlive-Signature') ||
+    req.get('X-Webhook-Signature') ||
+    req.get('X-Signature');
+
+  if (!headerValue) {
+    console.error('VendLive webhook: no signature header found');
+    return false;
+  }
+
+  // Strip an optional "sha256=" prefix
+  const provided = headerValue.replace(/^sha256=/, '').trim();
+
+  let secret;
+  try {
+    // webhookSecret may be stored encrypted; attempt decrypt, fall back to raw
+    secret = webhookSecret.includes(':') ? decrypt(webhookSecret) : webhookSecret;
+  } catch {
+    secret = webhookSecret;
+  }
+
+  const expected = crypto
+    .createHmac('sha256', secret)
+    .update(req.rawBody)
+    .digest('hex');
+
+  // Constant-time comparison
+  const providedBuf = Buffer.from(provided, 'hex');
+  const expectedBuf = Buffer.from(expected, 'hex');
+  if (providedBuf.length !== expectedBuf.length) return false;
+  return crypto.timingSafeEqual(providedBuf, expectedBuf);
+}
 
 // ============ CONFIG ============
 
@@ -175,12 +231,20 @@ router.post('/machine-mappings/auto-detect', asyncHandler(async (req, res) => {
 
 // POST /api/vendlive/webhook/sales — VendLive order_sales webhook receiver
 router.post('/webhook/sales', async (req, res) => {
+  // Verify signature BEFORE responding. If verification fails we 401 so
+  // VendLive's dashboard surfaces the problem rather than silently dropping.
+  const config = await prisma.vendliveConfig.findUnique({ where: { id: 'default' } });
+
+  if (!verifyWebhookSignature(req, config?.webhookSecret)) {
+    console.warn('VendLive webhook: rejected request with invalid or missing signature');
+    return res.status(401).json({ error: 'Invalid webhook signature' });
+  }
+
   // Always return 200 immediately to prevent VendLive from retrying
   res.status(200).json({ received: true });
 
   // Process asynchronously
   try {
-    const config = await prisma.vendliveConfig.findUnique({ where: { id: 'default' } });
     if (!config?.salesSyncEnabled) {
       console.log('VendLive webhook received but sync is disabled');
       return;
@@ -189,22 +253,22 @@ router.post('/webhook/sales', async (req, res) => {
     const orderData = normalizeWebhookPayload(req.body);
     const result = await processVendliveOrder(orderData, 'webhook', config);
 
-    // Auto-create machine mapping if we see a new machine
-    for (const item of orderData.items) {
-      if (item.machineId) {
-        const exists = await prisma.vendliveMachineMapping.findUnique({
-          where: { vendliveMachineId: item.machineId },
-        });
-        if (!exists) {
-          await prisma.vendliveMachineMapping.create({
-            data: {
-              vendliveMachineId: item.machineId,
-              machineName: orderData.machineName || `Machine ${item.machineId}`,
-              autoCreated: true,
-            },
-          }).catch(() => {}); // Ignore if race condition creates duplicate
-        }
-      }
+    // Auto-create machine mapping if we see a new machine. Use upsert to
+    // avoid the findUnique+create race condition when webhooks arrive
+    // concurrently for a new machine.
+    const uniqueMachineIds = [...new Set(orderData.items.map(i => i.machineId).filter(Boolean))];
+    for (const machineId of uniqueMachineIds) {
+      await prisma.vendliveMachineMapping.upsert({
+        where: { vendliveMachineId: machineId },
+        create: {
+          vendliveMachineId: machineId,
+          machineName: orderData.machineName || `Machine ${machineId}`,
+          autoCreated: true,
+        },
+        update: {}, // Existing mappings are left untouched
+      }).catch(err => {
+        console.error(`VendLive webhook: failed to upsert mapping for machine ${machineId}:`, err.message);
+      });
     }
 
     // Log the sync
@@ -241,7 +305,16 @@ router.get('/debug-order-sales', asyncHandler(async (req, res) => {
     return res.json({ error: 'No API token configured' });
   }
 
-  const token = decrypt(config.apiToken);
+  let token;
+  try {
+    token = decrypt(config.apiToken);
+  } catch (err) {
+    return res.status(500).json({
+      error: 'Failed to decrypt stored API token',
+      detail: err.message,
+      hint: 'Check VENDLIVE_ENCRYPTION_KEY is set and matches the key used when the token was saved. You may need to re-save the token in Admin > VendLive.',
+    });
+  }
   const baseUrl = config.baseUrl || 'https://vendlive.com/api/2.0';
   const url = `${baseUrl}/order-sales/`;
   const results = {};

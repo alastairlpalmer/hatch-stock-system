@@ -207,19 +207,23 @@ export async function runPollSync() {
   }
 
   const totals = { created: 0, skipped: 0, errored: 0, errors: [] };
-  let highestSaleId = config.lastPollSaleId || 0;
+  const previousLastPollSaleId = config.lastPollSaleId || 0;
+  let highestSaleIdSeen = previousLastPollSaleId;
 
   try {
     const { results, pageCount } = await vendliveApi.getOrderSales(config, {
-      startId: config.lastPollSaleId || undefined,
+      startId: previousLastPollSaleId || undefined,
     });
 
-    // Step 1: Normalize all entries and flatten into sale items
+    // Step 1: Normalize all entries and flatten into sale items.
+    // Note: do NOT advance lastPollSaleId based on normalisation alone — that
+    // would skip sales that fail to persist. We only update it at the end if
+    // every batch succeeded.
     const allItems = [];
     for (const entry of results) {
       const orderData = normalizePollPayload(entry);
-      if (orderData.orderSaleId > highestSaleId) {
-        highestSaleId = orderData.orderSaleId;
+      if (orderData.orderSaleId > highestSaleIdSeen) {
+        highestSaleIdSeen = orderData.orderSaleId;
       }
       for (const item of orderData.items) {
         // Skip non-successful vends
@@ -289,7 +293,9 @@ export async function runPollSync() {
       }
     }
 
-    // Step 4: Batch upsert sales in chunks using transactions
+    // Step 4: Batch upsert sales in chunks using transactions.
+    // Track whether any batch failed so we can decide whether to advance lastPollSaleId.
+    let anyBatchFailed = false;
     for (let i = 0; i < allItems.length; i += BATCH_SIZE) {
       const chunk = allItems.slice(i, i + BATCH_SIZE);
       const operations = [];
@@ -353,20 +359,31 @@ export async function runPollSync() {
           console.error(`VendLive sync: batch error at chunk ${Math.floor(i / BATCH_SIZE) + 1}: ${err.message}`);
           totals.errored += operations.length;
           totals.errors.push(`Batch ${Math.floor(i / BATCH_SIZE) + 1}: ${err.message}`);
+          anyBatchFailed = true;
         }
       }
 
       console.log(`VendLive sync: processed chunk ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(allItems.length / BATCH_SIZE)}`);
     }
 
-    // Update config with latest poll state
+    // Only advance lastPollSaleId if every batch succeeded. If any batch failed,
+    // keep it where it was so the next poll re-fetches and retries (upserts are
+    // idempotent). lastPollAt is always updated so the scheduler knows we ran.
+    const newLastPollSaleId = anyBatchFailed
+      ? previousLastPollSaleId
+      : (highestSaleIdSeen || previousLastPollSaleId);
+
     await prisma.vendliveConfig.update({
       where: { id: 'default' },
       data: {
-        lastPollSaleId: highestSaleId || config.lastPollSaleId,
+        lastPollSaleId: newLastPollSaleId,
         lastPollAt: new Date(),
       },
     });
+
+    if (anyBatchFailed) {
+      console.warn(`VendLive sync: kept lastPollSaleId at ${previousLastPollSaleId} because batch(es) failed; will retry on next poll`);
+    }
 
     // Log the sync
     const status = totals.errored > 0 ? (totals.created > 0 ? 'partial' : 'error') : 'success';

@@ -76,8 +76,16 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-// Body parsing
-app.use(express.json({ limit: '10mb' }));
+// Body parsing — capture raw body for webhook signature verification
+app.use(express.json({
+  limit: '10mb',
+  verify: (req, res, buf) => {
+    // Only retain the raw body for webhook endpoints that need HMAC verification
+    if (req.originalUrl?.startsWith('/api/vendlive/webhook/')) {
+      req.rawBody = buf;
+    }
+  },
+}));
 app.use(express.urlencoded({ extended: true }));
 
 // Request logging (development)
