@@ -13,6 +13,7 @@ import RestockMachine from './components/pages/RestockMachine';
 import History from './components/pages/History';
 import Shrinkage from './components/pages/Shrinkage';
 import Admin from './components/pages/Admin';
+import RestockingDocs from './components/pages/RestockingDocs';
 
 // Import layout components
 import Sidebar from './components/layout/Sidebar';
@@ -95,6 +96,7 @@ function App() {
             {activeTab === 'history' && <History />}
             {activeTab === 'shrinkage' && <Shrinkage />}
             {activeTab === 'admin' && <Admin />}
+            {activeTab === 'docs' && <RestockingDocs />}
           </div>
         </main>
       </div>

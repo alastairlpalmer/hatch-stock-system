@@ -12,6 +12,7 @@ const tabLabels = {
   restock: 'Restock Machine',
   history: 'History',
   admin: 'Admin',
+  docs: 'Restocking Docs',
 };
 
 export default function Header({ activeTab, syncStatus, isMobile, onMenuClick }) {
