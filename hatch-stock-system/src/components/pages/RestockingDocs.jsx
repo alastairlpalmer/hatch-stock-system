@@ -133,7 +133,7 @@ const STEPS = [
       'Confirm the customer-facing planogram screen displays correctly and is not frozen or showing errors.',
       'If the screen is frozen or showing an error, call the Hatch emergency contact before leaving the site.',
     ],
-    videoSrc: null,
+    videoSrc: '/videos/10-closeout-vendlive.mp4',
   },
   {
     id: 'photo-confirm',
