@@ -20,22 +20,6 @@ const brandGreen = {
   950: '#03241B',
 };
 
-// Dark-green-tinted neutral scale (replaces Tailwind's `zinc`).
-// 950/900 are the app shell, 800/700 are panels/borders, 100/50 fade to cream.
-const brandNeutral = {
-  50:  '#F6F0DC', // cream
-  100: '#E8EFE7',
-  200: '#D6E2D8',
-  300: '#C5DAD0',
-  400: '#A8C4B9',
-  500: '#7BA396',
-  600: '#4F8273',
-  700: '#1F6450',
-  800: '#07543F',
-  900: '#003A2D',
-  950: '#002A20',
-};
-
 export default {
   content: [
     "./index.html",
@@ -50,12 +34,12 @@ export default {
           green: '#166C53',
           dark:  '#004638',
         },
-        // Remap existing Tailwind colour names so existing `bg-emerald-*` /
-        // `text-zinc-*` / `from-teal-*` classes pick up brand values without
-        // touching the hundreds of usages across page components.
+        // Remap accent palettes so existing `bg-emerald-*` / `from-teal-*`
+        // classes resolve to brand mid-green. `zinc` is left at Tailwind's
+        // default neutral scale so panels and chrome read as proper darks
+        // rather than tinted green.
         emerald: brandGreen,
         teal: brandGreen,
-        zinc: brandNeutral,
       },
       fontFamily: {
         sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'sans-serif'],
