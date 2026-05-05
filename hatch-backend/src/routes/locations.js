@@ -110,18 +110,38 @@ router.post('/', asyncHandler(async (req, res) => {
 
 // Update location
 router.put('/:id', asyncHandler(async (req, res) => {
-  const { name, type, address } = req.body;
+  const { name, type, address, assignedItems } = req.body;
+  const { id } = req.params;
 
-  const location = await prisma.location.update({
-    where: { id: req.params.id },
-    data: {
-      ...(name && { name }),
-      ...(type && { type }),
-      ...(address !== undefined && { address }),
-    },
+  await prisma.$transaction(async (tx) => {
+    await tx.location.update({
+      where: { id },
+      data: {
+        ...(name && { name }),
+        ...(type && { type }),
+        ...(address !== undefined && { address }),
+      },
+    });
+
+    if (Array.isArray(assignedItems)) {
+      await tx.locationAssignment.deleteMany({ where: { locationId: id } });
+      if (assignedItems.length > 0) {
+        await tx.locationAssignment.createMany({
+          data: assignedItems.map(sku => ({ locationId: id, sku })),
+        });
+      }
+    }
   });
 
-  res.json(location);
+  const location = await prisma.location.findUnique({
+    where: { id },
+    include: { assignedItems: { select: { sku: true } } },
+  });
+
+  res.json({
+    ...location,
+    assignedItems: location.assignedItems.map(a => a.sku),
+  });
 }));
 
 // Update assigned items
