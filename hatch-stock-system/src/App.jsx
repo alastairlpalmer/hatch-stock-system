@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
+import { Routes, Route, Navigate } from 'react-router-dom';
 import { useStock } from './context/StockContext';
 
-// Import page components
+// Page components
 import Dashboard from './components/pages/Dashboard';
 import SalesOverview from './components/pages/SalesOverview';
 import LocationStock from './components/pages/LocationStock';
@@ -15,19 +16,24 @@ import Shrinkage from './components/pages/Shrinkage';
 import Admin from './components/pages/Admin';
 import RestockingDocs from './components/pages/RestockingDocs';
 
-// Import layout components
+// Parent layouts
+import OrdersLayout from './components/pages/orders/OrdersLayout';
+import RestockLayout from './components/pages/restock/RestockLayout';
+import RestockWorkflow from './components/pages/restock/RestockWorkflow';
+import SelectRoute from './components/pages/restock/SelectRoute';
+import SupportLayout from './components/pages/support/SupportLayout';
+
+// Layout components
 import Sidebar from './components/layout/Sidebar';
 import Header from './components/layout/Header';
 import LoadingScreen from './components/ui/LoadingScreen';
 
 function App() {
   const { loading, syncStatus } = useStock();
-  const [activeTab, setActiveTab] = useState('dashboard');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
 
-  // Detect mobile viewport
   useEffect(() => {
     const checkMobile = () => {
       setIsMobile(window.innerWidth < 768);
@@ -40,12 +46,7 @@ function App() {
     return () => window.removeEventListener('resize', checkMobile);
   }, []);
 
-  const handleNavClick = (tabId) => {
-    setActiveTab(tabId);
-    if (isMobile) {
-      setMobileMenuOpen(false);
-    }
-  };
+  const closeMobileMenu = () => setMobileMenuOpen(false);
 
   if (loading) {
     return <LoadingScreen />;
@@ -53,50 +54,61 @@ function App() {
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 flex">
-      {/* Mobile Menu Overlay */}
       {isMobile && mobileMenuOpen && (
-        <div 
+        <div
           className="fixed inset-0 bg-black/60 z-40 backdrop-blur-sm"
-          onClick={() => setMobileMenuOpen(false)}
+          onClick={closeMobileMenu}
         />
       )}
-      
-      {/* Sidebar */}
+
       <Sidebar
-        activeTab={activeTab}
-        onTabChange={handleNavClick}
         collapsed={sidebarCollapsed}
         onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
         isMobile={isMobile}
         mobileMenuOpen={mobileMenuOpen}
-        onCloseMobile={() => setMobileMenuOpen(false)}
+        onCloseMobile={closeMobileMenu}
+        onNavigate={isMobile ? closeMobileMenu : undefined}
         syncStatus={syncStatus}
       />
 
-      {/* Main Content */}
       <div className="flex-1 flex flex-col min-w-0">
         <Header
-          activeTab={activeTab}
           syncStatus={syncStatus}
           isMobile={isMobile}
           onMenuClick={() => setMobileMenuOpen(true)}
         />
 
-        {/* Page Content */}
         <main className="flex-1 overflow-auto p-4 md:p-6">
           <div className="max-w-7xl mx-auto">
-            {activeTab === 'dashboard' && <Dashboard />}
-            {activeTab === 'sales' && <SalesOverview />}
-            {activeTab === 'locations' && <LocationStock />}
-            {activeTab === 'orders' && <Orders />}
-            {activeTab === 'receive' && <ReceiveStock />}
-            {activeTab === 'inventory' && <Inventory />}
-            {activeTab === 'remove' && <RemoveStock />}
-            {activeTab === 'restock' && <RestockMachine />}
-            {activeTab === 'history' && <History />}
-            {activeTab === 'shrinkage' && <Shrinkage />}
-            {activeTab === 'admin' && <Admin />}
-            {activeTab === 'docs' && <RestockingDocs />}
+            <Routes>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/sales" element={<SalesOverview />} />
+              <Route path="/locations" element={<LocationStock />} />
+
+              <Route path="/orders" element={<OrdersLayout />}>
+                <Route index element={<Navigate to="warehouse" replace />} />
+                <Route path="warehouse" element={<Inventory />} />
+                <Route path="purchase" element={<Orders />} />
+                <Route path="receive" element={<ReceiveStock />} />
+              </Route>
+
+              <Route path="/restock" element={<RestockLayout />}>
+                <Route index element={<RestockWorkflow />} />
+                <Route path="route" element={<SelectRoute />} />
+                <Route path="remove" element={<RemoveStock />} />
+                <Route path="machine" element={<RestockMachine />} />
+                <Route path="shrinkage" element={<Shrinkage />} />
+              </Route>
+
+              <Route path="/support" element={<SupportLayout />}>
+                <Route index element={<Navigate to="docs" replace />} />
+                <Route path="docs" element={<RestockingDocs />} />
+                <Route path="settings" element={<Admin />} />
+                <Route path="history" element={<History />} />
+              </Route>
+
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
           </div>
         </main>
       </div>

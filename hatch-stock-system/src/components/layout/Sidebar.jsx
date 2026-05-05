@@ -1,31 +1,25 @@
 import React from 'react';
+import { NavLink } from 'react-router-dom';
 import { cn } from '../../utils/helpers';
 import HatchLogo from '../ui/HatchLogo';
 import SyncIndicator from '../ui/SyncIndicator';
 
 const navItems = [
-  { id: 'dashboard', label: 'Dashboard', icon: DashboardIcon },
-  { id: 'sales', label: 'Sales Overview', icon: SalesIcon },
-  { id: 'locations', label: 'Location Stock', icon: LocationIcon },
-  { id: 'orders', label: 'Orders', icon: OrdersIcon },
-  { id: 'receive', label: 'Receive Stock', icon: ReceiveIcon },
-  { id: 'inventory', label: 'Warehouse', icon: InventoryIcon },
-  { id: 'remove', label: 'Remove Stock', icon: RemoveIcon },
-  { id: 'restock', label: 'Restock Machine', icon: RestockIcon },
-  { id: 'history', label: 'History', icon: HistoryIcon },
-  { id: 'shrinkage', label: 'Shrinkage', icon: ShrinkageIcon },
-  { id: 'admin', label: 'Admin', icon: AdminIcon },
-  { id: 'docs', label: 'Restocking Docs', icon: DocsIcon },
+  { path: '/', label: 'Dashboard', icon: DashboardIcon, end: true },
+  { path: '/sales', label: 'Sales', icon: SalesIcon },
+  { path: '/locations', label: 'Location Stock', icon: LocationIcon },
+  { path: '/orders', label: 'Orders', icon: OrdersIcon },
+  { path: '/restock', label: 'Restock', icon: RestockIcon },
+  { path: '/support', label: 'Support', icon: SupportIcon },
 ];
 
 export default function Sidebar({
-  activeTab,
-  onTabChange,
   collapsed,
   onToggleCollapse,
   isMobile,
   mobileMenuOpen,
   onCloseMobile,
+  onNavigate,
   syncStatus,
 }) {
   return (
@@ -43,7 +37,6 @@ export default function Sidebar({
             )
       )}
     >
-      {/* Logo */}
       <div className="p-4 border-b border-zinc-800 flex items-center justify-between">
         <HatchLogo collapsed={!isMobile && collapsed} />
         {isMobile && (
@@ -56,37 +49,34 @@ export default function Sidebar({
         )}
       </div>
 
-      {/* Navigation */}
       <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
         {navItems.map((item) => {
           const Icon = item.icon;
           return (
-            <button
-              key={item.id}
-              onClick={() => onTabChange(item.id)}
-              className={cn(
-                'w-full flex items-center gap-3 px-3 py-3 md:py-2.5 rounded-lg text-sm transition-all',
-                activeTab === item.id
-                  ? 'bg-gradient-to-r from-emerald-600/20 to-teal-600/20 text-emerald-400 border border-emerald-500/30'
-                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 active:bg-zinc-800'
-              )}
+            <NavLink
+              key={item.path}
+              to={item.path}
+              end={item.end}
+              onClick={onNavigate}
+              className={({ isActive }) =>
+                cn(
+                  'group w-full flex items-center gap-3 px-3 py-3 md:py-2.5 rounded-lg text-sm transition-all',
+                  isActive
+                    ? 'bg-gradient-to-r from-emerald-600/20 to-teal-600/20 text-emerald-400 border border-emerald-500/30'
+                    : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 active:bg-zinc-800'
+                )
+              }
               title={!isMobile && collapsed ? item.label : undefined}
             >
-              <Icon
-                className={cn(
-                  'w-5 h-5 flex-shrink-0',
-                  activeTab === item.id ? 'text-emerald-400' : ''
-                )}
-              />
+              <Icon className="w-5 h-5 flex-shrink-0" />
               {(isMobile || !collapsed) && (
                 <span className="truncate">{item.label}</span>
               )}
-            </button>
+            </NavLink>
           );
         })}
       </nav>
 
-      {/* Sidebar Footer - Desktop Only */}
       {!isMobile && (
         <div className="p-3 border-t border-zinc-800">
           <button
@@ -101,7 +91,6 @@ export default function Sidebar({
         </div>
       )}
 
-      {/* Mobile Footer - Sync Status */}
       {isMobile && (
         <div className="p-4 border-t border-zinc-800">
           <div className="flex items-center justify-between text-sm">
@@ -116,7 +105,6 @@ export default function Sidebar({
   );
 }
 
-// Icons (simplified - you can replace with lucide-react or heroicons)
 function DashboardIcon({ className }) {
   return (
     <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
@@ -150,30 +138,6 @@ function OrdersIcon({ className }) {
   );
 }
 
-function ReceiveIcon({ className }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
-    </svg>
-  );
-}
-
-function InventoryIcon({ className }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
-    </svg>
-  );
-}
-
-function RemoveIcon({ className }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
-    </svg>
-  );
-}
-
 function RestockIcon({ className }) {
   return (
     <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
@@ -182,35 +146,11 @@ function RestockIcon({ className }) {
   );
 }
 
-function HistoryIcon({ className }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-    </svg>
-  );
-}
-
-function ShrinkageIcon({ className }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-    </svg>
-  );
-}
-
-function AdminIcon({ className }) {
+function SupportIcon({ className }) {
   return (
     <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
       <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-    </svg>
-  );
-}
-
-function DocsIcon({ className }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25" />
     </svg>
   );
 }

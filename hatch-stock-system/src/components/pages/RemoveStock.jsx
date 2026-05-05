@@ -1,15 +1,23 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useStock } from '../../context/StockContext';
+import { useRestockRun } from '../../context/RestockRunContext';
 
 export default function RemoveStock() {
   const { data, recordStockRemoval } = useStock();
+  const { selectedRouteId, setSelectedRouteId, markStepComplete } = useRestockRun();
   const [form, setForm] = useState({
     fromWarehouse: '',
-    routeId: '',
+    routeId: selectedRouteId || '',
     takenBy: '',
     notes: '',
     items: [{ sku: '', quantity: '' }]
   });
+
+  useEffect(() => {
+    if (selectedRouteId && form.routeId !== selectedRouteId) {
+      setForm((prev) => ({ ...prev, routeId: selectedRouteId, items: [{ sku: '', quantity: '' }] }));
+    }
+  }, [selectedRouteId]);
   const [warnings, setWarnings] = useState({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -143,7 +151,8 @@ export default function RemoveStock() {
         items: itemsToRemove
       });
 
-      setForm({ fromWarehouse: '', routeId: '', takenBy: '', notes: '', items: [{ sku: '', quantity: '' }] });
+      markStepComplete('remove');
+      setForm({ fromWarehouse: '', routeId: selectedRouteId || '', takenBy: '', notes: '', items: [{ sku: '', quantity: '' }] });
       setWarnings({});
     } catch (err) {
       setError(err.message || 'Failed to remove stock');
@@ -188,7 +197,7 @@ export default function RemoveStock() {
             <label className="block text-xs text-zinc-500 mb-1">Re-stock Route</label>
             <select
               value={form.routeId}
-              onChange={e => { setForm({ ...form, routeId: e.target.value, items: [{ sku: '', quantity: '' }] }); setWarnings({}); }}
+              onChange={e => { setForm({ ...form, routeId: e.target.value, items: [{ sku: '', quantity: '' }] }); setSelectedRouteId(e.target.value); setWarnings({}); }}
               className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500"
             >
               <option value="">Select route</option>

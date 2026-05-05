@@ -1,25 +1,28 @@
 import React from 'react';
+import { useLocation } from 'react-router-dom';
 import SyncIndicator from '../ui/SyncIndicator';
 
-const tabLabels = {
-  dashboard: 'Dashboard',
-  sales: 'Sales Overview',
-  locations: 'Location Stock',
-  orders: 'Orders',
-  receive: 'Receive Stock',
-  inventory: 'Warehouse Inventory',
-  remove: 'Remove Stock',
-  restock: 'Restock Machine',
-  history: 'History',
-  admin: 'Admin',
-  docs: 'Restocking Docs',
-};
+const labelByPathPrefix = [
+  ['/sales', 'Sales'],
+  ['/locations', 'Location Stock'],
+  ['/orders', 'Orders'],
+  ['/restock', 'Restock'],
+  ['/support', 'Support'],
+];
 
-export default function Header({ activeTab, syncStatus, isMobile, onMenuClick }) {
+function getLabel(pathname) {
+  if (pathname === '/' || pathname === '') return 'Dashboard';
+  const match = labelByPathPrefix.find(([prefix]) => pathname === prefix || pathname.startsWith(prefix + '/'));
+  return match ? match[1] : 'Dashboard';
+}
+
+export default function Header({ syncStatus, isMobile, onMenuClick }) {
+  const { pathname } = useLocation();
+  const label = getLabel(pathname);
+
   return (
     <header className="h-14 md:h-16 border-b border-zinc-800 bg-zinc-900/50 backdrop-blur-sm flex items-center justify-between px-4 md:px-6 flex-shrink-0 sticky top-0 z-30">
       <div className="flex items-center gap-3">
-        {/* Mobile Hamburger */}
         {isMobile && (
           <button
             onClick={onMenuClick}
@@ -32,26 +35,24 @@ export default function Header({ activeTab, syncStatus, isMobile, onMenuClick })
         )}
         <div>
           <h2 className="text-base md:text-lg font-semibold text-zinc-100">
-            {tabLabels[activeTab] || 'Dashboard'}
+            {label}
           </h2>
         </div>
       </div>
-      
-      {/* Desktop header items */}
+
       {!isMobile && (
         <div className="flex items-center gap-6">
           <SyncIndicator status={syncStatus} />
           <div className="text-sm text-zinc-500">
-            {new Date().toLocaleDateString('en-GB', { 
-              weekday: 'short', 
-              day: 'numeric', 
-              month: 'short' 
+            {new Date().toLocaleDateString('en-GB', {
+              weekday: 'short',
+              day: 'numeric',
+              month: 'short'
             })}
           </div>
         </div>
       )}
-      
-      {/* Mobile sync indicator - compact */}
+
       {isMobile && (
         <div className="flex items-center">
           <span

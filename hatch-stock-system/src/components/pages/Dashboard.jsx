@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { useStock } from '../../context/StockContext';
 import { vendliveService } from '../../services/vendlive.service';
 
-function StatCard({ label, value, accent }) {
+function StatCard({ label, value, accent, to }) {
   const colors = {
     emerald: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400',
     teal: 'bg-teal-500/10 border-teal-500/20 text-teal-400',
@@ -10,11 +11,22 @@ function StatCard({ label, value, accent }) {
     purple: 'bg-purple-500/10 border-purple-500/20 text-purple-400',
     red: 'bg-red-500/10 border-red-500/20 text-red-400'
   };
-  return (
-    <div className={`rounded-lg border p-5 ${colors[accent] || colors.emerald}`}>
+  const content = (
+    <div className={`rounded-lg border p-5 h-full transition-colors ${colors[accent] || colors.emerald} ${to ? 'hover:border-current cursor-pointer' : ''}`}>
       <div className="text-2xl font-bold">{value}</div>
       <div className="text-xs opacity-70 mt-1">{label}</div>
     </div>
+  );
+  return to ? <Link to={to} className="block">{content}</Link> : content;
+}
+
+function SectionHeading({ children, to }) {
+  if (!to) return <h3 className="text-sm font-medium text-zinc-400 mb-4">{children}</h3>;
+  return (
+    <Link to={to} className="text-sm font-medium text-zinc-400 mb-4 hover:text-emerald-400 inline-flex items-center gap-1 group">
+      <span>{children}</span>
+      <span className="text-zinc-600 group-hover:text-emerald-400 transition-colors">→</span>
+    </Link>
   );
 }
 
@@ -81,14 +93,23 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-8">
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
-        <StatCard label="Pending Orders" value={pendingOrders} accent="teal" />
-        <StatCard label="Warehouse Stock" value={totalWarehouseUnits.toLocaleString()} accent="blue" />
-        <StatCard label="Location Stock" value={totalLocationUnits.toLocaleString()} accent="emerald" />
-        <StatCard label="Warehouse Value" value={`£${totalValue.toLocaleString('en-GB', { minimumFractionDigits: 2 })}`} accent="purple" />
-        <StatCard label="30d Revenue" value={`£${totalSalesRevenue.toFixed(2)}`} accent="emerald" />
-        <StatCard label="30d Profit" value={`£${totalSalesProfit.toFixed(2)}`} accent="teal" />
-        <StatCard label="Expiry Alerts" value={expiryAlertCount} accent={expiryAlertCount > 0 ? 'red' : 'emerald'} />
+      <div>
+        <div className="text-xs uppercase tracking-wider text-zinc-500 mb-2">Operations</div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <StatCard label="Pending Orders" value={pendingOrders} accent="teal" to="/orders/purchase" />
+          <StatCard label="Warehouse Stock" value={totalWarehouseUnits.toLocaleString()} accent="blue" to="/orders/warehouse" />
+          <StatCard label="Location Stock" value={totalLocationUnits.toLocaleString()} accent="emerald" to="/locations" />
+          <StatCard label="Expiry Alerts" value={expiryAlertCount} accent={expiryAlertCount > 0 ? 'red' : 'emerald'} to="/orders/warehouse" />
+        </div>
+      </div>
+
+      <div>
+        <div className="text-xs uppercase tracking-wider text-zinc-500 mb-2">Financial</div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <StatCard label="Warehouse Value" value={`£${totalValue.toLocaleString('en-GB', { minimumFractionDigits: 2 })}`} accent="purple" to="/orders/warehouse" />
+          <StatCard label="30d Revenue" value={`£${totalSalesRevenue.toFixed(2)}`} accent="emerald" to="/sales" />
+          <StatCard label="30d Profit" value={`£${totalSalesProfit.toFixed(2)}`} accent="teal" to="/sales" />
+        </div>
       </div>
 
       {vlStatus?.connected && (
@@ -178,7 +199,7 @@ export default function Dashboard() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-6">
-          <h3 className="text-sm font-medium text-zinc-400 mb-4">Warehouse Stock</h3>
+          <SectionHeading to="/orders/warehouse">Warehouse Stock</SectionHeading>
           {data.warehouses.length === 0 ? (
             <p className="text-zinc-500 text-sm">No warehouses configured</p>
           ) : (
@@ -201,7 +222,7 @@ export default function Dashboard() {
         </div>
 
         <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-6">
-          <h3 className="text-sm font-medium text-zinc-400 mb-4">Location Stock Levels</h3>
+          <SectionHeading to="/locations">Location Stock Levels</SectionHeading>
           {data.locations.length === 0 ? (
             <p className="text-zinc-500 text-sm">No locations configured</p>
           ) : (
@@ -248,7 +269,7 @@ export default function Dashboard() {
       )}
 
       <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-6">
-        <h3 className="text-sm font-medium text-zinc-400 mb-4">Recent Stock Movements</h3>
+        <SectionHeading to="/support/history">Recent Stock Movements</SectionHeading>
         {recentRemovals.length === 0 ? (
           <p className="text-zinc-500 text-sm">No recent movements</p>
         ) : (

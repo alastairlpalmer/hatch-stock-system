@@ -1,8 +1,10 @@
 import React, { useState } from 'react';
 import { useStock } from '../../context/StockContext';
+import { useRestockRun } from '../../context/RestockRunContext';
 
 export default function RestockMachine() {
   const { data, submitStockCheck, recordRestock } = useStock();
+  const { markStepComplete } = useRestockRun();
   const [activeSubTab, setActiveSubTab] = useState('restock');
   const [step, setStep] = useState('select');
   const [selectedLocation, setSelectedLocation] = useState('');
@@ -168,6 +170,7 @@ export default function RestockMachine() {
         imageOverride: override && !uploadedImage
       });
 
+      markStepComplete('machine');
       setStep('complete');
     } catch (err) {
       setError(err.message || 'Failed to complete restock');
