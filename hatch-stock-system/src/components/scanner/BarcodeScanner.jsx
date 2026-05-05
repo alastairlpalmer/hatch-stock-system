@@ -235,7 +235,7 @@ export default function BarcodeScanner({ open, title = 'Scan barcode', onScan, o
                 inputMode="text"
                 value={manualValue}
                 onChange={(e) => setManualValue(e.target.value)}
-                className="flex-1 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:border-emerald-500"
+                className="flex-1 min-w-0 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:border-emerald-500"
               />
               <button
                 type="submit"

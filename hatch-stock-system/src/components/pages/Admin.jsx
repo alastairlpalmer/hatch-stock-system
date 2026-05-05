@@ -373,7 +373,7 @@ function AdminProducts() {
                   value={form.barcode}
                   onChange={e => setForm({ ...form, barcode: e.target.value })}
                   placeholder="EAN-13, UPC, or scan"
-                  className="flex-1 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm"
+                  className="flex-1 min-w-0 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm"
                 />
                 <button
                   type="button"

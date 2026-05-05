@@ -471,7 +471,7 @@ export default function SalesOverview() {
                   <select
                     value={locationMappings[locName] || ''}
                     onChange={(e) => updateLocationMapping(locName, e.target.value)}
-                    className="flex-1 bg-zinc-800 border border-zinc-700 rounded px-3 py-1.5 text-sm"
+                    className="flex-1 min-w-0 bg-zinc-800 border border-zinc-700 rounded px-3 py-1.5 text-sm"
                   >
                     <option value="">-- Skip (don't deduct) --</option>
                     {data.locations.map(loc => (

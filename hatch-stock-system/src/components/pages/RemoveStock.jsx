@@ -373,7 +373,7 @@ export default function RemoveStock() {
                         <select
                           value={item.sku}
                           onChange={e => updateItem(idx, 'sku', e.target.value)}
-                          className="flex-1 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500"
+                          className="flex-1 min-w-0 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500"
                         >
                           <option value="">Select product</option>
                           {getAvailableProducts().map(([sku, qty]) => {

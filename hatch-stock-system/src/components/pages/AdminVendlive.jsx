@@ -274,7 +274,7 @@ function SyncSettings({ config, onUpdate }) {
               type="text"
               value={webhookUrl}
               readOnly
-              className="flex-1 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm text-zinc-400"
+              className="flex-1 min-w-0 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm text-zinc-400"
             />
             <button
               onClick={handleCopy}
