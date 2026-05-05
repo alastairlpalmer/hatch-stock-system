@@ -1,5 +1,8 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { useStock } from '../../context/StockContext';
+import BarcodeScanner from '../scanner/BarcodeScanner';
+import { productsService } from '../../services/products.service';
+import { unlockAudio } from '../../utils/feedback';
 
 export default function ReceiveStock() {
   const { data, receiveOrder } = useStock();
@@ -9,6 +12,14 @@ export default function ReceiveStock() {
   const [receiveWarehouseId, setReceiveWarehouseId] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [scannerOpen, setScannerOpen] = useState(false);
+  // Handle to BarcodeScanner.flash() — set on overlay mount via onReady.
+  const scannerApiRef = useRef(null);
+  // Snapshot of received quantities taken when the scanner opens, so we
+  // can restore them if the user opens scan-mode by mistake (we zero
+  // quantities on open so scanning counts up from 0).
+  const [preScanSnapshot, setPreScanSnapshot] = useState(null);
+  const [scansThisSession, setScansThisSession] = useState(0);
 
   const pendingOrders = data.orders.filter(o => o.status === 'pending');
   const receipts = data.receipts || [];
@@ -35,6 +46,89 @@ export default function ReceiveStock() {
       ...prev,
       [sku]: { ...prev[sku], [field]: value }
     }));
+  };
+
+  // Open the scanner against the current order. Quantities are reset to 0
+  // so the user counts each item by scanning. We snapshot first so the
+  // close handler can restore the previous (pre-fill) state if no scans
+  // happened — which happens when the user taps Scan by mistake.
+  const openScanForOrder = () => {
+    if (!selectedOrder) return;
+    // Must run inside the synchronous user-gesture call stack — iOS only
+    // permits AudioContext.resume() from within a tap handler, not from
+    // useEffect that runs after the render commits.
+    unlockAudio();
+    setPreScanSnapshot(receivedItems);
+    setReceivedItems(prev => {
+      const next = {};
+      Object.keys(prev).forEach(sku => {
+        next[sku] = { ...prev[sku], quantity: 0 };
+      });
+      return next;
+    });
+    setScansThisSession(0);
+    setScannerOpen(true);
+  };
+
+  const closeScanner = () => {
+    setScannerOpen(false);
+    // If the user opened the scanner but didn't actually scan anything,
+    // restore their previous quantities so we don't silently zero a PO
+    // that was about to be confirmed manually.
+    if (scansThisSession === 0 && preScanSnapshot) {
+      setReceivedItems(preScanSnapshot);
+    }
+    setPreScanSnapshot(null);
+    setScansThisSession(0);
+  };
+
+  // Called once per accepted scan from the camera overlay.
+  // - Looks up the product by barcode (with SKU fallback)
+  // - If the product is on the selected PO, +1 received qty and green flash
+  // - If the product exists but isn't on the PO, yellow flash (no auto-add)
+  // - If unknown / network error, red flash
+  const handleScan = async (code) => {
+    if (!selectedOrder) return;
+    const flash = scannerApiRef.current?.flash;
+    try {
+      const result = await productsService.lookupBarcode(code);
+      if (!result) {
+        flash?.({ kind: 'error', message: 'No product found', detail: code });
+        return;
+      }
+      const { product } = result;
+      const onOrder = selectedOrder.items.some(i => i.sku === product.sku);
+      if (!onOrder) {
+        flash?.({
+          kind: 'warn',
+          message: 'Not on this order',
+          detail: product.name || product.sku,
+        });
+        return;
+      }
+      // Cap at the ordered quantity to avoid silent over-receipt.
+      const orderedQty = selectedOrder.items.find(i => i.sku === product.sku)?.quantity ?? 0;
+      let appliedQty = 0;
+      setReceivedItems(prev => {
+        const current = prev[product.sku] || { quantity: 0, expiryDate: '', hasDamage: false, damageNotes: '' };
+        const nextQty = Math.min((current.quantity || 0) + 1, orderedQty);
+        appliedQty = nextQty;
+        return { ...prev, [product.sku]: { ...current, quantity: nextQty } };
+      });
+      setScansThisSession(n => n + 1);
+      const atCap = appliedQty >= orderedQty;
+      flash?.({
+        kind: atCap ? 'warn' : 'success',
+        message: product.name || product.sku,
+        detail: atCap ? `${appliedQty}/${orderedQty} — at ordered max` : `${appliedQty}/${orderedQty}`,
+      });
+    } catch (err) {
+      flash?.({
+        kind: 'error',
+        message: 'Lookup failed',
+        detail: err.message || 'Network error',
+      });
+    }
   };
 
   const confirmReceive = async () => {
@@ -166,7 +260,17 @@ export default function ReceiveStock() {
                     Ordered to: {selectedOrder.warehouseId ? getWarehouseName(selectedOrder.warehouseId) : selectedOrder.customAddress}
                   </p>
                 </div>
-                <button onClick={() => setSelectedOrder(null)} className="text-zinc-500 hover:text-zinc-300">Cancel</button>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={openScanForOrder}
+                    disabled={!receiveWarehouseId}
+                    className="px-3 py-1.5 bg-emerald-600 text-white rounded text-sm font-medium hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    title={!receiveWarehouseId ? 'Select a warehouse first' : 'Scan items into this order'}
+                  >
+                    Scan items
+                  </button>
+                  <button onClick={() => setSelectedOrder(null)} className="text-zinc-500 hover:text-zinc-300">Cancel</button>
+                </div>
               </div>
 
               {/* Warehouse selector for custom address orders */}
@@ -364,6 +468,14 @@ export default function ReceiveStock() {
           )}
         </div>
       )}
+
+      <BarcodeScanner
+        open={scannerOpen}
+        title={selectedOrder ? `Receiving: ${getSupplierName(selectedOrder.supplierId)}` : 'Scan barcode'}
+        onScan={handleScan}
+        onClose={closeScanner}
+        onReady={(api) => { scannerApiRef.current = api; }}
+      />
     </div>
   );
 }

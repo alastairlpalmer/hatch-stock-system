@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useStock } from '../../context/StockContext';
 import AdminVendlive from './AdminVendlive';
+import BarcodeScanner from '../scanner/BarcodeScanner';
+import { unlockAudio } from '../../utils/feedback';
 
 export default function Admin() {
   const [adminTab, setAdminTab] = useState('products');
@@ -52,6 +54,7 @@ function AdminProducts() {
   const [showImport, setShowImport] = useState(false);
   const [importPreview, setImportPreview] = useState([]);
   const [importStats, setImportStats] = useState({ total: 0, new: 0, existing: 0 });
+  const [scannerOpen, setScannerOpen] = useState(false);
 
   const resetForm = () => {
     setForm({ sku: '', name: '', description: '', unitCost: '', unitsPerBox: '', preferredSupplierId: '', category: '', barcode: '' });
@@ -362,10 +365,39 @@ function AdminProducts() {
               <label className="block text-xs text-zinc-500 mb-1">Category</label>
               <input type="text" value={form.category} onChange={e => setForm({ ...form, category: e.target.value })} className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm" />
             </div>
+            <div className="md:col-span-2">
+              <label className="block text-xs text-zinc-500 mb-1">Barcode</label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={form.barcode}
+                  onChange={e => setForm({ ...form, barcode: e.target.value })}
+                  placeholder="EAN-13, UPC, or scan"
+                  className="flex-1 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm"
+                />
+                <button
+                  type="button"
+                  onClick={() => { unlockAudio(); setScannerOpen(true); }}
+                  className="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded text-sm text-emerald-400"
+                >
+                  Scan
+                </button>
+              </div>
+            </div>
           </div>
           <button onClick={submit} disabled={loading} className="px-4 py-2 bg-emerald-600 text-white rounded text-sm font-medium hover:bg-emerald-500 disabled:opacity-50">
             {loading ? 'Saving...' : editingId ? 'Update' : 'Add'} Product
           </button>
+
+          <BarcodeScanner
+            open={scannerOpen}
+            title="Scan to set barcode"
+            onScan={(code) => {
+              setForm(f => ({ ...f, barcode: code }));
+              setScannerOpen(false);
+            }}
+            onClose={() => setScannerOpen(false)}
+          />
         </div>
       )}
 

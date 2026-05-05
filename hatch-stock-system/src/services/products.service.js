@@ -71,6 +71,27 @@ export const productsService = {
     });
     return response.data;
   },
+
+  /**
+   * Lookup a product by scanned barcode (with SKU fallback).
+   * @param {string} code - The scanned barcode or SKU string.
+   * @returns {Promise<{ product, matchedBy: 'barcode' | 'sku' } | null>}
+   *          Resolves with the match envelope, or null if not found.
+   *          Other (network / 4xx / 5xx) errors are rethrown.
+   */
+  lookupBarcode: async (code) => {
+    try {
+      const response = await api.get('/products/lookup', {
+        params: { barcode: code },
+      });
+      return response.data;
+    } catch (err) {
+      if (err.response && err.response.status === 404) {
+        return null;
+      }
+      throw err;
+    }
+  },
 };
 
 export default productsService;
