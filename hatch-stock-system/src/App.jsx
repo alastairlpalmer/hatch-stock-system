@@ -53,7 +53,7 @@ function App() {
   }
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 flex">
+    <div className="h-screen bg-zinc-950 text-zinc-100 flex overflow-hidden">
       {isMobile && mobileMenuOpen && (
         <div
           className="fixed inset-0 bg-black/60 z-40 backdrop-blur-sm"
