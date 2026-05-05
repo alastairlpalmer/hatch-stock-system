@@ -34,7 +34,7 @@ export default function Header({ syncStatus, isMobile, onMenuClick }) {
           </button>
         )}
         <div>
-          <h2 className="text-base md:text-lg font-semibold text-zinc-100">
+          <h2 className="text-base md:text-lg font-bold text-zinc-100">
             {label}
           </h2>
         </div>
@@ -58,7 +58,7 @@ export default function Header({ syncStatus, isMobile, onMenuClick }) {
           <span
             className={`w-2 h-2 rounded-full ${
               syncStatus.status === 'saved' || syncStatus.status === 'loaded' || syncStatus.status === 'connected'
-                ? 'bg-emerald-500'
+                ? 'bg-emerald-400'
                 : syncStatus.status === 'saving'
                 ? 'bg-yellow-500 animate-pulse'
                 : syncStatus.status === 'error'

@@ -4,8 +4,12 @@ export default function LoadingScreen() {
   return (
     <div className="min-h-screen bg-zinc-950 flex items-center justify-center">
       <div className="flex flex-col items-center gap-4">
-        <div className="w-12 h-12 bg-gradient-to-br from-emerald-500 to-teal-600 rounded-xl animate-pulse"></div>
-        <div className="text-zinc-400">Loading...</div>
+        <img
+          src="/brand/hatch-icon-cream.svg"
+          alt="Hatch"
+          className="h-14 w-auto animate-pulse"
+        />
+        <div className="text-zinc-400 text-sm">Loading...</div>
       </div>
     </div>
   );

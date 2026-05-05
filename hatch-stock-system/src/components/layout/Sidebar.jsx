@@ -62,7 +62,7 @@ export default function Sidebar({
                 cn(
                   'group w-full flex items-center gap-3 px-3 py-3 md:py-2.5 rounded-lg text-sm transition-all',
                   isActive
-                    ? 'bg-gradient-to-r from-emerald-600/20 to-teal-600/20 text-emerald-400 border border-emerald-500/30'
+                    ? 'bg-hatch-green/15 text-hatch-cream border border-hatch-green/40'
                     : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 active:bg-zinc-800'
                 )
               }
