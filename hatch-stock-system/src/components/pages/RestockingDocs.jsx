@@ -78,7 +78,7 @@ const STEPS = [
       'In VendLive, go through the current stock list shown on screen.',
       'Confirm the quantities of items not due for restock this week. Update the system if there is any discrepancy between what is on screen and what is physically in the fridge.',
     ],
-    videoSrc: null,
+    videoSrc: '/videos/06-check-stock-vendlive.mp4',
   },
   {
     id: 'restock',
