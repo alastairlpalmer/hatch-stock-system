@@ -1,0 +1,25 @@
+{
+  "name": "Hatch Stock Management",
+  "short_name": "Hatch Stock",
+  "description": "Warehouse and vending stock tracking. Add to Home Screen for full-screen barcode scanning.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0a0a0a",
+  "theme_color": "#004638",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/brand/hatch-icon-cream.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

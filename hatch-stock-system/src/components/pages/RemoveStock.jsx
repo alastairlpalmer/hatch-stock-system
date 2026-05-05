@@ -1,6 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect } from 'react';
 import { useStock } from '../../context/StockContext';
 import { useRestockRun } from '../../context/RestockRunContext';
+import BarcodeScanner from '../scanner/BarcodeScanner';
+import { productsService } from '../../services/products.service';
+import { unlockAudio } from '../../utils/feedback';
 
 export default function RemoveStock() {
   const { data, recordStockRemoval } = useStock();
@@ -12,6 +15,12 @@ export default function RemoveStock() {
     notes: '',
     items: [{ sku: '', quantity: '' }]
   });
+  const [scannerOpen, setScannerOpen] = useState(false);
+  // Latest form ref so the scan handler doesn't have stale state when
+  // the user scans many items in quick succession.
+  const formRef = useRef(form);
+  useEffect(() => { formRef.current = form; }, [form]);
+  const scannerApiRef = useRef(null);
 
   useEffect(() => {
     if (selectedRouteId && form.routeId !== selectedRouteId) {
@@ -109,6 +118,106 @@ export default function RemoveStock() {
           return newWarnings;
         });
       }
+    }
+  };
+
+  // Called once per accepted scan from the camera overlay.
+  // - Looks up the product by barcode (SKU fallback)
+  // - Verifies stock is available in the selected warehouse
+  // - For non-adhoc routes, warns when the SKU isn't on the route's location
+  // - Bumps an existing line for that SKU if present, else appends a new line
+  // - Mirrors updateItem's capacity-warning logic so scan-added rows
+  //   get the same yellow capacity banner as manually-typed rows.
+  const handleScan = async (code) => {
+    const flash = scannerApiRef.current?.flash;
+    const currentForm = formRef.current;
+    if (!currentForm.fromWarehouse || !currentForm.routeId) {
+      flash?.({ kind: 'warn', message: 'Pick warehouse + route first' });
+      return;
+    }
+    try {
+      const result = await productsService.lookupBarcode(code);
+      if (!result) {
+        flash?.({ kind: 'error', message: 'No product found', detail: code });
+        return;
+      }
+      const { product } = result;
+      const sku = product.sku;
+      const stockQty = (data.stock?.[currentForm.fromWarehouse] || {})[sku] || 0;
+      if (stockQty <= 0) {
+        flash?.({
+          kind: 'error',
+          message: 'Out of stock at warehouse',
+          detail: product.name || sku,
+        });
+        return;
+      }
+      const assigned = getRouteAssignedProducts();
+      const offRoute = !isAdhocRoute && assigned && !assigned.includes(sku);
+
+      // Bump existing matching line, else fill the first empty line, else append.
+      let touchedIdx = -1;
+      let touchedQty = 0;
+      setForm((prev) => {
+        const items = [...prev.items];
+        const matchIdx = items.findIndex((i) => i.sku === sku);
+        if (matchIdx >= 0) {
+          const next = (parseInt(items[matchIdx].quantity, 10) || 0) + 1;
+          const capped = Math.min(next, stockQty);
+          items[matchIdx] = { ...items[matchIdx], quantity: String(capped) };
+          touchedIdx = matchIdx;
+          touchedQty = capped;
+        } else {
+          const emptyIdx = items.findIndex((i) => !i.sku);
+          if (emptyIdx >= 0) {
+            items[emptyIdx] = { sku, quantity: '1' };
+            touchedIdx = emptyIdx;
+          } else {
+            items.push({ sku, quantity: '1' });
+            touchedIdx = items.length - 1;
+          }
+          touchedQty = 1;
+        }
+        return { ...prev, items };
+      });
+
+      if (touchedIdx >= 0 && !isAdhocRoute) {
+        const availableSpace = getRouteAvailableSpace(sku);
+        if (availableSpace !== Infinity && touchedQty > availableSpace) {
+          setWarnings(prev => ({
+            ...prev,
+            [touchedIdx]: {
+              sku,
+              qty: touchedQty,
+              availableSpace,
+              maxCapacity: getRouteMaxCapacity(sku),
+            },
+          }));
+        } else {
+          setWarnings(prev => {
+            if (!(touchedIdx in prev)) return prev;
+            const next = { ...prev };
+            delete next[touchedIdx];
+            return next;
+          });
+        }
+      }
+
+      if (offRoute) {
+        flash?.({
+          kind: 'warn',
+          message: 'Not on this route',
+          detail: product.name || sku,
+        });
+      } else {
+        flash?.({
+          kind: 'success',
+          message: product.name || sku,
+          detail: `${touchedQty} / ${stockQty} avail`,
+        });
+      }
+    } catch (err) {
+      flash?.({ kind: 'error', message: 'Lookup failed', detail: err.message || 'Network error' });
     }
   };
 
@@ -294,7 +403,15 @@ export default function RemoveStock() {
                   );
                 })}
               </div>
-              <button onClick={addItem} className="mt-2 text-sm text-emerald-400 hover:text-emerald-300">+ Add item</button>
+              <div className="mt-2 flex items-center gap-4">
+                <button onClick={addItem} className="text-sm text-emerald-400 hover:text-emerald-300">+ Add item</button>
+                <button
+                  onClick={() => { unlockAudio(); setScannerOpen(true); }}
+                  className="text-sm px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded"
+                >
+                  Scan to add
+                </button>
+              </div>
             </div>
           </>
         )}
@@ -317,6 +434,14 @@ export default function RemoveStock() {
           {loading ? 'Processing...' : 'Confirm Removal'}
         </button>
       </div>
+
+      <BarcodeScanner
+        open={scannerOpen}
+        title={selectedRoute ? `Picking: ${selectedRoute.name}` : 'Scan to add'}
+        onScan={handleScan}
+        onClose={() => setScannerOpen(false)}
+        onReady={(api) => { scannerApiRef.current = api; }}
+      />
     </div>
   );
 }
