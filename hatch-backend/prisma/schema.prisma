@@ -22,13 +22,13 @@ model Product {
   unitCost            Float?   @map("unit_cost")
   salePrice           Float?   @map("sale_price")
   unitsPerBox         Int?     @default(1) @map("units_per_box")
-  barcode             String?
+  barcode             String?  @unique
   preferredSupplierId String?  @map("preferred_supplier_id")
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
 
   // Relations
-  preferredSupplier Supplier?          @relation(fields: [preferredSupplierId], references: [id])
+  preferredSupplier Supplier?        @relation(fields: [preferredSupplierId], references: [id])
   warehouseStock    WarehouseStock[]
   locationStock     LocationStock[]
   stockBatches      StockBatch[]
@@ -56,10 +56,10 @@ model Warehouse {
 }
 
 model WarehouseStock {
-  warehouseId String    @map("warehouse_id")
+  warehouseId String   @map("warehouse_id")
   sku         String
-  quantity    Int       @default(0)
-  updatedAt   DateTime  @updatedAt @map("updated_at")
+  quantity    Int      @default(0)
+  updatedAt   DateTime @updatedAt @map("updated_at")
 
   warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
   product   Product   @relation(fields: [sku], references: [sku], onDelete: Cascade)
@@ -78,13 +78,13 @@ model Location {
   createdAt DateTime @default(now()) @map("created_at")
 
   // Relations
-  stock               LocationStock[]
-  configs             LocationConfig[]
-  restocks            RestockRecord[]
-  stockChecks         StockCheck[]
-  assignedItems       LocationAssignment[]
-  machineMappings     VendliveMachineMapping[]
-  vendliveStockSyncs  VendliveStockSync[]
+  stock              LocationStock[]
+  configs            LocationConfig[]
+  restocks           RestockRecord[]
+  stockChecks        StockCheck[]
+  assignedItems      LocationAssignment[]
+  machineMappings    VendliveMachineMapping[]
+  vendliveStockSyncs VendliveStockSync[]
 
   @@map("locations")
 }
@@ -205,7 +205,7 @@ model StockRemoval {
   routeName   String?  @map("route_name")
   takenBy     String?  @map("taken_by")
   notes       String?
-  items       Json     // [{ sku, quantity }]
+  items       Json // [{ sku, quantity }]
   createdAt   DateTime @default(now()) @map("created_at")
 
   warehouse Warehouse @relation(fields: [warehouseId], references: [id])
@@ -217,7 +217,7 @@ model RestockRecord {
   id          String   @id @default(uuid())
   locationId  String   @map("location_id")
   performedBy String?  @map("performed_by")
-  items       Json     // [{ sku, quantity }]
+  items       Json // [{ sku, quantity }]
   photoUrl    String?  @map("photo_url")
   notes       String?
   createdAt   DateTime @default(now()) @map("created_at")
@@ -231,8 +231,8 @@ model StockCheck {
   id                  String   @id @default(uuid())
   locationId          String   @map("location_id")
   performedBy         String?  @map("performed_by")
-  items               Json     // [{ sku, expected, counted, variance }]
-  source              String?  // 'manual' | 'vendlive'
+  items               Json // [{ sku, expected, counted, variance }]
+  source              String? // 'manual' | 'vendlive'
   vendliveStockSyncId String?  @map("vendlive_stock_sync_id")
   createdAt           DateTime @default(now()) @map("created_at")
 
@@ -268,17 +268,17 @@ model Sale {
   importedAt    DateTime @default(now()) @map("imported_at")
 
   // VendLive integration fields
-  vendliveOrderSaleId   Int?     @map("vendlive_order_sale_id")
-  vendliveProductSaleId Int?     @map("vendlive_product_sale_id")
-  vendliveMachineId     Int?     @map("vendlive_machine_id")
-  vendStatus            String?  @map("vend_status")
-  discountValue         Float?   @map("discount_value")
-  vatRate               Float?   @map("vat_rate")
-  vatAmount             Float?   @map("vat_amount")
-  promotionId           Int?     @map("promotion_id")
-  voucherCode           String?  @map("voucher_code")
-  isRefunded            Boolean  @default(false) @map("is_refunded")
-  syncSource            String?  @map("sync_source") // 'webhook' | 'poll' | 'csv_import'
+  vendliveOrderSaleId   Int?    @map("vendlive_order_sale_id")
+  vendliveProductSaleId Int?    @map("vendlive_product_sale_id")
+  vendliveMachineId     Int?    @map("vendlive_machine_id")
+  vendStatus            String? @map("vend_status")
+  discountValue         Float?  @map("discount_value")
+  vatRate               Float?  @map("vat_rate")
+  vatAmount             Float?  @map("vat_amount")
+  promotionId           Int?    @map("promotion_id")
+  voucherCode           String? @map("voucher_code")
+  isRefunded            Boolean @default(false) @map("is_refunded")
+  syncSource            String? @map("sync_source") // 'webhook' | 'poll' | 'csv_import'
 
   product Product? @relation(fields: [sku], references: [sku])
 
@@ -336,7 +336,7 @@ model VendliveMachineMapping {
 model VendliveSyncLog {
   id           String   @id @default(uuid())
   syncType     String   @map("sync_type") // 'webhook' | 'poll' | 'manual'
-  status       String   // 'success' | 'error' | 'partial'
+  status       String // 'success' | 'error' | 'partial'
   salesCreated Int      @default(0) @map("sales_created")
   salesSkipped Int      @default(0) @map("sales_skipped")
   salesErrored Int      @default(0) @map("sales_errored")
@@ -354,7 +354,7 @@ model VendliveStockSync {
   vendliveMachineId Int      @map("vendlive_machine_id")
   locationId        String?  @map("location_id")
   syncType          String   @map("sync_type") // 'restock_detected' | 'manual_pull' | 'scheduled'
-  status            String   // 'success' | 'error'
+  status            String // 'success' | 'error'
   productsUpdated   Int      @default(0) @map("products_updated")
   totalVariance     Int      @default(0) @map("total_variance")
   varianceCost      Float    @default(0) @map("variance_cost")

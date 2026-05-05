@@ -29,6 +29,53 @@ router.get('/', asyncHandler(async (req, res) => {
   res.json(products);
 }));
 
+// Lookup a product by barcode (with SKU fallback).
+// Must be declared BEFORE `/:sku` so Express doesn't capture `/lookup` as an SKU.
+router.get('/lookup', asyncHandler(async (req, res) => {
+  const { barcode } = req.query;
+
+  if (!barcode || typeof barcode !== 'string') {
+    return res.status(400).json({ error: 'barcode query param required' });
+  }
+
+  // Primary: barcode match
+  let product = await prisma.product.findUnique({
+    where: { barcode },
+    include: {
+      warehouseStock: {
+        include: { warehouse: { select: { id: true, name: true } } },
+      },
+      locationStock: {
+        include: { location: { select: { id: true, name: true } } },
+      },
+    },
+  });
+
+  if (product) {
+    return res.json({ product, matchedBy: 'barcode' });
+  }
+
+  // Fallback: SKU match (covers QR codes that encode SKUs and operators
+  // pasting raw SKUs into the manual-entry input).
+  product = await prisma.product.findUnique({
+    where: { sku: barcode },
+    include: {
+      warehouseStock: {
+        include: { warehouse: { select: { id: true, name: true } } },
+      },
+      locationStock: {
+        include: { location: { select: { id: true, name: true } } },
+      },
+    },
+  });
+
+  if (product) {
+    return res.json({ product, matchedBy: 'sku' });
+  }
+
+  return res.status(404).json({ error: 'No product matches this code' });
+}));
+
 // Get single product
 router.get('/:sku', asyncHandler(async (req, res) => {
   const product = await prisma.product.findUnique({
