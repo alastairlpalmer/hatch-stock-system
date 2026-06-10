@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useStock } from '../../context/StockContext';
 import { vendliveService } from '../../services/vendlive.service';
+import { salesService } from '../../services/sales.service';
 
 export default function SalesOverview() {
   const { data, importSales, bulkImportProducts, updateLocationStock } = useStock();
@@ -9,6 +10,27 @@ export default function SalesOverview() {
   const [importResult, setImportResult] = useState(null);
   const [dateFilter, setDateFilter] = useState({ start: '', end: '' });
   const [locationFilter, setLocationFilter] = useState('all');
+
+  // Server-side aggregates: computed over the WHOLE sales table in SQL with
+  // refunds excluded and quantities summed. The client-side fallback below
+  // only sees the most recent rows the API returns (capped at 1000), which
+  // is what previously pinned "Units Sold" at 1000 and skewed revenue.
+  const [serverStats, setServerStats] = useState(null);
+  useEffect(() => {
+    const params = {};
+    if (dateFilter.start) params.startDate = dateFilter.start;
+    if (dateFilter.end) params.endDate = `${dateFilter.end}T23:59:59.999`;
+    if (locationFilter !== 'all') params.locationName = locationFilter;
+    Promise.all([
+      salesService.getAnalytics(params),
+      // /daily defaults to the last 30 days when no start date — ask for
+      // effectively-all history to match the unfiltered view
+      salesService.getDailySales(dateFilter.start ? params : { ...params, days: 3650 }),
+      salesService.getByProduct({ ...params, limit: 500 }),
+    ])
+      .then(([analytics, daily, byProduct]) => setServerStats({ analytics, daily, byProduct }))
+      .catch(() => setServerStats(null)); // offline mode → client-side fallback
+  }, [dateFilter.start, dateFilter.end, locationFilter]);
 
   // VendLive sync status
   const [syncStatus, setSyncStatus] = useState(null);
@@ -337,6 +359,7 @@ export default function SalesOverview() {
     charged: sale.charged ?? sale.price ?? 0,
     costPrice: sale.costPrice ?? sale.cost_price ?? 0,
     isFreeVend: sale.isFreeVend ?? (sale.charged === 0),
+    isRefunded: sale.isRefunded ?? sale.is_refunded ?? false,
     quantity: sale.quantity || 1,
   });
 
@@ -365,41 +388,66 @@ export default function SalesOverview() {
 
   const filteredSales = getFilteredSales();
 
-  // Calculate metrics
-  const totalRevenue = filteredSales.reduce((acc, s) => acc + s.charged, 0);
-  const totalCost = filteredSales.reduce((acc, s) => acc + s.costPrice, 0);
-  const totalProfit = totalRevenue - totalCost;
-  const totalUnits = filteredSales.length;
-  const freeVends = filteredSales.filter(s => s.isFreeVend).length;
+  // Client-side fallback metrics (offline mode only): refunds excluded and
+  // quantities summed, mirroring the server analytics. Note this only covers
+  // the rows the API returned — the server figures are authoritative.
+  const settledSales = filteredSales.filter(s => !s.isRefunded);
 
-  // Sales by product
-  const salesByProduct = filteredSales.reduce((acc, s) => {
+  const clientByProduct = settledSales.reduce((acc, s) => {
     if (!acc[s.productId]) {
-      acc[s.productId] = { name: s.productName, category: s.category, units: 0, revenue: 0, cost: 0 };
+      acc[s.productId] = { sku: s.productId, name: s.productName, category: s.category || 'Other', units: 0, revenue: 0, cost: 0 };
     }
-    acc[s.productId].units++;
+    acc[s.productId].units += s.quantity;
     acc[s.productId].revenue += s.charged;
-    acc[s.productId].cost += s.costPrice;
+    acc[s.productId].cost += s.costPrice * s.quantity;
     return acc;
   }, {});
 
-  // Sales by day
-  const salesByDay = filteredSales.reduce((acc, s) => {
-    const day = new Date(s.timestamp).toLocaleDateString('en-GB');
-    if (!acc[day]) acc[day] = { units: 0, revenue: 0 };
-    acc[day].units++;
+  const clientByDay = settledSales.reduce((acc, s) => {
+    const day = new Date(s.timestamp).toISOString().split('T')[0];
+    if (!acc[day]) acc[day] = { date: day, units: 0, revenue: 0, transactions: 0 };
+    acc[day].units += s.quantity;
     acc[day].revenue += s.charged;
+    acc[day].transactions++;
     return acc;
   }, {});
 
-  // Sales by category
-  const salesByCategory = filteredSales.reduce((acc, s) => {
+  const clientByCategory = settledSales.reduce((acc, s) => {
     const cat = s.category || 'Other';
     if (!acc[cat]) acc[cat] = { units: 0, revenue: 0 };
-    acc[cat].units++;
+    acc[cat].units += s.quantity;
     acc[cat].revenue += s.charged;
     return acc;
   }, {});
+
+  // View model: server aggregates when available, client fallback otherwise
+  const overview = serverStats ? {
+    revenue: serverStats.analytics.totalRevenue,
+    cost: serverStats.analytics.totalCost,
+    profit: serverStats.analytics.totalProfit,
+    units: serverStats.analytics.totalUnits,
+    freeVends: serverStats.analytics.freeVends,
+    refundedCount: serverStats.analytics.refundedCount,
+    refundedValue: serverStats.analytics.refundedValue,
+    byCategory: serverStats.analytics.byCategory,
+  } : {
+    revenue: settledSales.reduce((acc, s) => acc + s.charged, 0),
+    cost: settledSales.reduce((acc, s) => acc + s.costPrice * s.quantity, 0),
+    profit: settledSales.reduce((acc, s) => acc + s.charged - s.costPrice * s.quantity, 0),
+    units: settledSales.reduce((acc, s) => acc + s.quantity, 0),
+    freeVends: settledSales.filter(s => s.isFreeVend).length,
+    refundedCount: filteredSales.length - settledSales.length,
+    refundedValue: filteredSales.filter(s => s.isRefunded).reduce((acc, s) => acc + s.charged, 0),
+    byCategory: clientByCategory,
+  };
+
+  const productRows = serverStats
+    ? serverStats.byProduct
+    : Object.values(clientByProduct);
+
+  const dailyRows = serverStats
+    ? serverStats.daily
+    : Object.values(clientByDay);
 
   return (
     <div className="space-y-6">
@@ -655,32 +703,40 @@ export default function SalesOverview() {
         <div className="space-y-6">
           <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4">
-              <div className="text-2xl font-bold text-emerald-400">£{totalRevenue.toFixed(2)}</div>
+              <div className="text-2xl font-bold text-emerald-400">£{overview.revenue.toFixed(2)}</div>
               <div className="text-xs text-zinc-500 mt-1">Total Revenue</div>
             </div>
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4">
-              <div className="text-2xl font-bold text-red-400">£{totalCost.toFixed(2)}</div>
+              <div className="text-2xl font-bold text-red-400">£{overview.cost.toFixed(2)}</div>
               <div className="text-xs text-zinc-500 mt-1">Total Cost</div>
             </div>
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4">
-              <div className="text-2xl font-bold text-emerald-400">£{totalProfit.toFixed(2)}</div>
+              <div className="text-2xl font-bold text-emerald-400">£{overview.profit.toFixed(2)}</div>
               <div className="text-xs text-zinc-500 mt-1">Gross Profit</div>
             </div>
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4">
-              <div className="text-2xl font-bold text-blue-400">{totalUnits}</div>
+              <div className="text-2xl font-bold text-blue-400">{overview.units.toLocaleString('en-GB')}</div>
               <div className="text-xs text-zinc-500 mt-1">Units Sold</div>
             </div>
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4">
-              <div className="text-2xl font-bold text-purple-400">{freeVends}</div>
+              <div className="text-2xl font-bold text-purple-400">{overview.freeVends}</div>
               <div className="text-xs text-zinc-500 mt-1">Free Vends</div>
             </div>
           </div>
+
+          {overview.refundedCount > 0 && (
+            <p className="text-xs text-zinc-500">
+              {overview.refundedCount} refunded sale{overview.refundedCount === 1 ? '' : 's'} totalling
+              £{overview.refundedValue.toFixed(2)} {overview.refundedCount === 1 ? 'is' : 'are'} excluded
+              from these figures.
+            </p>
+          )}
 
           {/* Category breakdown */}
           <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-6">
             <h3 className="text-sm font-medium text-zinc-400 mb-4">Sales by Category</h3>
             <div className="space-y-3">
-              {Object.entries(salesByCategory)
+              {Object.entries(overview.byCategory)
                 .sort((a, b) => b[1].revenue - a[1].revenue)
                 .map(([category, stats]) => (
                   <div key={category} className="flex items-center justify-between py-2 border-b border-zinc-800 last:border-0">
@@ -698,11 +754,11 @@ export default function SalesOverview() {
           <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-6">
             <h3 className="text-sm font-medium text-zinc-400 mb-4">Top Selling Products</h3>
             <div className="space-y-3">
-              {Object.entries(salesByProduct)
-                .sort((a, b) => b[1].units - a[1].units)
+              {productRows.slice()
+                .sort((a, b) => b.units - a.units)
                 .slice(0, 10)
-                .map(([productId, stats]) => (
-                  <div key={productId} className="flex items-center justify-between py-2 border-b border-zinc-800 last:border-0">
+                .map(stats => (
+                  <div key={stats.sku} className="flex items-center justify-between py-2 border-b border-zinc-800 last:border-0">
                     <div>
                       <span className="text-zinc-300">{stats.name}</span>
                       <span className="text-zinc-600 text-xs ml-2">{stats.category}</span>
@@ -734,13 +790,13 @@ export default function SalesOverview() {
               </tr>
             </thead>
             <tbody>
-              {Object.entries(salesByProduct)
-                .sort((a, b) => b[1].revenue - a[1].revenue)
-                .map(([productId, stats]) => {
+              {productRows.slice()
+                .sort((a, b) => b.revenue - a.revenue)
+                .map(stats => {
                   const profit = stats.revenue - stats.cost;
                   const margin = stats.revenue > 0 ? (profit / stats.revenue * 100) : 0;
                   return (
-                    <tr key={productId} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
+                    <tr key={stats.sku} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
                       <td className="px-4 py-3 text-zinc-200">{stats.name}</td>
                       <td className="px-4 py-3 text-zinc-500">{stats.category}</td>
                       <td className="text-right px-4 py-3 text-zinc-300">{stats.units}</td>
@@ -768,18 +824,14 @@ export default function SalesOverview() {
               </tr>
             </thead>
             <tbody>
-              {Object.entries(salesByDay)
-                .sort((a, b) => {
-                  const [da, ma, ya] = a[0].split('/').map(Number);
-                  const [db, mb, yb] = b[0].split('/').map(Number);
-                  return new Date(yb, mb-1, db) - new Date(ya, ma-1, da);
-                })
-                .map(([date, stats]) => (
-                  <tr key={date} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
-                    <td className="px-4 py-3 text-zinc-200">{date}</td>
+              {dailyRows.slice()
+                .sort((a, b) => b.date.localeCompare(a.date))
+                .map(stats => (
+                  <tr key={stats.date} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
+                    <td className="px-4 py-3 text-zinc-200">{new Date(stats.date).toLocaleDateString('en-GB')}</td>
                     <td className="text-right px-4 py-3 text-zinc-300">{stats.units}</td>
                     <td className="text-right px-4 py-3 text-emerald-400">£{stats.revenue.toFixed(2)}</td>
-                    <td className="text-right px-4 py-3 text-zinc-400">£{(stats.revenue / stats.units).toFixed(2)}</td>
+                    <td className="text-right px-4 py-3 text-zinc-400">£{stats.units > 0 ? (stats.revenue / stats.units).toFixed(2) : '0.00'}</td>
                   </tr>
                 ))}
             </tbody>
@@ -815,7 +867,9 @@ export default function SalesOverview() {
                     <td className="text-right px-4 py-3 text-zinc-300">£{sale.price.toFixed(2)}</td>
                     <td className="text-right px-4 py-3 text-emerald-400">£{sale.charged.toFixed(2)}</td>
                     <td className="px-4 py-3">
-                      {sale.isFreeVend ? (
+                      {sale.isRefunded ? (
+                        <span className="text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded">Refunded</span>
+                      ) : sale.isFreeVend ? (
                         <span className="text-xs bg-purple-500/20 text-purple-400 px-2 py-0.5 rounded">Free</span>
                       ) : (
                         <span className="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded">Paid</span>
@@ -835,6 +889,11 @@ export default function SalesOverview() {
           {filteredSales.length > 100 && (
             <div className="px-4 py-3 text-center text-zinc-500 text-sm border-t border-zinc-800">
               Showing 100 of {filteredSales.length} transactions
+            </div>
+          )}
+          {(data.salesData || []).length >= 1000 && (
+            <div className="px-4 py-2 text-center text-zinc-600 text-xs border-t border-zinc-800">
+              This list covers the most recent 1,000 transactions — older sales are still included in the totals and charts above.
             </div>
           )}
         </div>

@@ -7,12 +7,22 @@ const router = express.Router();
 
 /**
  * Build the shared WHERE fragment for analytics queries.
- * Refunded sales are excluded from all revenue/profit figures.
+ * Refunded sales are excluded from all revenue/profit figures unless
+ * includeRefunded is set (used to report how much was excluded).
+ * locationName scopes to one location; the literal 'Unknown' matches
+ * sales with no location recorded.
  */
-function analyticsWhere({ startDate, endDate }) {
-  const conditions = [Prisma.sql`s.is_refunded = false`];
+function analyticsWhere({ startDate, endDate, locationName }, { includeRefunded = false } = {}) {
+  const conditions = [includeRefunded ? Prisma.sql`s.is_refunded = true` : Prisma.sql`s.is_refunded = false`];
   if (startDate) conditions.push(Prisma.sql`s."timestamp" >= ${new Date(startDate)}`);
   if (endDate) conditions.push(Prisma.sql`s."timestamp" <= ${new Date(endDate)}`);
+  if (locationName && locationName !== 'all') {
+    if (locationName === 'Unknown') {
+      conditions.push(Prisma.sql`(s.location_name IS NULL OR s.location_name = 'Unknown')`);
+    } else {
+      conditions.push(Prisma.sql`s.location_name = ${locationName}`);
+    }
+  }
   return Prisma.join(conditions, ' AND ');
 }
 
@@ -139,9 +149,19 @@ router.get('/analytics', asyncHandler(async (req, res) => {
       COUNT(*)::int                                          AS transactions,
       COALESCE(SUM(s.charged), 0)::float                     AS revenue,
       COALESCE(SUM(COALESCE(s.cost_price, 0) * s.quantity), 0)::float AS cost,
-      COALESCE(SUM(s.quantity), 0)::int                      AS units
+      COALESCE(SUM(s.quantity), 0)::int                      AS units,
+      COUNT(*) FILTER (WHERE s.charged = 0)::int             AS free_vends
     FROM sales s
     WHERE ${where}
+  `;
+
+  // What was excluded as refunded — reported so totals can be reconciled
+  // against VendLive's own figures.
+  const refundedWhere = analyticsWhere(req.query, { includeRefunded: true });
+  const [refundedRow] = await prisma.$queryRaw`
+    SELECT COUNT(*)::int AS count, COALESCE(SUM(s.charged), 0)::float AS value
+    FROM sales s
+    WHERE ${refundedWhere}
   `;
 
   const categoryRows = await prisma.$queryRaw`
@@ -175,6 +195,9 @@ router.get('/analytics', asyncHandler(async (req, res) => {
     totalTransactions: totalsRow.transactions,
     totalUnits: totalsRow.units,
     avgTransactionValue: totalsRow.transactions > 0 ? totalRevenue / totalsRow.transactions : 0,
+    freeVends: totalsRow.free_vends,
+    refundedCount: refundedRow.count,
+    refundedValue: refundedRow.value,
     byCategory,
   });
 }));
@@ -192,7 +215,7 @@ router.get('/daily', asyncHandler(async (req, res) => {
   }
   const end = endDate ? new Date(endDate) : new Date();
 
-  const where = analyticsWhere({ startDate: start, endDate: end });
+  const where = analyticsWhere({ startDate: start, endDate: end, locationName: req.query.locationName });
 
   const rows = await prisma.$queryRaw`
     SELECT
@@ -219,11 +242,13 @@ router.get('/by-product', asyncHandler(async (req, res) => {
     SELECT
       s.sku,
       COALESCE(MAX(s.product_name), s.sku)                   AS name,
+      COALESCE(MAX(p.category), 'Other')                     AS category,
       COALESCE(SUM(s.charged), 0)::float                     AS revenue,
       COALESCE(SUM(COALESCE(s.cost_price, 0) * s.quantity), 0)::float AS cost,
       COALESCE(SUM(s.quantity), 0)::int                      AS units,
       COUNT(*)::int                                          AS transactions
     FROM sales s
+    LEFT JOIN products p ON p.sku = s.sku
     WHERE ${where}
     GROUP BY s.sku
     ORDER BY revenue DESC
