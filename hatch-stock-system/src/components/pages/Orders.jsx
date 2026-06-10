@@ -143,6 +143,7 @@ export default function Orders() {
   const { data, createOrder, updateOrder, deleteOrder, bulkImportProducts, addSupplier } = useStock();
   const [showForm, setShowForm] = useState(false);
   const [editingOrder, setEditingOrder] = useState(null);
+  const [searchQuery, setSearchQuery] = useState('');
   const [showInvoiceUpload, setShowInvoiceUpload] = useState(false);
   const [invoiceData, setInvoiceData] = useState(null);
   const [invoiceProcessing, setInvoiceProcessing] = useState(false);
@@ -812,8 +813,29 @@ Return ONLY valid JSON with this exact structure (no markdown, no explanation):
     setShowForm(true);
   };
 
-  const pendingOrders = data.orders.filter(o => o.status === 'pending');
-  const completedOrders = data.orders.filter(o => o.status === 'received');
+  // Dynamic order search: every typed word must match somewhere in the
+  // order's supplier name, invoice ref, notes, status, item SKUs or
+  // product names (case-insensitive).
+  const orderMatchesSearch = (order) => {
+    const query = searchQuery.trim().toLowerCase();
+    if (!query) return true;
+    const supplierName = data.suppliers.find(s => s.id === order.supplierId)?.name || '';
+    const haystack = [
+      supplierName,
+      order.invoiceRef || '',
+      order.notes || '',
+      order.status || '',
+      ...(order.items || []).flatMap(i => [
+        i.sku || '',
+        data.products.find(p => p.sku === i.sku)?.name || '',
+      ]),
+    ].join(' ').toLowerCase();
+    return query.split(/\s+/).every(token => haystack.includes(token));
+  };
+
+  const isSearching = searchQuery.trim().length > 0;
+  const pendingOrders = data.orders.filter(o => o.status === 'pending').filter(orderMatchesSearch);
+  const completedOrders = data.orders.filter(o => o.status === 'received').filter(orderMatchesSearch);
 
   return (
     <div className="space-y-6">
@@ -1304,11 +1326,38 @@ Return ONLY valid JSON with this exact structure (no markdown, no explanation):
         </div>
       )}
 
+      {/* Order search */}
+      <div className="flex items-center gap-3">
+        <div className="relative flex-1 max-w-md">
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            placeholder="Search orders — supplier, product, SKU, invoice ref..."
+            className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500 placeholder:text-zinc-600"
+          />
+          {isSearching && (
+            <button
+              onClick={() => setSearchQuery('')}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300"
+              title="Clear search"
+            >
+              ×
+            </button>
+          )}
+        </div>
+        {isSearching && (
+          <span className="text-xs text-zinc-500">
+            {pendingOrders.length + completedOrders.length} match{pendingOrders.length + completedOrders.length === 1 ? '' : 'es'}
+          </span>
+        )}
+      </div>
+
       {/* Pending Orders */}
       <div className="space-y-4">
         <h3 className="text-sm font-medium text-zinc-400">Pending Orders ({pendingOrders.length})</h3>
         {pendingOrders.length === 0 ? (
-          <p className="text-zinc-600 text-sm">No pending orders</p>
+          <p className="text-zinc-600 text-sm">{isSearching ? 'No pending orders match your search' : 'No pending orders'}</p>
         ) : (
           <div className="space-y-3">
             {pendingOrders.map(order => (
@@ -1321,9 +1370,11 @@ Return ONLY valid JSON with this exact structure (no markdown, no explanation):
       {/* Completed Orders */}
       {completedOrders.length > 0 && (
         <div className="space-y-4">
-          <h3 className="text-sm font-medium text-zinc-400">Completed Orders ({completedOrders.length})</h3>
+          <h3 className="text-sm font-medium text-zinc-400">
+            Completed Orders ({completedOrders.length}){!isSearching && completedOrders.length > 5 && <span className="text-zinc-600"> — showing last 5</span>}
+          </h3>
           <div className="space-y-3">
-            {completedOrders.slice(-5).reverse().map(order => (
+            {(isSearching ? completedOrders.slice() : completedOrders.slice(-5)).reverse().map(order => (
               <OrderCard key={order.id} order={order} data={data} onEdit={() => startEdit(order)} onDelete={deleteOrder} />
             ))}
           </div>
