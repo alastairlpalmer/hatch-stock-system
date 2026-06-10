@@ -8,6 +8,7 @@ export default function SalesOverview() {
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState(null);
   const [dateFilter, setDateFilter] = useState({ start: '', end: '' });
+  const [locationFilter, setLocationFilter] = useState('all');
 
   // VendLive sync status
   const [syncStatus, setSyncStatus] = useState(null);
@@ -339,9 +340,17 @@ export default function SalesOverview() {
     quantity: sale.quantity || 1,
   });
 
-  // Filter sales by date
+  // Distinct location names present in the sales data, for the filter dropdown
+  const salesLocations = [...new Set(
+    (data.salesData || []).map(s => s.locationName || 'Unknown')
+  )].sort((a, b) => a.localeCompare(b));
+
+  // Filter sales by location and date
   const getFilteredSales = () => {
     let sales = (data.salesData || []).map(normalizeSale);
+    if (locationFilter !== 'all') {
+      sales = sales.filter(s => (s.locationName || 'Unknown') === locationFilter);
+    }
     if (dateFilter.start) {
       const start = new Date(dateFilter.start);
       sales = sales.filter(s => new Date(s.timestamp) >= start);
@@ -594,8 +603,21 @@ export default function SalesOverview() {
         ))}
       </div>
 
-      {/* Date Filter */}
+      {/* Location + Date Filter */}
       <div className="flex items-center gap-4 flex-wrap">
+        <div className="flex items-center gap-2">
+          <span className="text-zinc-500 text-sm">Location:</span>
+          <select
+            value={locationFilter}
+            onChange={e => setLocationFilter(e.target.value)}
+            className="bg-zinc-800 border border-zinc-700 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-emerald-500"
+          >
+            <option value="all">All locations</option>
+            {salesLocations.map(loc => (
+              <option key={loc} value={loc}>{loc}</option>
+            ))}
+          </select>
+        </div>
         <div className="flex items-center gap-2">
           <span className="text-zinc-500 text-sm">From:</span>
           <input
@@ -614,13 +636,18 @@ export default function SalesOverview() {
             className="bg-zinc-800 border border-zinc-700 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-emerald-500"
           />
         </div>
-        {(dateFilter.start || dateFilter.end) && (
+        {(dateFilter.start || dateFilter.end || locationFilter !== 'all') && (
           <button
-            onClick={() => setDateFilter({ start: '', end: '' })}
+            onClick={() => { setDateFilter({ start: '', end: '' }); setLocationFilter('all'); }}
             className="text-zinc-400 hover:text-white text-sm"
           >
-            Clear filter
+            Clear filters
           </button>
+        )}
+        {locationFilter !== 'all' && (
+          <span className="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-1 rounded">
+            Showing: {locationFilter}
+          </span>
         )}
       </div>
 
