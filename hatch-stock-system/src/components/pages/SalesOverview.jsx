@@ -3,6 +3,20 @@ import { useStock } from '../../context/StockContext';
 import { vendliveService } from '../../services/vendlive.service';
 import { salesService } from '../../services/sales.service';
 
+// Small hoverable (i) marker with an explanatory tooltip
+function InfoTip({ text }) {
+  return (
+    <span className="relative inline-block group align-middle ml-1.5">
+      <span className="w-3.5 h-3.5 inline-flex items-center justify-center rounded-full border border-zinc-600 text-zinc-500 text-[9px] leading-none cursor-help select-none group-hover:text-zinc-300 group-hover:border-zinc-400 transition-colors">
+        i
+      </span>
+      <span className="invisible group-hover:visible absolute top-full left-1/2 -translate-x-1/2 mt-2 w-60 bg-zinc-800 border border-zinc-700 rounded-lg p-2.5 text-xs text-zinc-300 text-left font-normal normal-case shadow-xl z-20">
+        {text}
+      </span>
+    </span>
+  );
+}
+
 export default function SalesOverview() {
   const { data, importSales, bulkImportProducts, updateLocationStock } = useStock();
   const [activeSubTab, setActiveSubTab] = useState('overview');
@@ -735,23 +749,38 @@ export default function SalesOverview() {
           <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4">
               <div className="text-2xl font-bold text-emerald-400">£{overview.revenue.toFixed(2)}</div>
-              <div className="text-xs text-zinc-500 mt-1">Total Revenue</div>
+              <div className="text-xs text-zinc-500 mt-1">
+                Total Revenue
+                <InfoTip text="What customers actually paid, excluding refunds. Discounted and free vends count at the amount really charged — VendLive's dashboard shows list prices, so its figure can read slightly higher. This is the true takings number." />
+              </div>
             </div>
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4">
               <div className="text-2xl font-bold text-red-400">£{overview.cost.toFixed(2)}</div>
-              <div className="text-xs text-zinc-500 mt-1">Total Cost</div>
+              <div className="text-xs text-zinc-500 mt-1">
+                Total Cost
+                <InfoTip text="Cost price × units for every non-refunded sale. Products with no cost price recorded contribute £0, so fill missing costs (Stock Levels tab) for an accurate figure." />
+              </div>
             </div>
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4">
               <div className="text-2xl font-bold text-emerald-400">£{overview.profit.toFixed(2)}</div>
-              <div className="text-xs text-zinc-500 mt-1">Gross Profit</div>
+              <div className="text-xs text-zinc-500 mt-1">
+                Gross Profit
+                <InfoTip text="Revenue minus cost of goods sold. Does not include delivery fees, wastage or expired stock write-offs." />
+              </div>
             </div>
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4">
               <div className="text-2xl font-bold text-blue-400">{overview.units.toLocaleString('en-GB')}</div>
-              <div className="text-xs text-zinc-500 mt-1">Units Sold</div>
+              <div className="text-xs text-zinc-500 mt-1">
+                Units Sold
+                <InfoTip text="Total units across all non-refunded sales in the selected period — a multi-unit sale counts each unit." />
+              </div>
             </div>
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4">
               <div className="text-2xl font-bold text-purple-400">{overview.freeVends}</div>
-              <div className="text-xs text-zinc-500 mt-1">Free Vends</div>
+              <div className="text-xs text-zinc-500 mt-1">
+                Free Vends
+                <InfoTip text="Vends where nothing was charged — staff codes, vouchers and 100% discounts. Counted in Units Sold but contribute £0 to revenue." />
+              </div>
             </div>
           </div>
 
