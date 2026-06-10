@@ -10,19 +10,24 @@ const router = express.Router();
  * Build the shared WHERE fragment for analytics queries.
  * Refunded sales are excluded from all revenue/profit figures unless
  * includeRefunded is set (used to report how much was excluded).
- * locationName scopes to one location; the literal 'Unknown' matches
- * sales with no location recorded.
+ * locationName scopes to one or more locations (string or array — VendLive
+ * can report the same physical site under several names, so the UI lets
+ * users select and combine multiple). The literal 'Unknown' matches sales
+ * with no location recorded.
  */
 function analyticsWhere({ startDate, endDate, locationName }, { includeRefunded = false } = {}) {
   const conditions = [includeRefunded ? Prisma.sql`s.is_refunded = true` : Prisma.sql`s.is_refunded = false`];
   if (startDate) conditions.push(Prisma.sql`s."timestamp" >= ${new Date(startDate)}`);
   if (endDate) conditions.push(Prisma.sql`s."timestamp" <= ${new Date(endDate)}`);
-  if (locationName && locationName !== 'all') {
-    if (locationName === 'Unknown') {
-      conditions.push(Prisma.sql`(s.location_name IS NULL OR s.location_name = 'Unknown')`);
-    } else {
-      conditions.push(Prisma.sql`s.location_name = ${locationName}`);
-    }
+
+  const names = [].concat(locationName || []).filter(n => n && n !== 'all');
+  if (names.length > 0) {
+    const parts = names.map(n =>
+      n === 'Unknown'
+        ? Prisma.sql`(s.location_name IS NULL OR s.location_name = 'Unknown')`
+        : Prisma.sql`s.location_name = ${n}`
+    );
+    conditions.push(Prisma.sql`(${Prisma.join(parts, ' OR ')})`);
   }
   return Prisma.join(conditions, ' AND ');
 }

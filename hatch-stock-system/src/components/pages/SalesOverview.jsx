@@ -21,7 +21,17 @@ export default function SalesOverview() {
   const { data } = useStock();
   const [activeSubTab, setActiveSubTab] = useState('overview');
   const [dateFilter, setDateFilter] = useState({ start: '', end: '' });
-  const [locationFilter, setLocationFilter] = useState('all');
+  // Multi-select: VendLive can report one physical site under several
+  // location names, so users can tick several and combine the feeds.
+  // Empty array = all locations.
+  const [locationFilter, setLocationFilter] = useState([]);
+  const [locPickerOpen, setLocPickerOpen] = useState(false);
+
+  const toggleLocation = (name) => {
+    setLocationFilter(prev =>
+      prev.includes(name) ? prev.filter(n => n !== name) : [...prev, name]
+    );
+  };
 
   // Server-side aggregates: computed over the WHOLE sales table in SQL with
   // refunds excluded and quantities summed. The client-side fallback below
@@ -32,7 +42,7 @@ export default function SalesOverview() {
     const params = {};
     if (dateFilter.start) params.startDate = dateFilter.start;
     if (dateFilter.end) params.endDate = `${dateFilter.end}T23:59:59.999`;
-    if (locationFilter !== 'all') params.locationName = locationFilter;
+    if (locationFilter.length > 0) params.locationName = locationFilter;
     Promise.all([
       salesService.getAnalytics(params),
       // /daily defaults to the last 30 days when no start date — ask for
@@ -72,8 +82,8 @@ export default function SalesOverview() {
   // Filter sales by location and date
   const getFilteredSales = () => {
     let sales = (data.salesData || []).map(normalizeSale);
-    if (locationFilter !== 'all') {
-      sales = sales.filter(s => (s.locationName || 'Unknown') === locationFilter);
+    if (locationFilter.length > 0) {
+      sales = sales.filter(s => locationFilter.includes(s.locationName || 'Unknown'));
     }
     if (dateFilter.start) {
       const start = new Date(dateFilter.start);
@@ -202,18 +212,49 @@ export default function SalesOverview() {
 
       {/* Location + Date Filter */}
       <div className="flex items-center gap-4 flex-wrap">
-        <div className="flex items-center gap-2">
-          <span className="text-zinc-500 text-sm">Location:</span>
-          <select
-            value={locationFilter}
-            onChange={e => setLocationFilter(e.target.value)}
-            className="bg-zinc-800 border border-zinc-700 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-emerald-500"
+        <div className="flex items-center gap-2 relative">
+          <span className="text-zinc-500 text-sm">Locations:</span>
+          <button
+            onClick={() => setLocPickerOpen(o => !o)}
+            className="bg-zinc-800 border border-zinc-700 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-emerald-500 hover:border-zinc-500 text-left min-w-[10rem]"
           >
-            <option value="all">All locations</option>
-            {salesLocations.map(loc => (
-              <option key={loc} value={loc}>{loc}</option>
-            ))}
-          </select>
+            {locationFilter.length === 0
+              ? 'All locations'
+              : locationFilter.length === 1
+                ? locationFilter[0]
+                : `${locationFilter.length} locations combined`}
+            <span className="ml-2 text-zinc-500 text-xs">▾</span>
+          </button>
+          {locPickerOpen && (
+            <>
+              {/* click-away catcher */}
+              <div className="fixed inset-0 z-10" onClick={() => setLocPickerOpen(false)} />
+              <div className="absolute top-full left-0 mt-2 z-20 w-72 bg-zinc-800 border border-zinc-700 rounded-lg shadow-xl p-2 space-y-0.5">
+                <button
+                  onClick={() => { setLocationFilter([]); setLocPickerOpen(false); }}
+                  className={`w-full text-left px-2 py-1.5 rounded text-sm hover:bg-zinc-700 ${locationFilter.length === 0 ? 'text-emerald-400' : 'text-zinc-300'}`}
+                >
+                  All locations
+                </button>
+                <div className="border-t border-zinc-700 my-1" />
+                {salesLocations.map(loc => (
+                  <label key={loc} className="flex items-center gap-2.5 px-2 py-1.5 rounded hover:bg-zinc-700 cursor-pointer text-sm text-zinc-300">
+                    <input
+                      type="checkbox"
+                      checked={locationFilter.includes(loc)}
+                      onChange={() => toggleLocation(loc)}
+                      className="w-4 h-4 rounded border-zinc-600 accent-emerald-500"
+                    />
+                    <span className="truncate">{loc}</span>
+                  </label>
+                ))}
+                <div className="border-t border-zinc-700 my-1" />
+                <p className="px-2 py-1 text-xs text-zinc-500">
+                  Tick several to combine feeds — useful when VendLive reports one site under multiple names.
+                </p>
+              </div>
+            </>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <span className="text-zinc-500 text-sm">From:</span>
@@ -233,17 +274,17 @@ export default function SalesOverview() {
             className="bg-zinc-800 border border-zinc-700 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-emerald-500"
           />
         </div>
-        {(dateFilter.start || dateFilter.end || locationFilter !== 'all') && (
+        {(dateFilter.start || dateFilter.end || locationFilter.length > 0) && (
           <button
-            onClick={() => { setDateFilter({ start: '', end: '' }); setLocationFilter('all'); }}
+            onClick={() => { setDateFilter({ start: '', end: '' }); setLocationFilter([]); }}
             className="text-zinc-400 hover:text-white text-sm"
           >
             Clear filters
           </button>
         )}
-        {locationFilter !== 'all' && (
+        {locationFilter.length > 0 && (
           <span className="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-1 rounded">
-            Showing: {locationFilter}
+            Showing: {locationFilter.join(' + ')}
           </span>
         )}
       </div>
