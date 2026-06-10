@@ -380,6 +380,30 @@ Example parsing:
 
   const products = getProductsForLocation();
   const unassignedProducts = getUnassignedProducts();
+
+  // Products grouped by category (alphabetical, products alphabetical within),
+  // matching the Stock Levels page layout
+  const groupedProducts = (() => {
+    const groups = {};
+    products.forEach(p => {
+      const cat = p.category || 'Uncategorised';
+      if (!groups[cat]) groups[cat] = [];
+      groups[cat].push(p);
+    });
+    return Object.entries(groups)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([category, items]) => ({
+        category,
+        items: items.sort((x, y) => (x.name || x.sku).localeCompare(y.name || y.sku)),
+      }));
+  })();
+
+  // Gross margin from the VendLive-synced prices; null when either is missing
+  const getMargin = (product) => {
+    if (!product.salePrice || !product.unitCost) return null;
+    const amount = product.salePrice - product.unitCost;
+    return { amount, pct: (amount / product.salePrice) * 100 };
+  };
   const totalUnits = products.reduce((acc, p) => acc + (locStock[p.sku] || 0), 0);
   const lowStockCount = products.filter(p => {
     const config = locConfig[p.sku] || {};
@@ -712,6 +736,8 @@ Example parsing:
                       <th className="text-center px-4 py-3 text-zinc-500 font-medium">Max Stock</th>
                     </>
                   )}
+                  <th className="text-right px-4 py-3 text-zinc-500 font-medium">Sale Price</th>
+                  <th className="text-right px-4 py-3 text-zinc-500 font-medium">Margin</th>
                   <th className="text-center px-4 py-3 text-zinc-500 font-medium">Status</th>
                   <th className="text-right px-4 py-3 text-zinc-500 font-medium">Current Stock</th>
                   <th className="text-center px-4 py-3 text-zinc-500 font-medium">Actions</th>
@@ -720,15 +746,26 @@ Example parsing:
               <tbody>
                 {products.length === 0 ? (
                   <tr>
-                    <td colSpan={showConfig ? 7 : 5} className="px-4 py-8 text-center text-zinc-600">
+                    <td colSpan={showConfig ? 9 : 7} className="px-4 py-8 text-center text-zinc-600">
                       No products assigned to this location
                     </td>
                   </tr>
                 ) : (
-                  products.map(product => {
+                  groupedProducts.map(group => (
+                  <React.Fragment key={group.category}>
+                  <tr className="bg-zinc-800/60">
+                    <td colSpan={showConfig ? 9 : 7} className="px-4 py-2">
+                      <span className="text-emerald-400 font-medium text-xs uppercase tracking-wide">{group.category}</span>
+                      <span className="text-zinc-500 text-xs ml-3">
+                        {group.items.length} product{group.items.length === 1 ? '' : 's'} · {group.items.reduce((acc, p) => acc + (locStock[p.sku] || 0), 0)} units here
+                      </span>
+                    </td>
+                  </tr>
+                  {group.items.map(product => {
                     const qty = locStock[product.sku] || 0;
                     const config = locConfig[product.sku] || {};
                     const { status, color } = getStockStatus(product.sku, qty);
+                    const margin = getMargin(product);
 
                     return (
                       <tr key={product.sku} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
@@ -756,6 +793,23 @@ Example parsing:
                             </td>
                           </>
                         )}
+                        <td className="px-4 py-3 text-right text-zinc-300">
+                          {product.salePrice ? (
+                            `£${product.salePrice.toFixed(2)}`
+                          ) : (
+                            <span className="text-xs bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded">No price</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          {margin ? (
+                            <span className={margin.amount >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                              £{margin.amount.toFixed(2)}
+                              <span className="text-zinc-500 text-xs ml-1">({margin.pct.toFixed(0)}%)</span>
+                            </span>
+                          ) : (
+                            <span className="text-zinc-600 text-xs" title="Needs both sale price and cost price">—</span>
+                          )}
+                        </td>
                         <td className="px-4 py-3 text-center">
                           <span className={`inline-block px-2 py-0.5 rounded text-xs ${
                             color === 'red' ? 'bg-red-500/20 text-red-400' :
@@ -813,7 +867,9 @@ Example parsing:
                         </td>
                       </tr>
                     );
-                  })
+                  })}
+                  </React.Fragment>
+                  ))
                 )}
               </tbody>
             </table>
