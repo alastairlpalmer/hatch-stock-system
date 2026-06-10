@@ -38,6 +38,37 @@ export default function SalesOverview() {
     vendliveService.getSyncStatus().then(setSyncStatus).catch(() => {});
   }, []);
 
+  // Duplicate cleanup state (Import History tab)
+  const [dedupePreview, setDedupePreview] = useState(null);
+  const [dedupeBusy, setDedupeBusy] = useState(false);
+  const [dedupeDone, setDedupeDone] = useState(false);
+
+  const checkDuplicates = async () => {
+    setDedupeBusy(true);
+    try {
+      setDedupePreview(await salesService.deduplicate(true));
+    } catch (err) {
+      setDedupePreview({ error: err.response?.data?.error || err.message });
+    } finally {
+      setDedupeBusy(false);
+    }
+  };
+
+  const removeDuplicates = async () => {
+    setDedupeBusy(true);
+    try {
+      const result = await salesService.deduplicate(false);
+      setDedupePreview(result);
+      setDedupeDone(true);
+      // Reload so every view recomputes from the cleaned data
+      setTimeout(() => window.location.reload(), 2500);
+    } catch (err) {
+      setDedupePreview({ error: err.response?.data?.error || err.message });
+    } finally {
+      setDedupeBusy(false);
+    }
+  };
+
   // Stock sync state
   const [showStockSync, setShowStockSync] = useState(false);
   const [stockDeductions, setStockDeductions] = useState([]);
@@ -928,6 +959,66 @@ export default function SalesOverview() {
             <p className="text-blue-300 text-sm">
               <strong>Supported Format:</strong> Vendlive transaction export CSV. The system will automatically extract products (SKU, name, category, cost price, sale price) and sales transactions from successful vends.
             </p>
+          </div>
+
+          {/* Duplicate cleanup: legacy CSV rows that the VendLive sync also holds */}
+          <div className="bg-zinc-900/50 border border-amber-700/50 rounded-lg p-6 space-y-4">
+            <div>
+              <h3 className="text-sm font-medium text-amber-400">Duplicate Sales Cleanup</h3>
+              <p className="text-zinc-500 text-sm mt-1">
+                Sales imported from CSV before the VendLive integration went live may also exist as
+                synced VendLive sales, double-counting revenue. This finds those pairs (matched by
+                product and timestamp) and removes the CSV copy — the VendLive copy is kept because
+                it records the amount actually paid and tracks refunds.
+              </p>
+            </div>
+
+            {dedupePreview?.error && (
+              <p className="text-red-400 text-sm">{dedupePreview.error}</p>
+            )}
+
+            {dedupePreview && !dedupePreview.error && (
+              <div className={`rounded-lg p-4 text-sm ${dedupeDone ? 'bg-emerald-900/20 border border-emerald-900/50' : 'bg-zinc-800/50'}`}>
+                {dedupeDone ? (
+                  <p className="text-emerald-300">
+                    Removed {dedupePreview.duplicates} duplicate sales totalling £{dedupePreview.value.toFixed(2)}.
+                    Reloading with corrected figures...
+                  </p>
+                ) : dedupePreview.duplicates === 0 ? (
+                  <p className="text-zinc-300">No duplicates found — your sales data is clean.</p>
+                ) : (
+                  <div className="space-y-2">
+                    <p className="text-zinc-200">
+                      Found <strong className="text-amber-400">{dedupePreview.duplicates}</strong> duplicated
+                      sales inflating revenue by <strong className="text-amber-400">£{dedupePreview.value.toFixed(2)}</strong>
+                      {' '}(out of {dedupePreview.legacyTotal} CSV-imported rows). Nothing has been removed yet.
+                    </p>
+                    <p className="text-zinc-500 text-xs">
+                      Sample: {dedupePreview.sample.slice(0, 3).map(d => `${d.sku} @ ${new Date(d.timestamp).toLocaleString('en-GB')} (£${d.charged.toFixed(2)})`).join(' · ')}
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="flex gap-3">
+              <button
+                onClick={checkDuplicates}
+                disabled={dedupeBusy || dedupeDone}
+                className="px-4 py-2 bg-zinc-700 text-zinc-200 rounded text-sm font-medium hover:bg-zinc-600 disabled:opacity-50"
+              >
+                {dedupeBusy && !dedupePreview ? 'Checking...' : 'Check for duplicates'}
+              </button>
+              {dedupePreview && !dedupePreview.error && dedupePreview.duplicates > 0 && !dedupeDone && (
+                <button
+                  onClick={removeDuplicates}
+                  disabled={dedupeBusy}
+                  className="px-4 py-2 bg-amber-600 text-white rounded text-sm font-medium hover:bg-amber-500 disabled:opacity-50"
+                >
+                  {dedupeBusy ? 'Removing...' : `Remove ${dedupePreview.duplicates} duplicates (£${dedupePreview.value.toFixed(2)})`}
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}

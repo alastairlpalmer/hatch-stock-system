@@ -67,6 +67,15 @@ export const salesService = {
     const response = await api.get('/sales/imports');
     return response.data;
   },
+
+  /**
+   * Find (dryRun=true) or remove (dryRun=false) legacy CSV sales that
+   * duplicate VendLive-synced sales
+   */
+  deduplicate: async (dryRun = true) => {
+    const response = await api.post('/sales/deduplicate', { dryRun });
+    return response.data;
+  },
 };
 
 export default salesService;
