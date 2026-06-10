@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeWebhookPayload, normalizePollPayload, computeCharged } from './vendlive-sync.js';
+import { normalizeWebhookPayload, normalizePollPayload, computeCharged, computeProductPriceUpdates } from './vendlive-sync.js';
 
 describe('computeCharged', () => {
   it('uses totalPaid when present', () => {
@@ -131,5 +131,94 @@ describe('normalizePollPayload', () => {
   it('handles machine as a plain string', () => {
     const e = { ...entry, machine: 'Kiosk 3' };
     expect(normalizePollPayload(e).machineName).toBe('Kiosk 3');
+  });
+});
+
+describe('computeProductPriceUpdates', () => {
+  const item = (overrides = {}) => ({
+    productExternalId: 'SKU-1',
+    productSaleId: 1,
+    timestamp: '2026-06-09T10:00:00Z',
+    price: 2.5,
+    costPrice: 1.1,
+    discountValue: 0,
+    ...overrides,
+  });
+  const mapOf = (products) => new Map(products.map(p => [p.sku, p]));
+
+  it('returns nothing when catalog already matches', () => {
+    const products = mapOf([{ sku: 'SKU-1', salePrice: 2.5, unitCost: 1.1 }]);
+    expect(computeProductPriceUpdates([item()], products)).toEqual([]);
+  });
+
+  it('updates both fields when the sale disagrees with the catalog (Müller bug shape: swapped values)', () => {
+    const products = mapOf([{ sku: 'SKU-1', salePrice: 1.0, unitCost: 2.5 }]);
+    expect(computeProductPriceUpdates([item({ price: 2.5, costPrice: 1.0 })], products)).toEqual([
+      { sku: 'SKU-1', data: { salePrice: 2.5, unitCost: 1.0 } },
+    ]);
+  });
+
+  it('fills null salePrice/unitCost', () => {
+    const products = mapOf([{ sku: 'SKU-1', salePrice: null, unitCost: null }]);
+    expect(computeProductPriceUpdates([item()], products)).toEqual([
+      { sku: 'SKU-1', data: { salePrice: 2.5, unitCost: 1.1 } },
+    ]);
+  });
+
+  it('uses the newest sale per SKU, not the first', () => {
+    const products = mapOf([{ sku: 'SKU-1', salePrice: 2.5, unitCost: 1.1 }]);
+    const items = [
+      item({ timestamp: '2026-06-09T12:00:00Z', price: 2.99, productSaleId: 2 }),
+      item({ timestamp: '2026-06-09T10:00:00Z', price: 2.5, productSaleId: 1 }),
+    ];
+    expect(computeProductPriceUpdates(items, products)).toEqual([
+      { sku: 'SKU-1', data: { salePrice: 2.99 } },
+    ]);
+  });
+
+  it('breaks timestamp ties by productSaleId', () => {
+    const products = mapOf([{ sku: 'SKU-1', salePrice: 2.5, unitCost: 1.1 }]);
+    const items = [
+      item({ productSaleId: 7, price: 3.5 }),
+      item({ productSaleId: 3, price: 3.0 }),
+    ];
+    expect(computeProductPriceUpdates(items, products)).toEqual([
+      { sku: 'SKU-1', data: { salePrice: 3.5 } },
+    ]);
+  });
+
+  it('keeps the list price for discounted/free vends (price field is pre-discount)', () => {
+    const products = mapOf([{ sku: 'SKU-1', salePrice: 2.0, unitCost: 1.1 }]);
+    const free = item({ price: 2.5, discountValue: 2.5, totalPaid: 0 });
+    expect(computeProductPriceUpdates([free], products)).toEqual([
+      { sku: 'SKU-1', data: { salePrice: 2.5 } },
+    ]);
+  });
+
+  it('never overwrites with zero or missing values', () => {
+    const products = mapOf([{ sku: 'SKU-1', salePrice: 2.5, unitCost: 1.1 }]);
+    expect(computeProductPriceUpdates([item({ price: 0, costPrice: 0 })], products)).toEqual([]);
+  });
+
+  it('ignores float noise within the epsilon', () => {
+    const products = mapOf([{ sku: 'SKU-1', salePrice: 2.5, unitCost: 1.1 }]);
+    expect(computeProductPriceUpdates([item({ price: 2.5004, costPrice: 1.0996 })], products)).toEqual([]);
+  });
+
+  it('skips items whose SKU is not in the product map', () => {
+    const products = mapOf([{ sku: 'SKU-1', salePrice: 2.5, unitCost: 1.1 }]);
+    expect(computeProductPriceUpdates([item({ productExternalId: 'UNKNOWN' })], products)).toEqual([]);
+    expect(computeProductPriceUpdates([item({ productExternalId: null })], products)).toEqual([]);
+  });
+
+  it('handles multiple SKUs independently', () => {
+    const products = mapOf([
+      { sku: 'SKU-1', salePrice: 2.5, unitCost: 1.1 },
+      { sku: 'SKU-2', salePrice: 4.0, unitCost: null },
+    ]);
+    const items = [item(), item({ productExternalId: 'SKU-2', price: 4.0, costPrice: 2.2 })];
+    expect(computeProductPriceUpdates(items, products)).toEqual([
+      { sku: 'SKU-2', data: { unitCost: 2.2 } },
+    ]);
   });
 });
