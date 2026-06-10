@@ -48,6 +48,31 @@ export default function Inventory() {
     return combined;
   };
 
+  // Stock Levels rows: zero-quantity items hidden, grouped by product
+  // category (alphabetical), products alphabetical within each group.
+  // Returns { groups: [{ category, items }], hiddenCount }.
+  const groupStockRows = (rows) => {
+    const visible = rows.filter(r => r.total > 0);
+    const groups = {};
+    visible.forEach(row => {
+      const product = data.products.find(p => p.sku === row.sku);
+      const category = product?.category || 'Uncategorised';
+      if (!groups[category]) groups[category] = [];
+      groups[category].push({ ...row, product });
+    });
+    return {
+      groups: Object.entries(groups)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([category, items]) => ({
+          category,
+          items: items.sort((x, y) =>
+            (x.product?.name || x.sku).localeCompare(y.product?.name || y.sku)
+          ),
+        })),
+      hiddenCount: rows.length - visible.length,
+    };
+  };
+
   // Get batches with expiry info
   const getBatches = () => {
     const batches = data.stockBatches || [];
@@ -907,41 +932,81 @@ export default function Inventory() {
                     </tr>
                   </thead>
                   <tbody>
-                    {Object.keys(getAllStock()).length === 0 ? (
-                      <tr>
-                        <td colSpan={data.warehouses.length + 5} className="px-4 py-8 text-center text-zinc-600">
-                          No stock recorded yet. Use "Add Stock" or "Upload CSV" to add inventory.
-                        </td>
-                      </tr>
-                    ) : (
-                      Object.entries(getAllStock()).map(([sku, locs]) => {
-                        const total = Object.values(locs).reduce((a, b) => a + b, 0);
-                        const product = data.products.find(p => p.sku === sku);
-                        const value = (product?.unitCost || 0) * total;
-                        const earliestExpiry = getEarliestExpiry(sku);
-                        const expiryStatus = getExpiryStatus(earliestExpiry);
+                    {(() => {
+                      const allRows = Object.entries(getAllStock()).map(([sku, locs]) => ({
+                        sku,
+                        locs,
+                        total: Object.values(locs).reduce((a, b) => a + b, 0),
+                      }));
+                      const colCount = data.warehouses.length + 5;
+                      if (allRows.length === 0) {
                         return (
-                          <tr key={sku} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
-                            <td className="px-4 py-3 text-zinc-200">{product?.name || '-'}</td>
-                            <td className="px-4 py-3 text-zinc-500 text-xs">{sku}</td>
-                            {data.warehouses.map(wh => (
-                              <td key={wh.id} className="text-right px-4 py-3 text-zinc-400">{locs[wh.id] || '-'}</td>
-                            ))}
-                            <td className="text-right px-4 py-3 text-emerald-400 font-medium">{total}</td>
-                            <td className="text-center px-4 py-3">
-                              {earliestExpiry ? (
-                                <span className={`text-xs px-2 py-0.5 rounded ${expiryStatus?.color || ''}`}>
-                                  {new Date(earliestExpiry).toLocaleDateString('en-GB')}
-                                </span>
-                              ) : (
-                                <span className="text-zinc-600 text-xs">-</span>
-                              )}
+                          <tr>
+                            <td colSpan={colCount} className="px-4 py-8 text-center text-zinc-600">
+                              No stock recorded yet. Use "Add Stock" or "Upload CSV" to add inventory.
                             </td>
-                            <td className="text-right px-4 py-3 text-zinc-400">{value.toFixed(2)}</td>
                           </tr>
                         );
-                      })
-                    )}
+                      }
+                      const { groups, hiddenCount } = groupStockRows(allRows);
+                      if (groups.length === 0) {
+                        return (
+                          <tr>
+                            <td colSpan={colCount} className="px-4 py-8 text-center text-zinc-600">
+                              All {hiddenCount} item(s) are out of stock.
+                            </td>
+                          </tr>
+                        );
+                      }
+                      return (
+                        <>
+                          {groups.map(group => (
+                            <React.Fragment key={group.category}>
+                              <tr className="bg-zinc-800/60">
+                                <td colSpan={colCount} className="px-4 py-2">
+                                  <span className="text-emerald-400 font-medium text-xs uppercase tracking-wide">{group.category}</span>
+                                  <span className="text-zinc-500 text-xs ml-3">
+                                    {group.items.length} product{group.items.length === 1 ? '' : 's'} · {group.items.reduce((acc, r) => acc + r.total, 0)} units
+                                  </span>
+                                </td>
+                              </tr>
+                              {group.items.map(({ sku, locs, total, product }) => {
+                                const value = (product?.unitCost || 0) * total;
+                                const earliestExpiry = getEarliestExpiry(sku);
+                                const expiryStatus = getExpiryStatus(earliestExpiry);
+                                return (
+                                  <tr key={sku} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
+                                    <td className="px-4 py-3 text-zinc-200">{product?.name || '-'}</td>
+                                    <td className="px-4 py-3 text-zinc-500 text-xs">{sku}</td>
+                                    {data.warehouses.map(wh => (
+                                      <td key={wh.id} className="text-right px-4 py-3 text-zinc-400">{locs[wh.id] || '-'}</td>
+                                    ))}
+                                    <td className="text-right px-4 py-3 text-emerald-400 font-medium">{total}</td>
+                                    <td className="text-center px-4 py-3">
+                                      {earliestExpiry ? (
+                                        <span className={`text-xs px-2 py-0.5 rounded ${expiryStatus?.color || ''}`}>
+                                          {new Date(earliestExpiry).toLocaleDateString('en-GB')}
+                                        </span>
+                                      ) : (
+                                        <span className="text-zinc-600 text-xs">-</span>
+                                      )}
+                                    </td>
+                                    <td className="text-right px-4 py-3 text-zinc-400">{value.toFixed(2)}</td>
+                                  </tr>
+                                );
+                              })}
+                            </React.Fragment>
+                          ))}
+                          {hiddenCount > 0 && (
+                            <tr>
+                              <td colSpan={colCount} className="px-4 py-2 text-center text-zinc-600 text-xs">
+                                {hiddenCount} out-of-stock item{hiddenCount === 1 ? '' : 's'} hidden
+                              </td>
+                            </tr>
+                          )}
+                        </>
+                      );
+                    })()}
                   </tbody>
                 </table>
               </div>
@@ -960,45 +1025,84 @@ export default function Inventory() {
                   </tr>
                 </thead>
                 <tbody>
-                  {Object.keys(getStockForWarehouse(selectedWarehouse)).length === 0 ? (
-                    <tr>
-                      <td colSpan={6} className="px-4 py-8 text-center text-zinc-600">
-                        No stock in this warehouse. Use "Add Stock" or "Upload CSV" to add inventory.
-                      </td>
-                    </tr>
-                  ) : (
-                    Object.entries(getStockForWarehouse(selectedWarehouse)).map(([sku, qty]) => {
-                      const product = data.products.find(p => p.sku === sku);
-                      const value = (product?.unitCost || 0) * qty;
-                      const earliestExpiry = getEarliestExpiry(sku, selectedWarehouse);
-                      const expiryStatus = getExpiryStatus(earliestExpiry);
+                  {(() => {
+                    const whRows = Object.entries(getStockForWarehouse(selectedWarehouse)).map(([sku, qty]) => ({
+                      sku,
+                      total: qty,
+                    }));
+                    if (whRows.length === 0) {
                       return (
-                        <tr key={sku} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
-                          <td className="px-4 py-3 text-zinc-200">{product?.name || '-'}</td>
-                          <td className="px-4 py-3 text-zinc-500 text-xs">{sku}</td>
-                          <td className="text-right px-4 py-3 text-emerald-400 font-medium">{qty}</td>
-                          <td className="text-center px-4 py-3">
-                            {earliestExpiry ? (
-                              <span className={`text-xs px-2 py-0.5 rounded ${expiryStatus?.color || ''}`}>
-                                {new Date(earliestExpiry).toLocaleDateString('en-GB')}
-                              </span>
-                            ) : (
-                              <span className="text-zinc-600 text-xs">-</span>
-                            )}
-                          </td>
-                          <td className="text-right px-4 py-3 text-zinc-400">{value.toFixed(2)}</td>
-                          <td className="text-right px-4 py-3">
-                            <button
-                              onClick={() => openEditStock(selectedWarehouse, sku, qty)}
-                              className="text-emerald-400 hover:text-emerald-300 text-sm"
-                            >
-                              Edit
-                            </button>
+                        <tr>
+                          <td colSpan={6} className="px-4 py-8 text-center text-zinc-600">
+                            No stock in this warehouse. Use "Add Stock" or "Upload CSV" to add inventory.
                           </td>
                         </tr>
                       );
-                    })
-                  )}
+                    }
+                    const { groups, hiddenCount } = groupStockRows(whRows);
+                    if (groups.length === 0) {
+                      return (
+                        <tr>
+                          <td colSpan={6} className="px-4 py-8 text-center text-zinc-600">
+                            All {hiddenCount} item(s) are out of stock in this warehouse.
+                          </td>
+                        </tr>
+                      );
+                    }
+                    return (
+                      <>
+                        {groups.map(group => (
+                          <React.Fragment key={group.category}>
+                            <tr className="bg-zinc-800/60">
+                              <td colSpan={6} className="px-4 py-2">
+                                <span className="text-emerald-400 font-medium text-xs uppercase tracking-wide">{group.category}</span>
+                                <span className="text-zinc-500 text-xs ml-3">
+                                  {group.items.length} product{group.items.length === 1 ? '' : 's'} · {group.items.reduce((acc, r) => acc + r.total, 0)} units
+                                </span>
+                              </td>
+                            </tr>
+                            {group.items.map(({ sku, total: qty, product }) => {
+                              const value = (product?.unitCost || 0) * qty;
+                              const earliestExpiry = getEarliestExpiry(sku, selectedWarehouse);
+                              const expiryStatus = getExpiryStatus(earliestExpiry);
+                              return (
+                                <tr key={sku} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
+                                  <td className="px-4 py-3 text-zinc-200">{product?.name || '-'}</td>
+                                  <td className="px-4 py-3 text-zinc-500 text-xs">{sku}</td>
+                                  <td className="text-right px-4 py-3 text-emerald-400 font-medium">{qty}</td>
+                                  <td className="text-center px-4 py-3">
+                                    {earliestExpiry ? (
+                                      <span className={`text-xs px-2 py-0.5 rounded ${expiryStatus?.color || ''}`}>
+                                        {new Date(earliestExpiry).toLocaleDateString('en-GB')}
+                                      </span>
+                                    ) : (
+                                      <span className="text-zinc-600 text-xs">-</span>
+                                    )}
+                                  </td>
+                                  <td className="text-right px-4 py-3 text-zinc-400">{value.toFixed(2)}</td>
+                                  <td className="text-right px-4 py-3">
+                                    <button
+                                      onClick={() => openEditStock(selectedWarehouse, sku, qty)}
+                                      className="text-emerald-400 hover:text-emerald-300 text-sm"
+                                    >
+                                      Edit
+                                    </button>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </React.Fragment>
+                        ))}
+                        {hiddenCount > 0 && (
+                          <tr>
+                            <td colSpan={6} className="px-4 py-2 text-center text-zinc-600 text-xs">
+                              {hiddenCount} out-of-stock item{hiddenCount === 1 ? '' : 's'} hidden
+                            </td>
+                          </tr>
+                        )}
+                      </>
+                    );
+                  })()}
                 </tbody>
               </table>
             </div>
