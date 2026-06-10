@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useStock } from '../../context/StockContext';
 
 export default function Inventory() {
-  const { data, addProduct, bulkImportProducts, updateWarehouseStock, bulkUpdateWarehouseStock, createBatch, updateBatch } = useStock();
+  const { data, addProduct, updateProduct, bulkImportProducts, updateWarehouseStock, bulkUpdateWarehouseStock, createBatch, updateBatch } = useStock();
   const [selectedWarehouse, setSelectedWarehouse] = useState('all');
   const [activeSubTab, setActiveSubTab] = useState('stock');
   const [loading, setLoading] = useState(false);
@@ -11,6 +11,11 @@ export default function Inventory() {
   // Inline "set expiry" edits on the Missing Expiry list, keyed by batch id
   const [expiryEdits, setExpiryEdits] = useState({});
   const [savingExpiryId, setSavingExpiryId] = useState(null);
+
+  // Missing-cost-price drill-down on the Stock Levels finance tiles
+  const [showMissingCost, setShowMissingCost] = useState(false);
+  const [costEdits, setCostEdits] = useState({});
+  const [savingCostSku, setSavingCostSku] = useState(null);
 
   // Add Stock states
   const [showAddStock, setShowAddStock] = useState(false);
@@ -87,7 +92,8 @@ export default function Inventory() {
         }))
       : Object.entries(getStockForWarehouse(selectedWarehouse)).map(([sku, qty]) => ({ sku, qty }));
 
-    let products = 0, units = 0, value = 0, missingCost = 0;
+    let products = 0, units = 0, value = 0;
+    const missing = [];
     rows.forEach(r => {
       if (r.qty <= 0) return;
       const product = data.products.find(p => p.sku === r.sku);
@@ -96,11 +102,31 @@ export default function Inventory() {
       if (product?.unitCost) {
         value += product.unitCost * r.qty;
       } else {
-        missingCost++;
+        missing.push({ sku: r.sku, name: product?.name || r.sku, qty: r.qty });
       }
     });
-    return { products, units, value, missingCost };
+    missing.sort((a, b) => b.qty - a.qty); // biggest holdings first — they distort the total most
+    return { products, units, value, missing, missingCost: missing.length };
   })();
+
+  const saveProductCost = async (sku) => {
+    const value = parseFloat(costEdits[sku]);
+    if (!value || value <= 0) return;
+    setSavingCostSku(sku);
+    setError(null);
+    try {
+      await updateProduct(sku, { unitCost: value });
+      setCostEdits(prev => {
+        const next = { ...prev };
+        delete next[sku];
+        return next;
+      });
+    } catch (err) {
+      setError(err.message || 'Failed to set cost price');
+    } finally {
+      setSavingCostSku(null);
+    }
+  };
 
   // Get batches with expiry info
   const getBatches = () => {
@@ -961,16 +987,76 @@ export default function Inventory() {
               <div className="text-xs text-zinc-500 mt-1">Stock value (at cost)</div>
               <div className="text-xs text-zinc-600 mt-1">Sum of cost price × quantity held</div>
             </div>
-            <div className={`rounded-lg p-4 border ${stockSummary.missingCost > 0 ? 'bg-amber-900/20 border-amber-700/50' : 'bg-zinc-900/50 border-zinc-800'}`}>
+            <button
+              onClick={() => setShowMissingCost(s => !s)}
+              disabled={stockSummary.missingCost === 0}
+              className={`rounded-lg p-4 border text-left transition-colors ${
+                stockSummary.missingCost > 0
+                  ? 'bg-amber-900/20 border-amber-700/50 hover:border-amber-500 cursor-pointer'
+                  : 'bg-zinc-900/50 border-zinc-800 cursor-default'
+              }`}
+            >
               <div className={`text-2xl font-bold ${stockSummary.missingCost > 0 ? 'text-amber-400' : 'text-zinc-200'}`}>
                 {stockSummary.missingCost}
               </div>
               <div className="text-xs text-zinc-500 mt-1">Products missing cost price</div>
               {stockSummary.missingCost > 0 && (
-                <div className="text-xs text-amber-400 mt-1">These count as £0 — stock value is understated</div>
+                <div className="text-xs text-amber-400 mt-1">
+                  These count as £0 — {showMissingCost ? 'click to hide list' : 'click to view & fix'}
+                </div>
               )}
-            </div>
+            </button>
           </div>
+
+          {/* Drill-down: which products have no cost price, fixable inline */}
+          {showMissingCost && stockSummary.missingCost > 0 && (
+            <div className="bg-zinc-900/50 border border-amber-700/50 rounded-lg overflow-hidden">
+              <div className="px-4 py-3 border-b border-zinc-800 flex items-center gap-2">
+                <h3 className="text-sm font-medium text-amber-400">Products Missing Cost Price</h3>
+                <span className="text-xs text-zinc-500">— largest holdings first; set a cost and it leaves this list</span>
+              </div>
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-zinc-800">
+                    <th className="text-left px-4 py-3 text-zinc-500 font-medium">Product</th>
+                    <th className="text-left px-4 py-3 text-zinc-500 font-medium">SKU</th>
+                    <th className="text-right px-4 py-3 text-zinc-500 font-medium">Units held</th>
+                    <th className="text-center px-4 py-3 text-zinc-500 font-medium">Set Cost Price</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {stockSummary.missing.map(item => (
+                    <tr key={item.sku} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
+                      <td className="px-4 py-3 text-zinc-200">{item.name}</td>
+                      <td className="px-4 py-3 text-zinc-500 text-xs">{item.sku}</td>
+                      <td className="text-right px-4 py-3 text-zinc-300">{item.qty}</td>
+                      <td className="text-center px-4 py-3">
+                        <div className="flex items-center justify-center gap-2">
+                          <span className="text-zinc-500 text-sm">£</span>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            placeholder="0.00"
+                            value={costEdits[item.sku] || ''}
+                            onChange={e => setCostEdits(prev => ({ ...prev, [item.sku]: e.target.value }))}
+                            className="w-24 bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-sm text-right focus:outline-none focus:border-amber-500"
+                          />
+                          <button
+                            onClick={() => saveProductCost(item.sku)}
+                            disabled={!parseFloat(costEdits[item.sku]) || savingCostSku === item.sku}
+                            className="px-3 py-1.5 bg-amber-600 text-white rounded text-xs font-medium hover:bg-amber-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {savingCostSku === item.sku ? 'Saving...' : 'Save'}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
 
           {selectedWarehouse === 'all' ? (
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg overflow-hidden">

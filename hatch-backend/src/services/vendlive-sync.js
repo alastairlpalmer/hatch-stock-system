@@ -99,6 +99,64 @@ export function computeCharged(item) {
   return item.price;
 }
 
+// Money values arrive as decimal strings; below this difference two prices
+// are considered equal, so float parsing noise never triggers an update.
+const PRICE_EPSILON = 0.005;
+
+/**
+ * Compute catalog price/cost updates from one ingest run's sale items.
+ * VendLive is the source of truth for pricing: the newest sale's list price
+ * (item.price — unaffected by discounts, which arrive separately) and cost
+ * price win over whatever the catalog holds. Zero/missing values never
+ * overwrite. Returns [{ sku, data: { salePrice?, unitCost? } }] only where
+ * a change is actually needed.
+ */
+export function computeProductPriceUpdates(items, productMap) {
+  const latestBySku = new Map();
+  for (const item of items) {
+    const sku = item.productExternalId;
+    if (!sku || !productMap.has(sku)) continue;
+    const ts = new Date(item.timestamp || 0).getTime() || 0;
+    const prev = latestBySku.get(sku);
+    if (!prev || ts > prev.ts || (ts === prev.ts && (item.productSaleId || 0) > (prev.item.productSaleId || 0))) {
+      latestBySku.set(sku, { item, ts });
+    }
+  }
+
+  const updates = [];
+  for (const [sku, { item }] of latestBySku) {
+    const product = productMap.get(sku);
+    const data = {};
+    if (item.price > 0 && Math.abs((product.salePrice ?? 0) - item.price) > PRICE_EPSILON) {
+      data.salePrice = item.price;
+    }
+    if (item.costPrice > 0 && Math.abs((product.unitCost ?? 0) - item.costPrice) > PRICE_EPSILON) {
+      data.unitCost = item.costPrice;
+    }
+    if (Object.keys(data).length > 0) updates.push({ sku, data });
+  }
+  return updates;
+}
+
+/**
+ * Apply computeProductPriceUpdates to the catalog. Failures are logged and
+ * swallowed — pricing refresh must never block sale ingestion or the poll
+ * checkpoint.
+ */
+async function applyProductPriceUpdates(items, productMap) {
+  try {
+    const updates = computeProductPriceUpdates(items, productMap);
+    for (const { sku, data } of updates) {
+      await prisma.product.update({ where: { sku }, data });
+    }
+    if (updates.length > 0) {
+      console.log(`VendLive sync: refreshed pricing on ${updates.length} product(s): ${updates.map(u => u.sku).join(', ')}`);
+    }
+  } catch (err) {
+    console.error('VendLive sync: product price refresh failed:', err.message);
+  }
+}
+
 /** Build the Sale create payload for a normalized item. */
 function buildSaleData(orderData, item, product, locationName, syncSource) {
   return {
@@ -164,6 +222,8 @@ async function applySaleStockDecrements(decrements) {
 export async function processVendliveOrder(orderData, syncSource, config) {
   const result = { created: 0, skipped: 0, errored: 0, errors: [] };
   const decrements = new Map();
+  const productMap = new Map();
+  const pricedItems = [];
 
   for (const item of orderData.items) {
     try {
@@ -194,6 +254,11 @@ export async function processVendliveOrder(orderData, syncSource, config) {
         result.errors.push(`Product SKU ${sku} not found (auto-create disabled)`);
         continue;
       }
+
+      // Track for the post-loop pricing refresh (also for re-synced sales —
+      // a price fixed in VendLive must reach the catalog either way).
+      productMap.set(sku, product);
+      pricedItems.push(item);
 
       // Look up machine mapping for location
       let locationName = orderData.locationName;
@@ -255,6 +320,7 @@ export async function processVendliveOrder(orderData, syncSource, config) {
   }
 
   await applySaleStockDecrements(decrements);
+  await applyProductPriceUpdates(pricedItems, productMap);
 
   return result;
 }
@@ -451,6 +517,11 @@ export async function runPollSync() {
     // failed, its items contributed nothing to `decrements` (they threw
     // before being counted), and the re-poll will pick them up.
     await applySaleStockDecrements(decrements);
+
+    // Refresh catalog pricing from this run's sales (newest sale per SKU
+    // wins). Uses items from failed batches too — harmless, since the
+    // refresh is idempotent and the re-poll repeats it.
+    await applyProductPriceUpdates(allItems.map(({ item }) => item), productMap);
 
     // Only advance lastPollSaleId if every batch succeeded. If any batch failed,
     // keep it where it was so the next poll re-fetches and retries (inserts are
