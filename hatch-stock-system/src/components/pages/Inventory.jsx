@@ -73,6 +73,35 @@ export default function Inventory() {
     };
   };
 
+  // Finance snapshot for the Stock Levels tab: units held and their value at
+  // COST price (product.unitCost — synced from VendLive cost price for
+  // auto-created products, editable in the product editor). Respects the
+  // warehouse selector. Products in stock with no cost price are counted
+  // separately — they contribute £0, so the total understates true value
+  // until their costs are filled in.
+  const stockSummary = (() => {
+    const rows = selectedWarehouse === 'all'
+      ? Object.entries(getAllStock()).map(([sku, locs]) => ({
+          sku,
+          qty: Object.values(locs).reduce((a, b) => a + b, 0),
+        }))
+      : Object.entries(getStockForWarehouse(selectedWarehouse)).map(([sku, qty]) => ({ sku, qty }));
+
+    let products = 0, units = 0, value = 0, missingCost = 0;
+    rows.forEach(r => {
+      if (r.qty <= 0) return;
+      const product = data.products.find(p => p.sku === r.sku);
+      products++;
+      units += r.qty;
+      if (product?.unitCost) {
+        value += product.unitCost * r.qty;
+      } else {
+        missingCost++;
+      }
+    });
+    return { products, units, value, missingCost };
+  })();
+
   // Get batches with expiry info
   const getBatches = () => {
     const batches = data.stockBatches || [];
@@ -915,6 +944,34 @@ export default function Inventory() {
 
       {activeSubTab === 'stock' && (
         <>
+          {/* Finance snapshot — stock held and its value at cost price */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4">
+              <div className="text-2xl font-bold text-zinc-200">{stockSummary.units.toLocaleString('en-GB')}</div>
+              <div className="text-xs text-zinc-500 mt-1">Units in stock</div>
+              <div className="text-xs text-zinc-600 mt-1">
+                {stockSummary.products.toLocaleString('en-GB')} product{stockSummary.products === 1 ? '' : 's'}
+                {selectedWarehouse !== 'all' && ` · ${data.warehouses.find(w => w.id === selectedWarehouse)?.name || ''}`}
+              </div>
+            </div>
+            <div className="bg-emerald-900/20 border border-emerald-900/50 rounded-lg p-4">
+              <div className="text-2xl font-bold text-emerald-400">
+                £{stockSummary.value.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </div>
+              <div className="text-xs text-zinc-500 mt-1">Stock value (at cost)</div>
+              <div className="text-xs text-zinc-600 mt-1">Sum of cost price × quantity held</div>
+            </div>
+            <div className={`rounded-lg p-4 border ${stockSummary.missingCost > 0 ? 'bg-amber-900/20 border-amber-700/50' : 'bg-zinc-900/50 border-zinc-800'}`}>
+              <div className={`text-2xl font-bold ${stockSummary.missingCost > 0 ? 'text-amber-400' : 'text-zinc-200'}`}>
+                {stockSummary.missingCost}
+              </div>
+              <div className="text-xs text-zinc-500 mt-1">Products missing cost price</div>
+              {stockSummary.missingCost > 0 && (
+                <div className="text-xs text-amber-400 mt-1">These count as £0 — stock value is understated</div>
+              )}
+            </div>
+          </div>
+
           {selectedWarehouse === 'all' ? (
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg overflow-hidden">
               <div className="overflow-x-auto">
