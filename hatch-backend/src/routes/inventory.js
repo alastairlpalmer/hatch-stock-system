@@ -1,8 +1,44 @@
 import express from 'express';
+import { z } from 'zod';
 import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
+import { categorizeBatchesByExpiry } from '../utils/expiry.js';
 
 const router = express.Router();
+
+// Shared field schemas
+const skuSchema = z.string().min(1);
+const quantitySchema = z.coerce.number().int();
+const nonNegativeQty = quantitySchema.refine(v => v >= 0, { message: 'quantity must be >= 0' });
+const positiveQty = quantitySchema.refine(v => v > 0, { message: 'quantity must be > 0' });
+
+/**
+ * Atomically apply a delta to a stock row inside a transaction, clamping at 0.
+ * Negative results are clamped (matching previous behaviour) — but unlike a
+ * silent Math.max(0, …) we log them, since clamping hides shrinkage.
+ */
+async function applyStockDelta(tx, model, where, createData, delta) {
+  await tx[model].upsert({
+    where,
+    create: { ...createData, quantity: Math.max(0, delta) },
+    update: { quantity: { increment: delta } },
+  });
+  if (delta < 0) {
+    const clamped = await tx[model].updateMany({
+      where: { ...whereToFlat(where), quantity: { lt: 0 } },
+      data: { quantity: 0 },
+    });
+    if (clamped.count > 0) {
+      console.warn(`Stock clamped to 0 (over-decrement) on ${model}:`, JSON.stringify(where));
+    }
+  }
+}
+
+// Prisma compound-unique `where` ({ warehouseId_sku: { … } }) → flat filter for updateMany
+function whereToFlat(where) {
+  const key = Object.keys(where)[0];
+  return where[key];
+}
 
 // ============ WAREHOUSE STOCK ============
 
@@ -33,67 +69,54 @@ router.get('/warehouse', asyncHandler(async (req, res) => {
 }));
 
 // Update warehouse stock
+const warehouseUpdateSchema = z.object({
+  warehouseId: z.string().min(1),
+  sku: skuSchema,
+  quantity: quantitySchema,
+  isDelta: z.boolean().optional().default(true),
+});
+
 router.post('/warehouse/update', asyncHandler(async (req, res) => {
-  const { warehouseId, sku, quantity, isDelta = true } = req.body;
+  const { warehouseId, sku, quantity, isDelta } = warehouseUpdateSchema.parse(req.body);
 
-  if (!warehouseId || !sku || quantity === undefined) {
-    return res.status(400).json({ error: 'warehouseId, sku, and quantity required' });
-  }
+  const where = { warehouseId_sku: { warehouseId, sku } };
 
-  // Get current stock
-  const existing = await prisma.warehouseStock.findUnique({
-    where: { warehouseId_sku: { warehouseId, sku } },
-  });
-
-  const currentQty = existing?.quantity || 0;
-  const newQty = isDelta ? currentQty + quantity : quantity;
-
-  // Upsert stock record
-  const stock = await prisma.warehouseStock.upsert({
-    where: { warehouseId_sku: { warehouseId, sku } },
-    create: {
-      warehouseId,
-      sku,
-      quantity: Math.max(0, newQty),
-    },
-    update: {
-      quantity: Math.max(0, newQty),
-    },
+  const stock = await prisma.$transaction(async (tx) => {
+    if (isDelta) {
+      await applyStockDelta(tx, 'warehouseStock', where, { warehouseId, sku }, quantity);
+    } else {
+      await tx.warehouseStock.upsert({
+        where,
+        create: { warehouseId, sku, quantity: Math.max(0, quantity) },
+        update: { quantity: Math.max(0, quantity) },
+      });
+    }
+    return tx.warehouseStock.findUnique({ where });
   });
 
   res.json(stock);
 }));
 
-// Bulk update warehouse stock
+// Bulk update warehouse stock (absolute quantities)
+const warehouseBulkSchema = z.object({
+  warehouseId: z.string().min(1),
+  items: z.array(z.object({ sku: skuSchema, quantity: nonNegativeQty })),
+});
+
 router.post('/warehouse/bulk', asyncHandler(async (req, res) => {
-  const { warehouseId, items } = req.body;
+  const { warehouseId, items } = warehouseBulkSchema.parse(req.body);
 
-  if (!warehouseId || !Array.isArray(items)) {
-    return res.status(400).json({ error: 'warehouseId and items array required' });
-  }
-
-  const results = { updated: 0, errors: [] };
-
-  for (const item of items) {
-    try {
-      await prisma.warehouseStock.upsert({
+  await prisma.$transaction(
+    items.map(item =>
+      prisma.warehouseStock.upsert({
         where: { warehouseId_sku: { warehouseId, sku: item.sku } },
-        create: {
-          warehouseId,
-          sku: item.sku,
-          quantity: item.quantity,
-        },
-        update: {
-          quantity: item.quantity,
-        },
-      });
-      results.updated++;
-    } catch (error) {
-      results.errors.push({ sku: item.sku, error: error.message });
-    }
-  }
+        create: { warehouseId, sku: item.sku, quantity: item.quantity },
+        update: { quantity: item.quantity },
+      })
+    )
+  );
 
-  res.json(results);
+  res.json({ updated: items.length, errors: [] });
 }));
 
 // ============ LOCATION STOCK ============
@@ -114,53 +137,43 @@ router.get('/locations/:id', asyncHandler(async (req, res) => {
   res.json(stockMap);
 }));
 
-// Update location stock
-router.post('/locations/:id/update', asyncHandler(async (req, res) => {
-  const { sku, quantity } = req.body;
-  const locationId = req.params.id;
+// Update location stock (absolute)
+const locationUpdateSchema = z.object({
+  sku: skuSchema,
+  quantity: nonNegativeQty,
+});
 
-  if (!sku || quantity === undefined) {
-    return res.status(400).json({ error: 'sku and quantity required' });
-  }
+router.post('/locations/:id/update', asyncHandler(async (req, res) => {
+  const { sku, quantity } = locationUpdateSchema.parse(req.body);
+  const locationId = req.params.id;
 
   const stock = await prisma.locationStock.upsert({
     where: { locationId_sku: { locationId, sku } },
-    create: {
-      locationId,
-      sku,
-      quantity: Math.max(0, quantity),
-    },
-    update: {
-      quantity: Math.max(0, quantity),
-    },
+    create: { locationId, sku, quantity },
+    update: { quantity },
   });
 
   res.json(stock);
 }));
 
-// Set location stock (bulk, replaces all)
+// Set location stock (bulk, absolute)
+const locationSetSchema = z.object({
+  items: z.array(z.object({ sku: skuSchema, quantity: nonNegativeQty })),
+});
+
 router.post('/locations/:id/set', asyncHandler(async (req, res) => {
-  const { items } = req.body;
+  const { items } = locationSetSchema.parse(req.body);
   const locationId = req.params.id;
 
-  if (!Array.isArray(items)) {
-    return res.status(400).json({ error: 'items array required' });
-  }
-
-  // Update each item
-  for (const item of items) {
-    await prisma.locationStock.upsert({
-      where: { locationId_sku: { locationId, sku: item.sku } },
-      create: {
-        locationId,
-        sku: item.sku,
-        quantity: item.quantity,
-      },
-      update: {
-        quantity: item.quantity,
-      },
-    });
-  }
+  await prisma.$transaction(
+    items.map(item =>
+      prisma.locationStock.upsert({
+        where: { locationId_sku: { locationId, sku: item.sku } },
+        create: { locationId, sku: item.sku, quantity: item.quantity },
+        update: { quantity: item.quantity },
+      })
+    )
+  );
 
   res.json({ success: true, updated: items.length });
 }));
@@ -181,8 +194,13 @@ router.get('/locations/:id/config', asyncHandler(async (req, res) => {
 }));
 
 // Update location config for a product
+const locationConfigSchema = z.object({
+  minStock: z.coerce.number().int().min(0).nullish(),
+  maxStock: z.coerce.number().int().min(0).nullish(),
+});
+
 router.put('/locations/:id/config/:sku', asyncHandler(async (req, res) => {
-  const { minStock, maxStock } = req.body;
+  const { minStock, maxStock } = locationConfigSchema.parse(req.body);
   const { id: locationId, sku } = req.params;
 
   const config = await prisma.locationConfig.upsert({
@@ -243,37 +261,24 @@ router.get('/batches/expiring', asyncHandler(async (req, res) => {
     orderBy: { expiryDate: 'asc' },
   });
 
-  // Categorize by urgency
-  const now = new Date();
-  const result = {
-    expired: [],
-    critical: [], // < 7 days
-    warning: [],  // < 30 days
-  };
-
-  batches.forEach(batch => {
-    const expiry = new Date(batch.expiryDate);
-    const daysUntil = Math.ceil((expiry - now) / (1000 * 60 * 60 * 24));
-    
-    if (daysUntil < 0) {
-      result.expired.push({ ...batch, daysUntil });
-    } else if (daysUntil <= 7) {
-      result.critical.push({ ...batch, daysUntil });
-    } else {
-      result.warning.push({ ...batch, daysUntil });
-    }
-  });
-
-  res.json(result);
+  res.json(categorizeBatchesByExpiry(batches));
 }));
 
 // Create batch
-router.post('/batches', asyncHandler(async (req, res) => {
-  const { warehouseId, sku, quantity, expiryDate, hasDamage, damageNotes } = req.body;
+const batchCreateSchema = z.object({
+  warehouseId: z.string().min(1),
+  sku: skuSchema,
+  quantity: positiveQty,
+  expiryDate: z.string().nullish().refine(
+    v => v == null || v === '' || !isNaN(Date.parse(v)),
+    { message: 'expiryDate must be a valid date' },
+  ),
+  hasDamage: z.boolean().optional(),
+  damageNotes: z.string().nullish(),
+});
 
-  if (!warehouseId || !sku || !quantity) {
-    return res.status(400).json({ error: 'warehouseId, sku, and quantity required' });
-  }
+router.post('/batches', asyncHandler(async (req, res) => {
+  const { warehouseId, sku, quantity, expiryDate, hasDamage, damageNotes } = batchCreateSchema.parse(req.body);
 
   const batch = await prisma.stockBatch.create({
     data: {
@@ -291,8 +296,14 @@ router.post('/batches', asyncHandler(async (req, res) => {
 }));
 
 // Update batch
+const batchUpdateSchema = z.object({
+  remainingQty: nonNegativeQty.optional(),
+  hasDamage: z.boolean().optional(),
+  damageNotes: z.string().nullish(),
+});
+
 router.put('/batches/:id', asyncHandler(async (req, res) => {
-  const { remainingQty, hasDamage, damageNotes } = req.body;
+  const { remainingQty, hasDamage, damageNotes } = batchUpdateSchema.parse(req.body);
 
   const batch = await prisma.stockBatch.update({
     where: { id: req.params.id },
@@ -306,41 +317,128 @@ router.put('/batches/:id', asyncHandler(async (req, res) => {
   res.json(batch);
 }));
 
+// Write off a batch (expired / damaged stock).
+// Zeroes the batch's remaining quantity, decrements warehouse stock by the
+// written-off amount, and journals the wastage as a StockRemoval so it shows
+// up in history with a reason.
+const writeOffSchema = z.object({
+  reason: z.enum(['expired', 'damaged', 'other']).default('expired'),
+  quantity: positiveQty.optional(), // defaults to entire remaining qty
+  notes: z.string().nullish(),
+  performedBy: z.string().nullish(),
+});
+
+router.post('/batches/:id/write-off', asyncHandler(async (req, res) => {
+  const { reason, quantity, notes, performedBy } = writeOffSchema.parse(req.body);
+
+  const batch = await prisma.stockBatch.findUnique({
+    where: { id: req.params.id },
+    include: { product: { select: { name: true } } },
+  });
+
+  if (!batch) {
+    return res.status(404).json({ error: 'Batch not found' });
+  }
+  if (batch.remainingQty <= 0) {
+    return res.status(409).json({ error: 'Batch has no remaining stock to write off' });
+  }
+
+  const writeOffQty = Math.min(quantity ?? batch.remainingQty, batch.remainingQty);
+
+  const result = await prisma.$transaction(async (tx) => {
+    // Guarded decrement so two concurrent write-offs can't double-deduct
+    const updated = await tx.stockBatch.updateMany({
+      where: { id: batch.id, remainingQty: { gte: writeOffQty } },
+      data: { remainingQty: { decrement: writeOffQty } },
+    });
+    if (updated.count === 0) {
+      const conflict = new Error('Batch remaining quantity changed — retry');
+      conflict.status = 409;
+      throw conflict;
+    }
+
+    await applyStockDelta(
+      tx,
+      'warehouseStock',
+      { warehouseId_sku: { warehouseId: batch.warehouseId, sku: batch.sku } },
+      { warehouseId: batch.warehouseId, sku: batch.sku },
+      -writeOffQty,
+    );
+
+    const removal = await tx.stockRemoval.create({
+      data: {
+        warehouseId: batch.warehouseId,
+        routeName: `Write-off (${reason})`,
+        takenBy: performedBy,
+        notes: notes || `Write-off of batch ${batch.id} (${batch.product?.name || batch.sku}): ${reason}`,
+        items: [{ sku: batch.sku, quantity: writeOffQty, reason, batchId: batch.id }],
+      },
+    });
+
+    return removal;
+  });
+
+  res.status(201).json({ success: true, writeOffQty, removal: result });
+}));
+
 // ============ REMOVALS ============
 
 // Record stock removal
+const removalSchema = z.object({
+  warehouseId: z.string().min(1),
+  routeId: z.string().nullish(),
+  routeName: z.string().nullish(),
+  takenBy: z.string().nullish(),
+  notes: z.string().nullish(),
+  items: z.array(z.object({ sku: skuSchema, quantity: positiveQty })).min(1),
+});
+
 router.post('/removals', asyncHandler(async (req, res) => {
-  const { warehouseId, routeId, routeName, items, takenBy, notes } = req.body;
+  const { warehouseId, routeId, routeName, items, takenBy, notes } = removalSchema.parse(req.body);
 
-  if (!warehouseId || !items?.length) {
-    return res.status(400).json({ error: 'warehouseId and items required' });
-  }
-
-  // Create removal record
-  const removal = await prisma.stockRemoval.create({
-    data: {
-      warehouseId,
-      routeId,
-      routeName,
-      items,
-      takenBy,
-      notes,
-    },
-  });
-
-  // Update warehouse stock
-  for (const item of items) {
-    const existing = await prisma.warehouseStock.findUnique({
-      where: { warehouseId_sku: { warehouseId, sku: item.sku } },
+  const removal = await prisma.$transaction(async (tx) => {
+    const record = await tx.stockRemoval.create({
+      data: {
+        warehouseId,
+        routeId,
+        routeName,
+        items,
+        takenBy,
+        notes,
+      },
     });
 
-    if (existing) {
-      await prisma.warehouseStock.update({
-        where: { warehouseId_sku: { warehouseId, sku: item.sku } },
-        data: { quantity: Math.max(0, existing.quantity - item.quantity) },
+    for (const item of items) {
+      await applyStockDelta(
+        tx,
+        'warehouseStock',
+        { warehouseId_sku: { warehouseId, sku: item.sku } },
+        { warehouseId, sku: item.sku },
+        -item.quantity,
+      );
+
+      // Consume batches FEFO (first-expiry-first-out) so the expiry report
+      // reflects what actually left the warehouse. Best-effort: historical
+      // batches may not cover the quantity, in which case we drain what we
+      // can — warehouse totals remain the source of truth for quantity.
+      let toConsume = item.quantity;
+      const batches = await tx.stockBatch.findMany({
+        where: { warehouseId, sku: item.sku, remainingQty: { gt: 0 } },
+        orderBy: [{ expiryDate: { sort: 'asc', nulls: 'last' } }, { receivedAt: 'asc' }],
       });
+      for (const batch of batches) {
+        if (toConsume <= 0) break;
+        const take = Math.min(batch.remainingQty, toConsume);
+        await tx.stockBatch.update({
+          where: { id: batch.id },
+          data: { remainingQty: { decrement: take } },
+        });
+        toConsume -= take;
+      }
     }
-  }
+
+    return record;
+  });
 
   res.status(201).json(removal);
 }));
@@ -369,36 +467,41 @@ router.get('/removals', asyncHandler(async (req, res) => {
 // ============ STOCK CHECKS ============
 
 // Submit stock check
+const stockCheckSchema = z.object({
+  locationId: z.string().min(1),
+  performedBy: z.string().nullish(),
+  items: z.array(z.object({
+    sku: skuSchema,
+    counted: nonNegativeQty,
+    expected: z.coerce.number().int().optional(),
+    variance: z.coerce.number().int().optional(),
+    reason: z.string().nullish(),
+  })).min(1),
+});
+
 router.post('/stock-checks', asyncHandler(async (req, res) => {
-  const { locationId, items, performedBy } = req.body;
+  const { locationId, items, performedBy } = stockCheckSchema.parse(req.body);
 
-  if (!locationId || !items?.length) {
-    return res.status(400).json({ error: 'locationId and items required' });
-  }
-
-  // Create stock check record
-  const stockCheck = await prisma.stockCheck.create({
-    data: {
-      locationId,
-      items,
-      performedBy,
-    },
-  });
-
-  // Update location stock to counted values
-  for (const item of items) {
-    await prisma.locationStock.upsert({
-      where: { locationId_sku: { locationId, sku: item.sku } },
-      create: {
+  const stockCheck = await prisma.$transaction(async (tx) => {
+    const record = await tx.stockCheck.create({
+      data: {
         locationId,
-        sku: item.sku,
-        quantity: item.counted,
-      },
-      update: {
-        quantity: item.counted,
+        items,
+        performedBy,
       },
     });
-  }
+
+    // Update location stock to counted values
+    for (const item of items) {
+      await tx.locationStock.upsert({
+        where: { locationId_sku: { locationId, sku: item.sku } },
+        create: { locationId, sku: item.sku, quantity: item.counted },
+        update: { quantity: item.counted },
+      });
+    }
+
+    return record;
+  });
 
   res.status(201).json(stockCheck);
 }));
@@ -417,44 +520,39 @@ router.get('/locations/:id/stock-check-history', asyncHandler(async (req, res) =
 // ============ RESTOCKS ============
 
 // Record restock
+const restockSchema = z.object({
+  locationId: z.string().min(1),
+  performedBy: z.string().nullish(),
+  photoUrl: z.string().nullish(),
+  notes: z.string().nullish(),
+  items: z.array(z.object({ sku: skuSchema, quantity: positiveQty })).min(1),
+});
+
 router.post('/restocks', asyncHandler(async (req, res) => {
-  const { locationId, items, performedBy, photoUrl, notes } = req.body;
+  const { locationId, items, performedBy, photoUrl, notes } = restockSchema.parse(req.body);
 
-  if (!locationId || !items?.length) {
-    return res.status(400).json({ error: 'locationId and items required' });
-  }
-
-  // Create restock record
-  const restock = await prisma.restockRecord.create({
-    data: {
-      locationId,
-      items,
-      performedBy,
-      photoUrl,
-      notes,
-    },
-  });
-
-  // Update location stock
-  for (const item of items) {
-    const existing = await prisma.locationStock.findUnique({
-      where: { locationId_sku: { locationId, sku: item.sku } },
-    });
-
-    const currentQty = existing?.quantity || 0;
-
-    await prisma.locationStock.upsert({
-      where: { locationId_sku: { locationId, sku: item.sku } },
-      create: {
+  const restock = await prisma.$transaction(async (tx) => {
+    const record = await tx.restockRecord.create({
+      data: {
         locationId,
-        sku: item.sku,
-        quantity: currentQty + item.quantity,
-      },
-      update: {
-        quantity: currentQty + item.quantity,
+        items,
+        performedBy,
+        photoUrl,
+        notes,
       },
     });
-  }
+
+    for (const item of items) {
+      // Atomic increment — no read-modify-write race
+      await tx.locationStock.upsert({
+        where: { locationId_sku: { locationId, sku: item.sku } },
+        create: { locationId, sku: item.sku, quantity: item.quantity },
+        update: { quantity: { increment: item.quantity } },
+      });
+    }
+
+    return record;
+  });
 
   res.status(201).json(restock);
 }));

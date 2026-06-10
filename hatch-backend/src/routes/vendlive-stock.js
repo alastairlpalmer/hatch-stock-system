@@ -2,7 +2,7 @@ import express from 'express';
 import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import * as vendliveApi from '../services/vendlive.js';
-import { syncMachineStock, syncAllMachines, detectRestockEvents } from '../services/vendlive-stock.js';
+import { syncMachineStock, syncAllMachines } from '../services/vendlive-stock.js';
 
 const router = express.Router();
 

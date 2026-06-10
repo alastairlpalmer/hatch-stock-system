@@ -12,7 +12,7 @@ export function normalizeWebhookPayload(body) {
   const items = (body.order_product_sales || []).map(item => ({
     productSaleId: parseInt(item.id),
     productExternalId: item.product_external_id || String(item.product_id),
-    machineId: item.machine_id,
+    machineId: item.machine_id != null ? parseInt(item.machine_id) : null,
     vendStatusName: item.vend_status_name,
     timestamp: item.timestamp,
     price: parseFloat(item.price) || 0,
@@ -85,14 +85,85 @@ export function normalizePollPayload(entry) {
   };
 }
 
-// ============ SALE PROCESSING ============
+/**
+ * Amount actually charged for a sale item.
+ * - totalPaid > 0: trust it (covers partial discounts).
+ * - totalPaid == 0 with a discount: price minus discount (a 100% discount /
+ *   free vend is £0, NOT full price — the old `totalPaid || price` fallback
+ *   inflated revenue for every free vend).
+ * - otherwise: fall back to price (totalPaid missing from some payloads).
+ */
+export function computeCharged(item) {
+  if (item.totalPaid > 0) return item.totalPaid;
+  if (item.discountValue > 0) return Math.max(0, item.price - item.discountValue);
+  return item.price;
+}
+
+/** Build the Sale create payload for a normalized item. */
+function buildSaleData(orderData, item, product, locationName, syncSource) {
+  return {
+    id: `vl-${orderData.orderSaleId}-${item.productSaleId}`,
+    sku: product.sku,
+    productName: item.productName || product.name,
+    quantity: 1,
+    charged: computeCharged(item),
+    costPrice: item.costPrice || product.unitCost || null,
+    paymentMethod: null,
+    locationName,
+    machineName: orderData.machineName,
+    timestamp: new Date(item.timestamp || orderData.createdAt || Date.now()),
+    vendliveOrderSaleId: orderData.orderSaleId,
+    vendliveProductSaleId: item.productSaleId,
+    vendliveMachineId: item.machineId || null,
+    vendStatus: item.vendStatusName || null,
+    discountValue: item.discountValue || null,
+    vatRate: item.vatRate || null,
+    vatAmount: item.vatAmount || null,
+    promotionId: item.promotionId || null,
+    voucherCode: item.voucherCode || null,
+    isRefunded: item.isRefunded || false,
+    syncSource,
+  };
+}
+
+/**
+ * Decrement location stock for newly ingested sales, clamped at 0.
+ * `decrements` is a Map of "locationId|sku" -> quantity.
+ * Idempotency comes from the caller: only sales seen for the FIRST time
+ * contribute to this map, so re-syncs never double-decrement.
+ */
+async function applySaleStockDecrements(decrements) {
+  for (const [key, qty] of decrements) {
+    const [locationId, sku] = key.split('|');
+    try {
+      await prisma.$transaction([
+        prisma.locationStock.upsert({
+          where: { locationId_sku: { locationId, sku } },
+          // No tracked stock yet at this location — start the row at 0
+          create: { locationId, sku, quantity: 0 },
+          update: { quantity: { decrement: qty } },
+        }),
+        prisma.locationStock.updateMany({
+          where: { locationId, sku, quantity: { lt: 0 } },
+          data: { quantity: 0 },
+        }),
+      ]);
+    } catch (err) {
+      console.error(`Sale stock decrement failed for location ${locationId}, sku ${sku}:`, err.message);
+    }
+  }
+}
+
+// ============ SALE PROCESSING (webhook path) ============
 
 /**
  * Process a single VendLive order and create Sale records for each product sale item.
+ * Newly created sales decrement LocationStock via the machine→location mapping.
  * Returns { created: number, skipped: number, errored: number, errors: string[] }
  */
 export async function processVendliveOrder(orderData, syncSource, config) {
   const result = { created: 0, skipped: 0, errored: 0, errors: [] };
+  const decrements = new Map();
 
   for (const item of orderData.items) {
     try {
@@ -126,57 +197,51 @@ export async function processVendliveOrder(orderData, syncSource, config) {
 
       // Look up machine mapping for location
       let locationName = orderData.locationName;
+      let locationId = null;
       if (item.machineId) {
         const mapping = await prisma.vendliveMachineMapping.findUnique({
           where: { vendliveMachineId: item.machineId },
-          include: { location: { select: { name: true } } },
+          include: { location: { select: { id: true, name: true } } },
         });
-        if (mapping?.location?.name) {
+        if (mapping?.location) {
           locationName = mapping.location.name;
+          locationId = mapping.location.id;
         }
       }
 
-      // Determine the charged amount — use totalPaid if discounted, otherwise price
-      const charged = item.totalPaid > 0 ? item.totalPaid : item.price;
-
-      // Upsert Sale record — handles re-syncs gracefully
-      const saleId = `vl-${orderData.orderSaleId}-${item.productSaleId}`;
-      const saleData = {
-        id: saleId,
-        sku: product.sku,
-        productName: item.productName || product.name,
-        quantity: 1,
-        charged,
-        costPrice: item.costPrice || product.unitCost || null,
-        paymentMethod: null,
-        locationName,
-        machineName: orderData.machineName,
-        timestamp: new Date(item.timestamp || orderData.createdAt),
-        vendliveOrderSaleId: orderData.orderSaleId,
-        vendliveProductSaleId: item.productSaleId,
-        vendliveMachineId: item.machineId || null,
-        vendStatus: item.vendStatusName || null,
-        discountValue: item.discountValue || null,
-        vatRate: item.vatRate || null,
-        vatAmount: item.vatAmount || null,
-        promotionId: item.promotionId || null,
-        voucherCode: item.voucherCode || null,
-        isRefunded: item.isRefunded || false,
-        syncSource,
-      };
-
-      await prisma.sale.upsert({
+      const existing = await prisma.sale.findUnique({
         where: {
           vendliveOrderSaleId_vendliveProductSaleId: {
             vendliveOrderSaleId: orderData.orderSaleId,
             vendliveProductSaleId: item.productSaleId,
           },
         },
-        create: saleData,
-        update: {}, // Already exists, no update needed
+        select: { id: true, isRefunded: true },
       });
 
+      if (existing) {
+        // Re-sync of a known sale: keep mutable fields current (a sale
+        // refunded in VendLive after first ingest must not stay frozen).
+        if (existing.isRefunded !== (item.isRefunded || false)) {
+          await prisma.sale.update({
+            where: { id: existing.id },
+            data: { isRefunded: item.isRefunded || false, vendStatus: item.vendStatusName || null },
+          });
+        }
+        result.skipped++;
+        continue;
+      }
+
+      await prisma.sale.create({
+        data: buildSaleData(orderData, item, product, locationName, syncSource),
+      });
       result.created++;
+
+      // Sale dispensed from the machine → decrement that location's stock
+      if (locationId) {
+        const key = `${locationId}|${product.sku}`;
+        decrements.set(key, (decrements.get(key) || 0) + 1);
+      }
     } catch (err) {
       // If it's a unique constraint violation, treat as skip (duplicate)
       if (err.code === 'P2002') {
@@ -188,6 +253,8 @@ export async function processVendliveOrder(orderData, syncSource, config) {
       }
     }
   }
+
+  await applySaleStockDecrements(decrements);
 
   return result;
 }
@@ -207,6 +274,7 @@ export async function runPollSync() {
   }
 
   const totals = { created: 0, skipped: 0, errored: 0, errors: [] };
+  const unknownSkus = new Set();
   const previousLastPollSaleId = config.lastPollSaleId || 0;
   let highestSaleIdSeen = previousLastPollSaleId;
 
@@ -248,7 +316,7 @@ export async function runPollSync() {
     const existingMappings = uniqueMachineIds.length > 0
       ? await prisma.vendliveMachineMapping.findMany({
           where: { vendliveMachineId: { in: uniqueMachineIds } },
-          include: { location: { select: { name: true } } },
+          include: { location: { select: { id: true, name: true } } },
         })
       : [];
     const mappingMap = new Map(existingMappings.map(m => [m.vendliveMachineId, m]));
@@ -293,82 +361,101 @@ export async function runPollSync() {
       }
     }
 
-    // Step 4: Batch upsert sales in chunks using transactions.
-    // Track whether any batch failed so we can decide whether to advance lastPollSaleId.
+    // Step 4: Batch-insert sales in chunks.
+    // For each chunk: find which sales already exist, createMany the new ones
+    // (createMany's count gives an HONEST created total — the old upsert loop
+    // counted re-synced duplicates as "created"), update refund status on
+    // existing ones that changed, and decrement location stock for new ones.
     let anyBatchFailed = false;
+    const decrements = new Map();
+
     for (let i = 0; i < allItems.length; i += BATCH_SIZE) {
       const chunk = allItems.slice(i, i + BATCH_SIZE);
-      const operations = [];
 
-      for (const { orderData, item } of chunk) {
-        const sku = item.productExternalId;
-        const product = productMap.get(sku);
-
+      // Partition out items whose product is unknown (auto-create disabled).
+      // These are counted as skipped — NOT errors — and logged with their
+      // SKUs in metadata, because blocking the checkpoint on them would make
+      // the poll re-fetch the same window forever.
+      const resolvable = [];
+      for (const entry of chunk) {
+        const product = productMap.get(entry.item.productExternalId);
         if (!product) {
-          totals.errored++;
-          totals.errors.push(`Product SKU ${sku} not found`);
+          totals.skipped++;
+          unknownSkus.add(entry.item.productExternalId);
           continue;
         }
-
-        const mapping = item.machineId ? mappingMap.get(item.machineId) : null;
-        const locationName = mapping?.location?.name || orderData.locationName;
-        const charged = item.totalPaid > 0 ? item.totalPaid : item.price;
-        const saleId = `vl-${orderData.orderSaleId}-${item.productSaleId}`;
-
-        operations.push(
-          prisma.sale.upsert({
-            where: {
-              vendliveOrderSaleId_vendliveProductSaleId: {
-                vendliveOrderSaleId: orderData.orderSaleId,
-                vendliveProductSaleId: item.productSaleId,
-              },
-            },
-            create: {
-              id: saleId,
-              sku: product.sku,
-              productName: item.productName || product.name,
-              quantity: 1,
-              charged,
-              costPrice: item.costPrice || product.unitCost || null,
-              paymentMethod: null,
-              locationName,
-              machineName: orderData.machineName,
-              timestamp: new Date(item.timestamp || orderData.createdAt),
-              vendliveOrderSaleId: orderData.orderSaleId,
-              vendliveProductSaleId: item.productSaleId,
-              vendliveMachineId: item.machineId || null,
-              vendStatus: item.vendStatusName || null,
-              discountValue: item.discountValue || null,
-              vatRate: item.vatRate || null,
-              vatAmount: item.vatAmount || null,
-              promotionId: item.promotionId || null,
-              voucherCode: item.voucherCode || null,
-              isRefunded: item.isRefunded || false,
-              syncSource: 'poll',
-            },
-            update: {},
-          })
-        );
+        resolvable.push({ ...entry, product });
       }
 
-      if (operations.length > 0) {
-        try {
-          await prisma.$transaction(operations);
-          totals.created += operations.length;
-        } catch (err) {
-          console.error(`VendLive sync: batch error at chunk ${Math.floor(i / BATCH_SIZE) + 1}: ${err.message}`);
-          totals.errored += operations.length;
-          totals.errors.push(`Batch ${Math.floor(i / BATCH_SIZE) + 1}: ${err.message}`);
-          anyBatchFailed = true;
+      if (resolvable.length === 0) continue;
+
+      try {
+        const keys = resolvable.map(({ orderData, item }) => ({
+          vendliveOrderSaleId: orderData.orderSaleId,
+          vendliveProductSaleId: item.productSaleId,
+        }));
+        const existingSales = await prisma.sale.findMany({
+          where: { OR: keys },
+          select: { id: true, vendliveOrderSaleId: true, vendliveProductSaleId: true, isRefunded: true },
+        });
+        const existingByKey = new Map(
+          existingSales.map(s => [`${s.vendliveOrderSaleId}-${s.vendliveProductSaleId}`, s])
+        );
+
+        const createRows = [];
+        const refundUpdates = [];
+
+        for (const { orderData, item, product } of resolvable) {
+          const mapping = item.machineId ? mappingMap.get(item.machineId) : null;
+          const locationName = mapping?.location?.name || orderData.locationName;
+          const existing = existingByKey.get(`${orderData.orderSaleId}-${item.productSaleId}`);
+
+          if (existing) {
+            totals.skipped++;
+            if (existing.isRefunded !== (item.isRefunded || false)) {
+              refundUpdates.push(prisma.sale.update({
+                where: { id: existing.id },
+                data: { isRefunded: item.isRefunded || false, vendStatus: item.vendStatusName || null },
+              }));
+            }
+            continue;
+          }
+
+          createRows.push(buildSaleData(orderData, item, product, locationName, 'poll'));
+
+          if (mapping?.location?.id) {
+            const key = `${mapping.location.id}|${product.sku}`;
+            decrements.set(key, (decrements.get(key) || 0) + 1);
+          }
         }
+
+        if (createRows.length > 0 || refundUpdates.length > 0) {
+          const [createResult] = await prisma.$transaction([
+            prisma.sale.createMany({ data: createRows, skipDuplicates: true }),
+            ...refundUpdates,
+          ]);
+          totals.created += createResult.count;
+          totals.skipped += createRows.length - createResult.count; // raced duplicates
+        }
+      } catch (err) {
+        console.error(`VendLive sync: batch error at chunk ${Math.floor(i / BATCH_SIZE) + 1}: ${err.message}`);
+        totals.errored += resolvable.length;
+        totals.errors.push(`Batch ${Math.floor(i / BATCH_SIZE) + 1}: ${err.message}`);
+        anyBatchFailed = true;
       }
 
       console.log(`VendLive sync: processed chunk ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(allItems.length / BATCH_SIZE)}`);
     }
 
+    // Decrement location stock for newly ingested sales only. If a batch
+    // failed, its items contributed nothing to `decrements` (they threw
+    // before being counted), and the re-poll will pick them up.
+    await applySaleStockDecrements(decrements);
+
     // Only advance lastPollSaleId if every batch succeeded. If any batch failed,
-    // keep it where it was so the next poll re-fetches and retries (upserts are
-    // idempotent). lastPollAt is always updated so the scheduler knows we ran.
+    // keep it where it was so the next poll re-fetches and retries (inserts are
+    // idempotent via skipDuplicates). lastPollAt is always updated so the
+    // scheduler knows we ran.
     const newLastPollSaleId = anyBatchFailed
       ? previousLastPollSaleId
       : (highestSaleIdSeen || previousLastPollSaleId);
@@ -384,6 +471,9 @@ export async function runPollSync() {
     if (anyBatchFailed) {
       console.warn(`VendLive sync: kept lastPollSaleId at ${previousLastPollSaleId} because batch(es) failed; will retry on next poll`);
     }
+    if (unknownSkus.size > 0) {
+      console.warn(`VendLive sync: skipped sales for ${unknownSkus.size} unknown SKU(s) (auto-create disabled): ${[...unknownSkus].slice(0, 10).join(', ')}`);
+    }
 
     // Log the sync
     const status = totals.errored > 0 ? (totals.created > 0 ? 'partial' : 'error') : 'success';
@@ -395,7 +485,11 @@ export async function runPollSync() {
         salesSkipped: totals.skipped,
         salesErrored: totals.errored,
         errorMessage: totals.errors.length > 0 ? totals.errors.slice(0, 10).join('; ') : null,
-        metadata: { pageCount, totalResults: results.length },
+        metadata: {
+          pageCount,
+          totalResults: results.length,
+          ...(unknownSkus.size > 0 ? { unknownSkus: [...unknownSkus].slice(0, 50) } : {}),
+        },
       },
     });
 

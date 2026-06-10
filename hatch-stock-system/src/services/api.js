@@ -33,7 +33,13 @@ api.interceptors.response.use(
         case 401:
           // Unauthorized - clear token and redirect to login
           localStorage.removeItem('auth_token');
-          window.location.href = '/login';
+          localStorage.removeItem('auth_user');
+          if (
+            import.meta.env.VITE_AUTH_ENABLED === 'true' &&
+            window.location.pathname !== '/login'
+          ) {
+            window.location.href = '/login';
+          }
           break;
         case 403:
           console.error('Forbidden - insufficient permissions');

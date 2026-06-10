@@ -1,4 +1,5 @@
 import express from 'express';
+import { z } from 'zod';
 import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 
@@ -29,6 +30,74 @@ router.get('/', asyncHandler(async (req, res) => {
   });
 
   res.json(orders);
+}));
+
+// Generate order suggestions.
+// NOTE: must be declared BEFORE `/:id` or Express matches `:id = "suggestions"`.
+router.get('/suggestions', asyncHandler(async (req, res) => {
+  const { locationId } = req.query;
+
+  if (!locationId) {
+    return res.status(400).json({ error: 'locationId required' });
+  }
+
+  // Get location stock and config
+  const location = await prisma.location.findUnique({
+    where: { id: locationId },
+    include: {
+      stock: true,
+      configs: true,
+      assignedItems: true,
+    },
+  });
+
+  if (!location) {
+    return res.status(404).json({ error: 'Location not found' });
+  }
+
+  // Fetch all assigned products in one query (was a per-assignment lookup)
+  const products = await prisma.product.findMany({
+    where: { sku: { in: location.assignedItems.map(a => a.sku) } },
+  });
+  const productMap = new Map(products.map(p => [p.sku, p]));
+
+  // Build suggestions
+  const suggestions = [];
+
+  for (const assignment of location.assignedItems) {
+    const stockRecord = location.stock.find(s => s.sku === assignment.sku);
+    const config = location.configs.find(c => c.sku === assignment.sku);
+
+    const currentQty = stockRecord?.quantity || 0;
+    const minStock = config?.minStock || 0;
+    const maxStock = config?.maxStock || 10;
+
+    // Suggest if at or below min stock
+    if (currentQty <= minStock * 1.5) {
+      const product = productMap.get(assignment.sku);
+
+      suggestions.push({
+        sku: assignment.sku,
+        name: product?.name || assignment.sku,
+        category: product?.category,
+        currentStock: currentQty,
+        minStock,
+        maxStock,
+        suggestedQty: maxStock - currentQty,
+        priority: currentQty <= minStock ? 'critical' : 'warning',
+        unitCost: product?.unitCost,
+      });
+    }
+  }
+
+  // Sort by priority
+  suggestions.sort((a, b) => {
+    if (a.priority === 'critical' && b.priority !== 'critical') return -1;
+    if (a.priority !== 'critical' && b.priority === 'critical') return 1;
+    return b.suggestedQty - a.suggestedQty;
+  });
+
+  res.json(suggestions);
 }));
 
 // Get single order
@@ -130,122 +199,93 @@ router.delete('/:id', asyncHandler(async (req, res) => {
   res.json({ success: true });
 }));
 
-// Receive order
+// Receive order — idempotent and transactional. A retry, double-click, or two
+// operators scanning the same delivery must not double-count stock.
+const receiveSchema = z.object({
+  warehouseId: z.string().min(1),
+  items: z.array(z.object({
+    sku: z.string().min(1),
+    quantity: z.coerce.number().int().positive(),
+    expiryDate: z.string().nullish().refine(
+      v => v == null || v === '' || !isNaN(Date.parse(v)),
+      { message: 'expiryDate must be a valid date' },
+    ),
+    hasDamage: z.boolean().optional(),
+    damageNotes: z.string().nullish(),
+  })).min(1),
+});
+
 router.post('/:id/receive', asyncHandler(async (req, res) => {
-  const { items, warehouseId } = req.body;
+  const { items, warehouseId } = receiveSchema.parse(req.body);
 
-  if (!items?.length || !warehouseId) {
-    return res.status(400).json({ error: 'Items and warehouseId required' });
-  }
-
-  // Update order status
-  const order = await prisma.order.update({
+  const order = await prisma.order.findUnique({
     where: { id: req.params.id },
-    data: {
-      status: 'received',
-      receivedAt: new Date(),
-    },
+    include: { items: true },
   });
 
-  // Create batches and update stock
+  if (!order) {
+    return res.status(404).json({ error: 'Order not found' });
+  }
+  if (order.status !== 'pending') {
+    return res.status(409).json({ error: `Order already ${order.status}` });
+  }
+
+  // Received items must be on the order and not exceed the ordered quantity
+  const orderedBySku = {};
+  for (const oi of order.items) {
+    orderedBySku[oi.sku] = (orderedBySku[oi.sku] || 0) + oi.quantity;
+  }
   for (const item of items) {
-    // Create batch for expiry tracking
-    await prisma.stockBatch.create({
-      data: {
-        warehouseId,
-        sku: item.sku,
-        quantity: item.quantity,
-        remainingQty: item.quantity,
-        expiryDate: item.expiryDate ? new Date(item.expiryDate) : null,
-        hasDamage: item.hasDamage || false,
-        damageNotes: item.damageNotes,
-      },
-    });
-
-    // Update warehouse stock
-    const existing = await prisma.warehouseStock.findUnique({
-      where: { warehouseId_sku: { warehouseId, sku: item.sku } },
-    });
-
-    const currentQty = existing?.quantity || 0;
-
-    await prisma.warehouseStock.upsert({
-      where: { warehouseId_sku: { warehouseId, sku: item.sku } },
-      create: {
-        warehouseId,
-        sku: item.sku,
-        quantity: currentQty + item.quantity,
-      },
-      update: {
-        quantity: currentQty + item.quantity,
-      },
-    });
-  }
-
-  res.json({ success: true, order });
-}));
-
-// Generate order suggestions
-router.get('/suggestions', asyncHandler(async (req, res) => {
-  const { locationId, supplierId } = req.query;
-
-  if (!locationId) {
-    return res.status(400).json({ error: 'locationId required' });
-  }
-
-  // Get location stock and config
-  const location = await prisma.location.findUnique({
-    where: { id: locationId },
-    include: {
-      stock: true,
-      configs: true,
-      assignedItems: true,
-    },
-  });
-
-  if (!location) {
-    return res.status(404).json({ error: 'Location not found' });
-  }
-
-  // Build suggestions
-  const suggestions = [];
-
-  for (const assignment of location.assignedItems) {
-    const stockRecord = location.stock.find(s => s.sku === assignment.sku);
-    const config = location.configs.find(c => c.sku === assignment.sku);
-
-    const currentQty = stockRecord?.quantity || 0;
-    const minStock = config?.minStock || 0;
-    const maxStock = config?.maxStock || 10;
-
-    // Suggest if at or below min stock
-    if (currentQty <= minStock * 1.5) {
-      const product = await prisma.product.findUnique({
-        where: { sku: assignment.sku },
-      });
-
-      suggestions.push({
-        sku: assignment.sku,
-        name: product?.name || assignment.sku,
-        category: product?.category,
-        currentStock: currentQty,
-        minStock,
-        maxStock,
-        suggestedQty: maxStock - currentQty,
-        priority: currentQty <= minStock ? 'critical' : 'warning',
-        unitCost: product?.unitCost,
+    const ordered = orderedBySku[item.sku];
+    if (ordered === undefined) {
+      return res.status(400).json({ error: `SKU ${item.sku} is not on this order` });
+    }
+    if (item.quantity > ordered) {
+      return res.status(400).json({
+        error: `Received quantity for ${item.sku} (${item.quantity}) exceeds ordered quantity (${ordered})`,
       });
     }
   }
 
-  // Sort by priority
-  suggestions.sort((a, b) => {
-    if (a.priority === 'critical' && b.priority !== 'critical') return -1;
-    if (a.priority !== 'critical' && b.priority === 'critical') return 1;
-    return b.suggestedQty - a.suggestedQty;
+  const updatedOrder = await prisma.$transaction(async (tx) => {
+    // Guarded status flip: if a concurrent request already received this
+    // order, count is 0 and we abort without touching stock.
+    const flipped = await tx.order.updateMany({
+      where: { id: order.id, status: 'pending' },
+      data: { status: 'received', receivedAt: new Date() },
+    });
+    if (flipped.count === 0) {
+      const conflict = new Error('Order already received');
+      conflict.status = 409;
+      throw conflict;
+    }
+
+    for (const item of items) {
+      // Create batch for expiry tracking
+      await tx.stockBatch.create({
+        data: {
+          warehouseId,
+          sku: item.sku,
+          quantity: item.quantity,
+          remainingQty: item.quantity,
+          expiryDate: item.expiryDate ? new Date(item.expiryDate) : null,
+          hasDamage: item.hasDamage || false,
+          damageNotes: item.damageNotes,
+        },
+      });
+
+      // Atomic increment — no read-modify-write race
+      await tx.warehouseStock.upsert({
+        where: { warehouseId_sku: { warehouseId, sku: item.sku } },
+        create: { warehouseId, sku: item.sku, quantity: item.quantity },
+        update: { quantity: { increment: item.quantity } },
+      });
+    }
+
+    return tx.order.findUnique({ where: { id: order.id } });
   });
 
-  res.json(suggestions);
+  res.json({ success: true, order: updatedOrder });
 }));
 
 export default router;

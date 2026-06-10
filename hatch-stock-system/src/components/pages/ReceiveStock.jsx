@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useStock } from '../../context/StockContext';
 import BarcodeScanner from '../scanner/BarcodeScanner';
 import { productsService } from '../../services/products.service';
@@ -15,6 +15,10 @@ export default function ReceiveStock() {
   const [scannerOpen, setScannerOpen] = useState(false);
   // Handle to BarcodeScanner.flash() — set on overlay mount via onReady.
   const scannerApiRef = useRef(null);
+  // Latest receivedItems ref so the async scan handler doesn't read stale
+  // state when the user scans many items in quick succession.
+  const receivedItemsRef = useRef(receivedItems);
+  useEffect(() => { receivedItemsRef.current = receivedItems; }, [receivedItems]);
   // Snapshot of received quantities taken when the scanner opens, so we
   // can restore them if the user opens scan-mode by mistake (we zero
   // quantities on open so scanning counts up from 0).
@@ -107,14 +111,18 @@ export default function ReceiveStock() {
         return;
       }
       // Cap at the ordered quantity to avoid silent over-receipt.
+      // Compute the next quantity from the ref (always current) BEFORE
+      // calling the setter, so the flash feedback below can't read a
+      // stale value assigned inside the updater.
       const orderedQty = selectedOrder.items.find(i => i.sku === product.sku)?.quantity ?? 0;
-      let appliedQty = 0;
-      setReceivedItems(prev => {
-        const current = prev[product.sku] || { quantity: 0, expiryDate: '', hasDamage: false, damageNotes: '' };
-        const nextQty = Math.min((current.quantity || 0) + 1, orderedQty);
-        appliedQty = nextQty;
-        return { ...prev, [product.sku]: { ...current, quantity: nextQty } };
-      });
+      const currentItems = receivedItemsRef.current;
+      const current = currentItems[product.sku] || { quantity: 0, expiryDate: '', hasDamage: false, damageNotes: '' };
+      const appliedQty = Math.min((current.quantity || 0) + 1, orderedQty);
+      const nextItems = { ...currentItems, [product.sku]: { ...current, quantity: appliedQty } };
+      // Update the ref synchronously so a rapid follow-up scan sees this
+      // quantity even before React commits the state update.
+      receivedItemsRef.current = nextItems;
+      setReceivedItems(nextItems);
       setScansThisSession(n => n + 1);
       const atCap = appliedQty >= orderedQty;
       flash?.({
@@ -318,8 +326,13 @@ export default function ReceiveStock() {
                       <div className="col-span-2">
                         <input
                           type="number"
+                          min="0"
+                          max={item.quantity}
                           value={itemData.quantity || ''}
-                          onChange={e => updateItem(item.sku, 'quantity', parseInt(e.target.value) || 0)}
+                          onChange={e => {
+                            const parsed = parseInt(e.target.value) || 0;
+                            updateItem(item.sku, 'quantity', Math.min(Math.max(parsed, 0), item.quantity));
+                          }}
                           className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm text-center focus:outline-none focus:border-emerald-500"
                         />
                       </div>

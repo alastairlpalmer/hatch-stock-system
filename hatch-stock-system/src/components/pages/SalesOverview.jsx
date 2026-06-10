@@ -245,15 +245,25 @@ export default function SalesOverview() {
       }
     });
 
-    // Auto-match locations by name
+    // Auto-match locations by name: exact case-insensitive match first,
+    // then a startsWith match only when it's unambiguous (exactly one
+    // candidate). Otherwise leave unmapped for the user to map manually.
     const mappings = {};
     uniqueLocations.forEach(locName => {
-      const matchedLoc = data.locations.find(l =>
-        l.name.toLowerCase().includes(locName.toLowerCase()) ||
-        locName.toLowerCase().includes(l.name.toLowerCase())
-      );
-      if (matchedLoc) {
-        mappings[locName] = matchedLoc.id;
+      const target = locName.toLowerCase();
+
+      const exactMatch = data.locations.find(l => l.name.toLowerCase() === target);
+      if (exactMatch) {
+        mappings[locName] = exactMatch.id;
+        return;
+      }
+
+      const candidates = data.locations.filter(l => {
+        const name = l.name.toLowerCase();
+        return name.startsWith(target) || target.startsWith(name);
+      });
+      if (candidates.length === 1) {
+        mappings[locName] = candidates[0].id;
       }
     });
 
