@@ -17,6 +17,17 @@ export default function Inventory() {
   const [costEdits, setCostEdits] = useState({});
   const [savingCostSku, setSavingCostSku] = useState(null);
 
+  // Stock Levels search (product name, SKU or category)
+  const [stockSearch, setStockSearch] = useState('');
+  const isStockSearching = stockSearch.trim().length > 0;
+  const matchesStockSearch = (sku) => {
+    const query = stockSearch.trim().toLowerCase();
+    if (!query) return true;
+    const product = data.products.find(p => p.sku === sku);
+    const haystack = `${product?.name || ''} ${sku} ${product?.category || ''}`.toLowerCase();
+    return query.split(/\s+/).every(token => haystack.includes(token));
+  };
+
   // Add Stock states
   const [showAddStock, setShowAddStock] = useState(false);
   const [addStockForm, setAddStockForm] = useState({
@@ -55,9 +66,12 @@ export default function Inventory() {
 
   // Stock Levels rows: zero-quantity items hidden, grouped by product
   // category (alphabetical), products alphabetical within each group.
+  // While searching, zero-stock items are INCLUDED so the search answers
+  // "do we have any X?" honestly with a 0 rather than hiding the row.
   // Returns { groups: [{ category, items }], hiddenCount }.
   const groupStockRows = (rows) => {
-    const visible = rows.filter(r => r.total > 0);
+    const searched = rows.filter(r => matchesStockSearch(r.sku));
+    const visible = isStockSearching ? searched : searched.filter(r => r.total > 0);
     const groups = {};
     visible.forEach(row => {
       const product = data.products.find(p => p.sku === row.sku);
@@ -74,7 +88,7 @@ export default function Inventory() {
             (x.product?.name || x.sku).localeCompare(y.product?.name || y.sku)
           ),
         })),
-      hiddenCount: rows.length - visible.length,
+      hiddenCount: searched.length - visible.length,
     };
   };
 
@@ -1079,6 +1093,31 @@ export default function Inventory() {
             </div>
           )}
 
+          {/* Stock search — works in single-warehouse and all-warehouses views */}
+          <div className="flex items-center gap-3">
+            <div className="relative flex-1 max-w-md">
+              <input
+                type="text"
+                value={stockSearch}
+                onChange={e => setStockSearch(e.target.value)}
+                placeholder="Search stock — product, SKU, category..."
+                className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500 placeholder:text-zinc-600"
+              />
+              {isStockSearching && (
+                <button
+                  onClick={() => setStockSearch('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300"
+                  title="Clear search"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+            {isStockSearching && (
+              <span className="text-xs text-zinc-500">includes out-of-stock items</span>
+            )}
+          </div>
+
           {selectedWarehouse === 'all' ? (
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg overflow-hidden">
               <div className="overflow-x-auto">
@@ -1117,7 +1156,7 @@ export default function Inventory() {
                         return (
                           <tr>
                             <td colSpan={colCount} className="px-4 py-8 text-center text-zinc-600">
-                              All {hiddenCount} item(s) are out of stock.
+                              {isStockSearching ? 'No stock items match your search.' : `All ${hiddenCount} item(s) are out of stock.`}
                             </td>
                           </tr>
                         );
@@ -1208,7 +1247,7 @@ export default function Inventory() {
                       return (
                         <tr>
                           <td colSpan={6} className="px-4 py-8 text-center text-zinc-600">
-                            All {hiddenCount} item(s) are out of stock in this warehouse.
+                            {isStockSearching ? 'No stock items match your search.' : `All ${hiddenCount} item(s) are out of stock in this warehouse.`}
                           </td>
                         </tr>
                       );
