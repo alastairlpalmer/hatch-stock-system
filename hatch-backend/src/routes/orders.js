@@ -167,25 +167,77 @@ router.post('/', asyncHandler(async (req, res) => {
   res.status(201).json(order);
 }));
 
-// Update order
-router.put('/:id', asyncHandler(async (req, res) => {
-  const { supplierId, deliveryMethod, deliveryTo, deliveryFee, notes, invoiceRef, status } = req.body;
+// Update order. An optional `items` array REPLACES the order's line items —
+// previously item edits sent by the Edit form were silently dropped because
+// this handler only updated metadata. Items are only editable while the
+// order is pending: once received, stock was booked in against the old
+// lines and rewriting history would desync inventory.
+export const orderUpdateSchema = z.object({
+  supplierId: z.string().nullish(),
+  deliveryMethod: z.string().nullish(),
+  deliveryTo: z.string().nullish(),
+  deliveryFee: z.coerce.number().min(0).nullish(),
+  notes: z.string().nullish(),
+  invoiceRef: z.string().nullish(),
+  status: z.enum(['pending', 'received', 'cancelled']).optional(),
+  items: z.array(z.object({
+    sku: z.string().min(1),
+    quantity: z.coerce.number().int().positive(),
+    unitPrice: z.coerce.number().min(0).nullish(),
+  })).min(1).optional(),
+});
 
-  const order = await prisma.order.update({
-    where: { id: req.params.id },
-    data: {
-      ...(supplierId !== undefined && { supplierId }),
-      ...(deliveryMethod !== undefined && { deliveryMethod }),
-      ...(deliveryTo !== undefined && { deliveryTo }),
-      ...(deliveryFee !== undefined && { deliveryFee }),
-      ...(notes !== undefined && { notes }),
-      ...(invoiceRef !== undefined && { invoiceRef }),
-      ...(status !== undefined && { status }),
-    },
-    include: {
-      supplier: { select: { id: true, name: true } },
-      items: { include: { product: { select: { name: true } } } },
-    },
+router.put('/:id', asyncHandler(async (req, res) => {
+  const { supplierId, deliveryMethod, deliveryTo, deliveryFee, notes, invoiceRef, status, items } =
+    orderUpdateSchema.parse(req.body);
+
+  const existing = await prisma.order.findUnique({ where: { id: req.params.id } });
+  if (!existing) {
+    return res.status(404).json({ error: 'Order not found' });
+  }
+  if (items !== undefined && existing.status !== 'pending') {
+    return res.status(409).json({ error: `Cannot edit items of a ${existing.status} order` });
+  }
+
+  const order = await prisma.$transaction(async (tx) => {
+    if (items !== undefined) {
+      await tx.orderItem.deleteMany({ where: { orderId: existing.id } });
+      await tx.orderItem.createMany({
+        data: items.map(item => ({
+          orderId: existing.id,
+          sku: item.sku,
+          quantity: item.quantity,
+          unitPrice: item.unitPrice ?? null,
+        })),
+      });
+    }
+
+    // Recompute the total from the (possibly new) items + effective fee
+    const currentItems = await tx.orderItem.findMany({ where: { orderId: existing.id } });
+    const effectiveFee = deliveryFee !== undefined && deliveryFee !== null
+      ? deliveryFee
+      : (existing.deliveryFee || 0);
+    const totalAmount = currentItems.reduce(
+      (sum, item) => sum + item.quantity * (item.unitPrice || 0), 0
+    ) + effectiveFee;
+
+    return tx.order.update({
+      where: { id: existing.id },
+      data: {
+        ...(supplierId !== undefined && { supplierId }),
+        ...(deliveryMethod !== undefined && { deliveryMethod }),
+        ...(deliveryTo !== undefined && { deliveryTo }),
+        ...(deliveryFee !== undefined && { deliveryFee }),
+        ...(notes !== undefined && { notes }),
+        ...(invoiceRef !== undefined && { invoiceRef }),
+        ...(status !== undefined && { status }),
+        totalAmount,
+      },
+      include: {
+        supplier: { select: { id: true, name: true } },
+        items: { include: { product: { select: { name: true } } } },
+      },
+    });
   });
 
   res.json(order);
