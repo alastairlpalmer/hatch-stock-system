@@ -54,7 +54,7 @@ export function StockProvider({ children }) {
   const initializeData = async () => {
     try {
       // Try to load from backend first
-      const [products, warehouses, locations, suppliers, routes, orders, sales, salesImports, warehouseStock, removals] = await Promise.all([
+      const [products, warehouses, locations, suppliers, routes, orders, sales, salesImports, warehouseStock, removals, stockBatches] = await Promise.all([
         productsService.getAll(),
         warehousesService.getAll(),
         locationsService.getAll(),
@@ -65,6 +65,9 @@ export function StockProvider({ children }) {
         salesService.getImportHistory(),
         inventoryService.getWarehouseStock(),
         inventoryService.getRemovalHistory(),
+        // Without this, data.stockBatches stays [] in connected mode and the
+        // expiry tab shows nothing even though batches/expiries are in the DB
+        inventoryService.getBatches(),
       ]);
 
       // Load location stock, config, and history for each location
@@ -105,6 +108,7 @@ export function StockProvider({ children }) {
         locationStock,
         locationConfig,
         removals,
+        stockBatches,
         stockCheckHistory: allStockChecks,
         restockHistory: allRestocks,
       }));
@@ -300,15 +304,18 @@ export function StockProvider({ children }) {
       return;
     }
     await ordersService.receive(orderId, receivedItems, warehouseId);
-    // Refresh orders and stock
-    const [orders, stockData] = await Promise.all([
+    // Refresh orders, stock and batches (receiving creates expiry batches —
+    // without the refresh they don't appear in the expiry tab until reload)
+    const [orders, stockData, stockBatches] = await Promise.all([
       ordersService.getAll(),
       inventoryService.getWarehouseStock(warehouseId),
+      inventoryService.getBatches(),
     ]);
     setData(prev => ({
       ...prev,
       orders,
       stock: { ...prev.stock, [warehouseId]: stockData },
+      stockBatches,
     }));
   }, [data, isOfflineMode, saveData]);
 
