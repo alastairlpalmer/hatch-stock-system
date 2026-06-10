@@ -92,7 +92,7 @@ export default function Inventory() {
         }))
       : Object.entries(getStockForWarehouse(selectedWarehouse)).map(([sku, qty]) => ({ sku, qty }));
 
-    let products = 0, units = 0, value = 0;
+    let products = 0, units = 0, value = 0, revenue = 0, missingPrice = 0;
     const missing = [];
     rows.forEach(r => {
       if (r.qty <= 0) return;
@@ -104,9 +104,15 @@ export default function Inventory() {
       } else {
         missing.push({ sku: r.sku, name: product?.name || r.sku, qty: r.qty });
       }
+      // Expected revenue if every unit held sells at its VendLive sale price
+      if (product?.salePrice) {
+        revenue += product.salePrice * r.qty;
+      } else {
+        missingPrice++;
+      }
     });
     missing.sort((a, b) => b.qty - a.qty); // biggest holdings first — they distort the total most
-    return { products, units, value, missing, missingCost: missing.length };
+    return { products, units, value, revenue, missingPrice, missing, missingCost: missing.length };
   })();
 
   const saveProductCost = async (sku) => {
@@ -971,7 +977,7 @@ export default function Inventory() {
       {activeSubTab === 'stock' && (
         <>
           {/* Finance snapshot — stock held and its value at cost price */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4">
               <div className="text-2xl font-bold text-zinc-200">{stockSummary.units.toLocaleString('en-GB')}</div>
               <div className="text-xs text-zinc-500 mt-1">Units in stock</div>
@@ -986,6 +992,21 @@ export default function Inventory() {
               </div>
               <div className="text-xs text-zinc-500 mt-1">Stock value (at cost)</div>
               <div className="text-xs text-zinc-600 mt-1">Sum of cost price × quantity held</div>
+            </div>
+            <div className="bg-sky-900/20 border border-sky-900/50 rounded-lg p-4">
+              <div className="text-2xl font-bold text-sky-400">
+                £{stockSummary.revenue.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </div>
+              <div className="text-xs text-zinc-500 mt-1">Expected revenue</div>
+              {stockSummary.missingPrice > 0 ? (
+                <div className="text-xs text-amber-400 mt-1">
+                  {stockSummary.missingPrice} product{stockSummary.missingPrice === 1 ? '' : 's'} missing sale price (count as £0)
+                </div>
+              ) : (
+                <div className="text-xs text-zinc-600 mt-1">
+                  Potential margin: £{(stockSummary.revenue - stockSummary.value).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </div>
+              )}
             </div>
             <button
               onClick={() => setShowMissingCost(s => !s)}
