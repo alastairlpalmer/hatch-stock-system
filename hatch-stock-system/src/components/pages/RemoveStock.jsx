@@ -91,14 +91,18 @@ export default function RemoveStock() {
   const addItem = () => setForm({ ...form, items: [...form.items, { sku: '', quantity: '' }] });
 
   const updateItem = (idx, field, value) => {
-    const items = [...form.items];
-    items[idx][field] = value;
+    // Compute the next items array first (without mutating current state),
+    // then use it for both the state update and the capacity-warning check
+    // so the warning never reads stale values.
+    const items = form.items.map((item, i) =>
+      i === idx ? { ...item, [field]: value } : item
+    );
     setForm({ ...form, items });
 
     // Check capacity warning when quantity changes
     if (field === 'quantity' || field === 'sku') {
-      const sku = field === 'sku' ? value : items[idx].sku;
-      const qty = field === 'quantity' ? parseInt(value) || 0 : parseInt(items[idx].quantity) || 0;
+      const sku = items[idx].sku;
+      const qty = parseInt(items[idx].quantity) || 0;
 
       if (sku && qty > 0 && !isAdhocRoute) {
         const availableSpace = getRouteAvailableSpace(sku);
@@ -156,30 +160,33 @@ export default function RemoveStock() {
       const offRoute = !isAdhocRoute && assigned && !assigned.includes(sku);
 
       // Bump existing matching line, else fill the first empty line, else append.
+      // Computed from formRef (updated synchronously below) rather than inside
+      // the setForm updater, so touchedIdx/touchedQty can't be read stale when
+      // scans arrive in quick succession — same pattern as updateItem.
+      const items = [...formRef.current.items];
       let touchedIdx = -1;
       let touchedQty = 0;
-      setForm((prev) => {
-        const items = [...prev.items];
-        const matchIdx = items.findIndex((i) => i.sku === sku);
-        if (matchIdx >= 0) {
-          const next = (parseInt(items[matchIdx].quantity, 10) || 0) + 1;
-          const capped = Math.min(next, stockQty);
-          items[matchIdx] = { ...items[matchIdx], quantity: String(capped) };
-          touchedIdx = matchIdx;
-          touchedQty = capped;
+      const matchIdx = items.findIndex((i) => i.sku === sku);
+      if (matchIdx >= 0) {
+        const next = (parseInt(items[matchIdx].quantity, 10) || 0) + 1;
+        const capped = Math.min(next, stockQty);
+        items[matchIdx] = { ...items[matchIdx], quantity: String(capped) };
+        touchedIdx = matchIdx;
+        touchedQty = capped;
+      } else {
+        const emptyIdx = items.findIndex((i) => !i.sku);
+        if (emptyIdx >= 0) {
+          items[emptyIdx] = { sku, quantity: '1' };
+          touchedIdx = emptyIdx;
         } else {
-          const emptyIdx = items.findIndex((i) => !i.sku);
-          if (emptyIdx >= 0) {
-            items[emptyIdx] = { sku, quantity: '1' };
-            touchedIdx = emptyIdx;
-          } else {
-            items.push({ sku, quantity: '1' });
-            touchedIdx = items.length - 1;
-          }
-          touchedQty = 1;
+          items.push({ sku, quantity: '1' });
+          touchedIdx = items.length - 1;
         }
-        return { ...prev, items };
-      });
+        touchedQty = 1;
+      }
+      const nextForm = { ...formRef.current, items };
+      formRef.current = nextForm;
+      setForm(nextForm);
 
       if (touchedIdx >= 0 && !isAdhocRoute) {
         const availableSpace = getRouteAvailableSpace(sku);

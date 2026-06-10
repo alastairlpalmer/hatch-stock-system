@@ -18,6 +18,7 @@ export default function RestockMachine() {
   const [viewingRestock, setViewingRestock] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [countError, setCountError] = useState(null);
 
   const location = data.locations.find(l => l.id === selectedLocation);
   const locationStock = data.locationStock[selectedLocation] || {};
@@ -65,17 +66,40 @@ export default function RestockMachine() {
     setStockCheckCounts(counts);
     setStep('stockcheck');
     setError(null);
+    setCountError(null);
   };
+
+  // Returns true when a counted value is a non-empty, valid number
+  const isCountedValue = (counted) =>
+    String(counted).trim() !== '' && !Number.isNaN(parseInt(counted, 10));
+
+  // SKUs left blank in the current stock check (these will NOT be updated)
+  const getBlankCountSkus = () =>
+    Object.entries(stockCheckCounts)
+      .filter(([, itemData]) => !isCountedValue(itemData.counted))
+      .map(([sku]) => sku);
 
   // Complete stock check
   const completeStockCheck = async () => {
+    // Only submit items with a non-empty, valid count — blanks are skipped
+    // entirely so they can't silently zero a machine's stock.
+    const countedEntries = Object.entries(stockCheckCounts).filter(
+      ([, itemData]) => isCountedValue(itemData.counted)
+    );
+
+    if (countedEntries.length === 0) {
+      setCountError('Enter at least one count');
+      return;
+    }
+
+    setCountError(null);
     setLoading(true);
     setError(null);
 
     try {
       const checkId = `sc-${Date.now()}`;
-      const items = Object.entries(stockCheckCounts).map(([sku, itemData]) => {
-        const counted = parseInt(itemData.counted) || 0;
+      const items = countedEntries.map(([sku, itemData]) => {
+        const counted = parseInt(itemData.counted, 10);
         const variance = counted - itemData.expected;
         return {
           sku,
@@ -191,6 +215,7 @@ export default function RestockMachine() {
     setUploadedImage(null);
     setImagePreview(null);
     setError(null);
+    setCountError(null);
   };
 
   return (
@@ -401,9 +426,26 @@ export default function RestockMachine() {
                 })}
               </div>
 
+              {getBlankCountSkus().length > 0 && (
+                <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-3 text-sm">
+                  <p className="text-emerald-400 font-medium">
+                    {getBlankCountSkus().length} item(s) left blank will NOT be updated:
+                  </p>
+                  <p className="text-zinc-400 text-xs mt-1">
+                    {getBlankCountSkus().join(', ')}
+                  </p>
+                </div>
+              )}
+
+              {countError && (
+                <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 text-red-400 text-sm">
+                  {countError}
+                </div>
+              )}
+
               <button
                 onClick={completeStockCheck}
-                disabled={Object.values(stockCheckCounts).some(c => c.counted === '') || loading}
+                disabled={loading}
                 className="px-4 py-2 bg-emerald-600 text-white rounded text-sm font-medium hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {loading ? 'Processing...' : 'Complete Stock Check'}

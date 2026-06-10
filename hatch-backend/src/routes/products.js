@@ -76,6 +76,33 @@ router.get('/lookup', asyncHandler(async (req, res) => {
   return res.status(404).json({ error: 'No product matches this code' });
 }));
 
+// Check for SKU conflict.
+// Must also be declared BEFORE `/:sku` for the same reason as `/lookup`.
+router.get('/check-conflict', asyncHandler(async (req, res) => {
+  const { sku, name } = req.query;
+
+  if (!sku) {
+    return res.status(400).json({ error: 'sku query param required' });
+  }
+
+  const existing = await prisma.product.findUnique({
+    where: { sku },
+    select: { sku: true, name: true },
+  });
+
+  if (!existing) {
+    return res.json({ exists: false, conflict: false });
+  }
+
+  const conflict = existing.name.toLowerCase() !== name?.toLowerCase();
+
+  res.json({
+    exists: true,
+    conflict,
+    existingName: existing.name,
+  });
+}));
+
 // Get single product
 router.get('/:sku', asyncHandler(async (req, res) => {
   const product = await prisma.product.findUnique({
@@ -195,28 +222,6 @@ router.post('/import', asyncHandler(async (req, res) => {
   }
 
   res.json(results);
-}));
-
-// Check for SKU conflict
-router.get('/check-conflict', asyncHandler(async (req, res) => {
-  const { sku, name } = req.query;
-
-  const existing = await prisma.product.findUnique({
-    where: { sku },
-    select: { sku: true, name: true },
-  });
-
-  if (!existing) {
-    return res.json({ exists: false, conflict: false });
-  }
-
-  const conflict = existing.name.toLowerCase() !== name?.toLowerCase();
-
-  res.json({
-    exists: true,
-    conflict,
-    existingName: existing.name,
-  });
 }));
 
 export default router;

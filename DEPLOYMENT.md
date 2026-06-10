@@ -53,16 +53,23 @@ In Railway dashboard, go to your project → **Variables** tab and add:
 ### 2.4 Deploy
 Railway will automatically deploy. Note your backend URL (e.g., `https://hatch-backend-production.up.railway.app`)
 
-### 2.5 Run Database Migrations
-In Railway, go to your service → **Settings** → **Deploy** and add this as a one-time deploy command:
-```
-npx prisma migrate deploy
+### 2.5 Database Schema Changes
+
+> ⚠️ **Do NOT run `npx prisma migrate deploy` against this database.** The
+> migration history in `prisma/migrations/` has diverged from production
+> (later tables were created with `prisma db push`), so `migrate deploy` would
+> fail or attempt to recreate existing tables.
+
+To apply schema changes, take a backup first, then either:
+
+```bash
+# Review the printed diff carefully before confirming:
+railway run npx prisma db push
 ```
 
-Or use Railway CLI:
-```bash
-railway run npx prisma migrate deploy
-```
+or apply hand-written SQL via the Supabase SQL editor — see
+`hatch-backend/prisma/manual-sql/README.md`, which also documents how to
+re-baseline the migration history when ready.
 
 ---
 

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useStock } from '../../context/StockContext';
 import { vendliveService } from '../../services/vendlive.service';
+import api from '../../services/api';
 import { formatCurrency, formatDate } from '../../utils/helpers';
 
 export default function AdminVendlive() {
@@ -209,7 +210,11 @@ function SyncSettings({ config, onUpdate }) {
     }
   };
 
-  const webhookUrl = `${window.location.origin.replace(/:\d+$/, ':8000')}/api/vendlive/webhook/sales`;
+  // Derive the backend origin from the axios base URL (stripping a trailing
+  // '/api'). If the base URL is relative, fall back to the current origin.
+  const apiBase = (api.defaults.baseURL || '').replace(/\/api\/?$/, '');
+  const backendOrigin = /^https?:\/\//i.test(apiBase) ? apiBase : window.location.origin;
+  const webhookUrl = `${backendOrigin}/api/vendlive/webhook/sales`;
 
   const handleCopy = () => {
     navigator.clipboard.writeText(webhookUrl);

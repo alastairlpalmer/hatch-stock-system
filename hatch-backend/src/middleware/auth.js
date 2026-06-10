@@ -1,7 +1,16 @@
 import jwt from 'jsonwebtoken';
 import prisma from '../utils/db.js';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
+// With auth enabled there is no fallback secret — index.js fails fast at
+// startup if JWT_SECRET is missing. The dev fallback only exists so login
+// works locally while AUTH_ENABLED is off.
+function getJwtSecret() {
+  if (process.env.JWT_SECRET) return process.env.JWT_SECRET;
+  if (process.env.AUTH_ENABLED === 'true') {
+    throw new Error('JWT_SECRET must be set when AUTH_ENABLED=true');
+  }
+  return 'dev-only-insecure-secret';
+}
 
 // Middleware to verify JWT token
 export async function authMiddleware(req, res, next) {
@@ -19,8 +28,8 @@ export async function authMiddleware(req, res, next) {
   const token = authHeader.split(' ')[1];
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    
+    const decoded = jwt.verify(token, getJwtSecret());
+
     // Get user from database
     const user = await prisma.user.findUnique({
       where: { id: decoded.userId },
@@ -48,7 +57,7 @@ export async function optionalAuth(req, res, next) {
 
   try {
     const token = authHeader.split(' ')[1];
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, getJwtSecret());
     const user = await prisma.user.findUnique({
       where: { id: decoded.userId },
       select: { id: true, email: true, name: true, role: true },
@@ -71,5 +80,5 @@ export function adminOnly(req, res, next) {
 
 // Generate JWT token
 export function generateToken(userId) {
-  return jwt.sign({ userId }, JWT_SECRET, { expiresIn: '7d' });
+  return jwt.sign({ userId }, getJwtSecret(), { expiresIn: '7d' });
 }

@@ -41,38 +41,41 @@ app.use(helmet());
 // CORS - allow frontend (supports multiple origins for production)
 const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:3000')
   .split(',')
-  .map(origin => origin.trim());
+  .map(origin => origin.trim())
+  .filter(Boolean);
+
+// Anchored patterns — substring checks like origin.includes('localhost') would
+// also match attacker domains such as http://localhost.evil.com
+const LOCALHOST_ORIGIN = /^https?:\/\/localhost(:\d+)?$/;
+const VERCEL_PREVIEW_ORIGIN = /^https:\/\/hatch-stock-system[a-z0-9-]*\.vercel\.app$/;
 
 app.use(cors({
   origin: (origin, callback) => {
     // Allow requests with no origin (mobile apps, curl, etc.)
     if (!origin) return callback(null, true);
 
-    // Allow all Vercel preview deployments for this project
-    if (origin.includes('hatch-stock-system') && origin.includes('vercel.app')) {
+    if (
+      LOCALHOST_ORIGIN.test(origin) ||
+      VERCEL_PREVIEW_ORIGIN.test(origin) ||
+      allowedOrigins.includes(origin) ||
+      allowedOrigins.includes('*')
+    ) {
       return callback(null, true);
     }
 
-    // Allow localhost for development
-    if (origin.includes('localhost')) {
-      return callback(null, true);
-    }
-
-    if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
-      callback(null, true);
-    } else {
-      console.log('CORS blocked origin:', origin);
-      callback(new Error('Not allowed by CORS'));
-    }
+    console.log('CORS blocked origin:', origin);
+    callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
 }));
 
-// Rate limiting
+// Rate limiting. The VendLive webhook is exempt — it authenticates via HMAC
+// signature and a burst of vend events must never be dropped with a 429.
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 1000, // limit each IP to 1000 requests per windowMs
   message: { error: 'Too many requests, please try again later.' },
+  skip: (req) => req.path.startsWith('/api/vendlive/webhook/'),
 });
 app.use(limiter);
 
@@ -95,6 +98,18 @@ if (process.env.NODE_ENV !== 'production') {
     next();
   });
 }
+
+// Authentication — applied to all /api routes. authMiddleware is a no-op
+// unless AUTH_ENABLED=true, so this is safe to deploy ahead of enabling auth.
+// Exempt paths: login/register (register self-gates: bootstrap first user,
+// admin-only afterwards) and the webhook, which authenticates via HMAC.
+const PUBLIC_API_PATHS = ['/api/auth/login', '/api/auth/register'];
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api')) return next();
+  if (PUBLIC_API_PATHS.includes(req.path)) return next();
+  if (req.path.startsWith('/api/vendlive/webhook/')) return next();
+  return authMiddleware(req, res, next);
+});
 
 // ============ ROUTES ============
 
@@ -137,6 +152,13 @@ app.use(errorHandler);
 // ============ START SERVER ============
 
 const startServer = async () => {
+  // Fail fast on insecure auth configuration: with auth enabled, tokens must
+  // never be signed with a fallback secret.
+  if (process.env.AUTH_ENABLED === 'true' && !process.env.JWT_SECRET) {
+    console.error('FATAL: AUTH_ENABLED=true requires JWT_SECRET to be set.');
+    process.exit(1);
+  }
+
   // Test database connection on startup
   console.log('Testing database connection...');
   const dbConnected = await testConnection();

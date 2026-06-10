@@ -76,30 +76,6 @@ export const ordersService = {
     });
     return response.data;
   },
-
-  /**
-   * Generate PDF order sheet
-   * @param {string} orderId 
-   * @returns {Blob} PDF file
-   */
-  generatePdf: async (orderId) => {
-    const response = await api.get(`/orders/${orderId}/pdf`, {
-      responseType: 'blob',
-    });
-    return response.data;
-  },
-
-  /**
-   * Analyze invoice image with AI
-   * @param {FormData} formData - Form data with invoice image
-   */
-  analyzeInvoice: async (formData) => {
-    const response = await api.post('/orders/analyze-invoice', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-      timeout: 60000, // Longer timeout for AI processing
-    });
-    return response.data;
-  },
 };
 
 export default ordersService;

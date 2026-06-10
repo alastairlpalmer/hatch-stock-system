@@ -2,16 +2,29 @@ import express from 'express';
 import bcrypt from 'bcryptjs';
 import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
-import { generateToken, authMiddleware } from '../middleware/auth.js';
+import { generateToken, authMiddleware, optionalAuth } from '../middleware/auth.js';
 
 const router = express.Router();
 
-// Register new user
-router.post('/register', asyncHandler(async (req, res) => {
+// Register new user.
+// Bootstrap: the first user ever created becomes admin. Once any user exists
+// and auth is enabled, only admins may register further accounts — otherwise
+// the open endpoint would let anyone mint themselves access.
+router.post('/register', optionalAuth, asyncHandler(async (req, res) => {
   const { email, password, name } = req.body;
 
   if (!email || !password) {
     return res.status(400).json({ error: 'Email and password required' });
+  }
+
+  if (password.length < 8) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters' });
+  }
+
+  const userCount = await prisma.user.count();
+
+  if (userCount > 0 && process.env.AUTH_ENABLED === 'true' && req.user?.role !== 'admin') {
+    return res.status(403).json({ error: 'Only admins can register new users' });
   }
 
   // Check if user exists
@@ -29,6 +42,7 @@ router.post('/register', asyncHandler(async (req, res) => {
       email,
       password: hashedPassword,
       name,
+      role: userCount === 0 ? 'admin' : 'user',
     },
     select: { id: true, email: true, name: true, role: true },
   });

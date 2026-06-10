@@ -15,6 +15,7 @@ import History from './components/pages/History';
 import Shrinkage from './components/pages/Shrinkage';
 import Admin from './components/pages/Admin';
 import RestockingDocs from './components/pages/RestockingDocs';
+import Login from './components/pages/Login';
 
 // Parent layouts
 import OrdersLayout from './components/pages/orders/OrdersLayout';
@@ -27,8 +28,36 @@ import SupportLayout from './components/pages/support/SupportLayout';
 import Sidebar from './components/layout/Sidebar';
 import Header from './components/layout/Header';
 import LoadingScreen from './components/ui/LoadingScreen';
+import ErrorBoundary from './components/ErrorBoundary';
+
+// Redirects to /login when auth is enabled and no token is stored
+function RequireAuth({ children }) {
+  const authEnabled = import.meta.env.VITE_AUTH_ENABLED === 'true';
+  if (authEnabled && !localStorage.getItem('auth_token')) {
+    return <Navigate to="/login" replace />;
+  }
+  return children;
+}
 
 function App() {
+  return (
+    <ErrorBoundary>
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        <Route
+          path="/*"
+          element={
+            <RequireAuth>
+              <AppLayout />
+            </RequireAuth>
+          }
+        />
+      </Routes>
+    </ErrorBoundary>
+  );
+}
+
+function AppLayout() {
   const { loading, syncStatus } = useStock();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);

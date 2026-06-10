@@ -1,5 +1,4 @@
 import express from 'express';
-import axios from 'axios';
 import crypto from 'crypto';
 import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
@@ -16,14 +15,15 @@ const router = express.Router();
  * hex string. The signature is computed as HMAC-SHA256 of the raw request body
  * using the configured webhookSecret.
  *
- * Returns true if verification passes OR if no webhookSecret is configured
- * (in which case validation is skipped with a warning — useful for initial
- * setup where VendLive hasn't been told the secret yet).
+ * FAILS CLOSED: if no webhookSecret is configured the request is rejected.
+ * The previous skip-when-unconfigured behaviour meant anyone who knew the URL
+ * could inject fake sales. Set the secret in Admin > VendLive (and in the
+ * VendLive dashboard) before enabling the webhook.
  */
 function verifyWebhookSignature(req, webhookSecret) {
   if (!webhookSecret) {
-    console.warn('VendLive webhook: webhookSecret not configured, skipping signature validation');
-    return true;
+    console.error('VendLive webhook: webhookSecret not configured — rejecting unsigned request. Configure it in Admin > VendLive.');
+    return false;
   }
   if (!req.rawBody) {
     console.error('VendLive webhook: no raw body captured for signature verification');
@@ -295,54 +295,6 @@ router.post('/webhook/sales', async (req, res) => {
     }).catch(() => {}); // Don't let logging errors propagate
   }
 });
-
-// ============ DIAGNOSTICS ============
-
-// GET /api/vendlive/debug-order-sales — bypass all sync logic, test VendLive API directly
-router.get('/debug-order-sales', asyncHandler(async (req, res) => {
-  const config = await prisma.vendliveConfig.findUnique({ where: { id: 'default' } });
-  if (!config?.apiToken) {
-    return res.json({ error: 'No API token configured' });
-  }
-
-  let token;
-  try {
-    token = decrypt(config.apiToken);
-  } catch (err) {
-    return res.status(500).json({
-      error: 'Failed to decrypt stored API token',
-      detail: err.message,
-      hint: 'Check VENDLIVE_ENCRYPTION_KEY is set and matches the key used when the token was saved. You may need to re-save the token in Admin > VendLive.',
-    });
-  }
-  const baseUrl = config.baseUrl || 'https://vendlive.com/api/2.0';
-  const url = `${baseUrl}/order-sales/`;
-  const results = {};
-
-  // Try with Token prefix
-  try {
-    const resp = await axios.get(url, {
-      headers: { 'Authorization': `Token ${token}`, 'Content-Type': 'application/json' },
-      timeout: 15000,
-    });
-    results.tokenPrefix = { status: resp.status, count: resp.data?.count, resultsLength: resp.data?.results?.length };
-  } catch (err) {
-    results.tokenPrefix = { status: err.response?.status, error: err.message, data: err.response?.data };
-  }
-
-  // Try with raw token
-  try {
-    const resp = await axios.get(url, {
-      headers: { 'Authorization': token, 'Content-Type': 'application/json' },
-      timeout: 15000,
-    });
-    results.rawToken = { status: resp.status, count: resp.data?.count, resultsLength: resp.data?.results?.length };
-  } catch (err) {
-    results.rawToken = { status: err.response?.status, error: err.message, data: err.response?.data };
-  }
-
-  res.json({ url, baseUrl: config.baseUrl, deployVersion: '2024-03-24-debug', results });
-}));
 
 // ============ SYNC ============
 
