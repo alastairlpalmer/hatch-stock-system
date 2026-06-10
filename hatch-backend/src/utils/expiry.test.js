@@ -38,6 +38,23 @@ describe('categorizeBatchesByExpiry', () => {
 
   it('handles an empty list', () => {
     const result = categorizeBatchesByExpiry([], NOW);
-    expect(result).toEqual({ expired: [], critical: [], warning: [] });
+    expect(result).toEqual({ expired: [], critical: [], warning: [], missing: [] });
+  });
+
+  it('flags batches with no expiry date as missing instead of dropping them', () => {
+    const result = categorizeBatchesByExpiry(
+      [batch(null, 'no-expiry'), batch('2026-06-15T00:00:00Z', 'dated')],
+      NOW,
+    );
+    expect(result.missing).toHaveLength(1);
+    expect(result.missing[0].id).toBe('no-expiry');
+    expect(result.missing[0].daysUntil).toBeNull();
+    // the dated batch is still categorized normally
+    expect(result.critical).toHaveLength(1);
+  });
+
+  it('treats undefined expiry the same as null', () => {
+    const result = categorizeBatchesByExpiry([{ id: 'b2', remainingQty: 3 }], NOW);
+    expect(result.missing).toHaveLength(1);
   });
 });

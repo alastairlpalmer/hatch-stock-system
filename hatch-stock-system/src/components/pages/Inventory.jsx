@@ -2,11 +2,15 @@ import React, { useState } from 'react';
 import { useStock } from '../../context/StockContext';
 
 export default function Inventory() {
-  const { data, addProduct, bulkImportProducts, updateWarehouseStock, bulkUpdateWarehouseStock } = useStock();
+  const { data, addProduct, bulkImportProducts, updateWarehouseStock, bulkUpdateWarehouseStock, createBatch, updateBatch } = useStock();
   const [selectedWarehouse, setSelectedWarehouse] = useState('all');
   const [activeSubTab, setActiveSubTab] = useState('stock');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+
+  // Inline "set expiry" edits on the Missing Expiry list, keyed by batch id
+  const [expiryEdits, setExpiryEdits] = useState({});
+  const [savingExpiryId, setSavingExpiryId] = useState(null);
 
   // Add Stock states
   const [showAddStock, setShowAddStock] = useState(false);
@@ -16,7 +20,8 @@ export default function Inventory() {
     productName: '',
     quantity: '',
     category: 'Other',
-    unitCost: ''
+    unitCost: '',
+    expiryDate: ''
   });
 
   // Edit Stock states
@@ -85,6 +90,27 @@ export default function Inventory() {
     const status = getExpiryStatus(b.expiryDate);
     return status?.status === 'critical' || status?.status === 'warning';
   });
+  // Batches signed in without an expiry date — surfaced for correction
+  const missingExpiryBatches = getBatches().filter(b => !b.expiryDate);
+
+  const saveBatchExpiry = async (batchId) => {
+    const value = expiryEdits[batchId];
+    if (!value) return;
+    setSavingExpiryId(batchId);
+    setError(null);
+    try {
+      await updateBatch(batchId, { expiryDate: value });
+      setExpiryEdits(prev => {
+        const next = { ...prev };
+        delete next[batchId];
+        return next;
+      });
+    } catch (err) {
+      setError(err.message || 'Failed to set expiry date');
+    } finally {
+      setSavingExpiryId(null);
+    }
+  };
 
   // ===== ADD STOCK FUNCTIONS =====
 
@@ -95,7 +121,8 @@ export default function Inventory() {
       productName: '',
       quantity: '',
       category: 'Other',
-      unitCost: ''
+      unitCost: '',
+      expiryDate: ''
     });
     setShowAddStock(true);
     setError(null);
@@ -127,6 +154,15 @@ export default function Inventory() {
 
       // Update stock (pass qty as delta, not absolute value)
       await updateWarehouseStock(addStockForm.warehouseId, addStockForm.sku, qty, true);
+
+      // Track the addition as a batch so it shows in expiry tracking.
+      // No expiry typed -> created with null expiry and flagged as "missing".
+      await createBatch({
+        warehouseId: addStockForm.warehouseId,
+        sku: addStockForm.sku,
+        quantity: qty,
+        expiryDate: addStockForm.expiryDate || null,
+      });
 
       setShowAddStock(false);
     } catch (err) {
@@ -532,6 +568,17 @@ export default function Inventory() {
                 className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm"
               />
             </div>
+
+            <div>
+              <label className="block text-xs text-zinc-500 mb-1">Expiry Date</label>
+              <input
+                type="date"
+                value={addStockForm.expiryDate}
+                onChange={e => setAddStockForm({ ...addStockForm, expiryDate: e.target.value })}
+                className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm"
+              />
+              <p className="text-xs text-zinc-600 mt-1">Optional — if left blank the batch is flagged under Expiry Tracking as missing an expiry.</p>
+            </div>
           </div>
 
           {addStockForm.sku && data.products.find(p => p.sku === addStockForm.sku) && (
@@ -832,6 +879,11 @@ export default function Inventory() {
                 {expiredBatches.length + expiringBatches.length}
               </span>
             )}
+            {tab.id === 'expiry' && missingExpiryBatches.length > 0 && (
+              <span className="ml-1 px-1.5 py-0.5 text-xs bg-amber-500 text-zinc-900 rounded" title="Batches missing an expiry date">
+                {missingExpiryBatches.length}
+              </span>
+            )}
           </button>
         ))}
       </div>
@@ -957,7 +1009,7 @@ export default function Inventory() {
       {activeSubTab === 'expiry' && (
         <div className="space-y-6">
           {/* Summary cards */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div className="bg-red-900/20 border border-red-900/50 rounded-lg p-4">
               <div className="text-2xl font-bold text-red-400">{expiredBatches.length}</div>
               <div className="text-xs text-zinc-500 mt-1">Expired Batches</div>
@@ -977,7 +1029,76 @@ export default function Inventory() {
               </div>
               <div className="text-xs text-zinc-500 mt-1">Expiring in 30 days</div>
             </div>
+            <div className="bg-amber-900/20 border border-amber-700/50 rounded-lg p-4">
+              <div className="text-2xl font-bold text-amber-400">{missingExpiryBatches.length}</div>
+              <div className="text-xs text-zinc-500 mt-1">Missing Expiry</div>
+              <div className="text-xs text-amber-400 mt-1">
+                {missingExpiryBatches.reduce((acc, b) => acc + b.remainingQty, 0)} units untracked
+              </div>
+            </div>
           </div>
+
+          {/* Batches signed in without an expiry date — correct them inline */}
+          {missingExpiryBatches.length > 0 && (
+            <div className="bg-zinc-900/50 border border-amber-700/50 rounded-lg overflow-hidden">
+              <div className="px-4 py-3 border-b border-zinc-800 flex items-center gap-2">
+                <h3 className="text-sm font-medium text-amber-400">Missing Expiry Date</h3>
+                <span className="text-xs text-zinc-500">— signed in without an expiry; set one below</span>
+              </div>
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-zinc-800">
+                    <th className="text-left px-4 py-3 text-zinc-500 font-medium">Product</th>
+                    <th className="text-left px-4 py-3 text-zinc-500 font-medium">Warehouse</th>
+                    <th className="text-right px-4 py-3 text-zinc-500 font-medium">Qty</th>
+                    <th className="text-center px-4 py-3 text-zinc-500 font-medium">Received</th>
+                    <th className="text-center px-4 py-3 text-zinc-500 font-medium">Set Expiry</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {missingExpiryBatches
+                    .sort((a, b) => new Date(b.receivedAt) - new Date(a.receivedAt))
+                    .map(batch => {
+                      const product = data.products.find(p => p.sku === batch.sku);
+                      const warehouse = data.warehouses.find(w => w.id === batch.warehouseId);
+                      return (
+                        <tr key={batch.id} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
+                          <td className="px-4 py-3">
+                            <div className="text-zinc-200 flex items-center gap-2">
+                              {product?.name || batch.sku}
+                              <span className="text-xs bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded">No expiry</span>
+                            </div>
+                            <div className="text-zinc-600 text-xs">{batch.sku}</div>
+                          </td>
+                          <td className="px-4 py-3 text-zinc-400">{warehouse?.name || batch.warehouseId}</td>
+                          <td className="text-right px-4 py-3 text-zinc-300">{batch.remainingQty}</td>
+                          <td className="text-center px-4 py-3 text-zinc-500 text-xs">
+                            {new Date(batch.receivedAt).toLocaleDateString('en-GB')}
+                          </td>
+                          <td className="text-center px-4 py-3">
+                            <div className="flex items-center justify-center gap-2">
+                              <input
+                                type="date"
+                                value={expiryEdits[batch.id] || ''}
+                                onChange={e => setExpiryEdits(prev => ({ ...prev, [batch.id]: e.target.value }))}
+                                className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-sm focus:outline-none focus:border-amber-500"
+                              />
+                              <button
+                                onClick={() => saveBatchExpiry(batch.id)}
+                                disabled={!expiryEdits[batch.id] || savingExpiryId === batch.id}
+                                className="px-3 py-1.5 bg-amber-600 text-white rounded text-xs font-medium hover:bg-amber-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                              >
+                                {savingExpiryId === batch.id ? 'Saving...' : 'Save'}
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                </tbody>
+              </table>
+            </div>
+          )}
 
           {/* Expiring/Expired items list */}
           <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg overflow-hidden">
@@ -1081,7 +1202,9 @@ export default function Inventory() {
                               {new Date(batch.expiryDate).toLocaleDateString('en-GB')}
                             </span>
                           ) : (
-                            <span className="text-zinc-600 text-xs">-</span>
+                            <span className="text-xs bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded" title="No expiry recorded — set one in the Expiry Tracking tab">
+                              No expiry
+                            </span>
                           )}
                         </td>
                         <td className="text-center px-4 py-3 text-zinc-500 text-xs">

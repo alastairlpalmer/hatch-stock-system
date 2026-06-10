@@ -243,7 +243,10 @@ router.get('/batches', asyncHandler(async (req, res) => {
   res.json(batches);
 }));
 
-// Get expiring batches
+// Get expiring batches.
+// Includes batches with NO expiry date (returned in the `missing` bucket) —
+// stock signed in without an expiry must be surfaced for correction, not
+// silently excluded from expiry tracking.
 router.get('/batches/expiring', asyncHandler(async (req, res) => {
   const days = parseInt(req.query.days) || 30;
   const thresholdDate = new Date();
@@ -252,13 +255,16 @@ router.get('/batches/expiring', asyncHandler(async (req, res) => {
   const batches = await prisma.stockBatch.findMany({
     where: {
       remainingQty: { gt: 0 },
-      expiryDate: { lte: thresholdDate },
+      OR: [
+        { expiryDate: { lte: thresholdDate } },
+        { expiryDate: null },
+      ],
     },
     include: {
       product: { select: { name: true, category: true } },
       warehouse: { select: { name: true } },
     },
-    orderBy: { expiryDate: 'asc' },
+    orderBy: { expiryDate: { sort: 'asc', nulls: 'last' } },
   });
 
   res.json(categorizeBatchesByExpiry(batches));
@@ -295,15 +301,21 @@ router.post('/batches', asyncHandler(async (req, res) => {
   res.status(201).json(batch);
 }));
 
-// Update batch
+// Update batch. expiryDate is updatable so batches signed in without one
+// ("missing expiry") can be corrected later from the expiry tab; explicit
+// null clears it.
 const batchUpdateSchema = z.object({
   remainingQty: nonNegativeQty.optional(),
   hasDamage: z.boolean().optional(),
   damageNotes: z.string().nullish(),
+  expiryDate: z.string().nullable().refine(
+    v => v === null || (v !== '' && !isNaN(Date.parse(v))),
+    { message: 'expiryDate must be a valid date or null' },
+  ).optional(),
 });
 
 router.put('/batches/:id', asyncHandler(async (req, res) => {
-  const { remainingQty, hasDamage, damageNotes } = batchUpdateSchema.parse(req.body);
+  const { remainingQty, hasDamage, damageNotes, expiryDate } = batchUpdateSchema.parse(req.body);
 
   const batch = await prisma.stockBatch.update({
     where: { id: req.params.id },
@@ -311,6 +323,7 @@ router.put('/batches/:id', asyncHandler(async (req, res) => {
       ...(remainingQty !== undefined && { remainingQty }),
       ...(hasDamage !== undefined && { hasDamage }),
       ...(damageNotes !== undefined && { damageNotes }),
+      ...(expiryDate !== undefined && { expiryDate: expiryDate ? new Date(expiryDate) : null }),
     },
   });
 

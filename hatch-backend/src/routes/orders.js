@@ -2,6 +2,7 @@ import express from 'express';
 import { z } from 'zod';
 import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
+import { batchInputFromReceivedItem } from '../utils/receiving.js';
 
 const router = express.Router();
 
@@ -201,7 +202,9 @@ router.delete('/:id', asyncHandler(async (req, res) => {
 
 // Receive order — idempotent and transactional. A retry, double-click, or two
 // operators scanning the same delivery must not double-count stock.
-const receiveSchema = z.object({
+// Exported for tests. expiryDate is optional by design: a missing expiry must
+// not block sign-in — the batch is flagged as "missing expiry" instead.
+export const receiveSchema = z.object({
   warehouseId: z.string().min(1),
   items: z.array(z.object({
     sku: z.string().min(1),
@@ -261,17 +264,10 @@ router.post('/:id/receive', asyncHandler(async (req, res) => {
     }
 
     for (const item of items) {
-      // Create batch for expiry tracking
+      // Create batch for expiry tracking (expiryDate null when not provided —
+      // surfaced as "missing" by the expiry views, never blocks receiving)
       await tx.stockBatch.create({
-        data: {
-          warehouseId,
-          sku: item.sku,
-          quantity: item.quantity,
-          remainingQty: item.quantity,
-          expiryDate: item.expiryDate ? new Date(item.expiryDate) : null,
-          hasDamage: item.hasDamage || false,
-          damageNotes: item.damageNotes,
-        },
+        data: batchInputFromReceivedItem(item, warehouseId),
       });
 
       // Atomic increment — no read-modify-write race
