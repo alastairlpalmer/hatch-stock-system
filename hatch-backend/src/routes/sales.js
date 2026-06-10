@@ -2,6 +2,7 @@
 import { Prisma } from '@prisma/client';
 import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
+import { findLegacyDuplicates } from '../utils/sales-dedupe.js';
 
 const router = express.Router();
 
@@ -76,7 +77,33 @@ router.post('/import', asyncHandler(async (req, res) => {
       select: { id: true },
     })).map(s => s.id)
   );
-  const newSales = validSales.filter(s => !existingIds.has(s.id));
+  let newSales = validSales.filter(s => !existingIds.has(s.id));
+
+  // Guard against re-importing sales the VendLive sync already holds under a
+  // different id (the cause of the June 2026 double-counted revenue): match
+  // incoming rows against existing VendLive sales by SKU + timestamp window
+  // and skip any that pair up.
+  let crossSourceSkipped = 0;
+  if (newSales.length > 0) {
+    const timestamps = newSales.map(s => new Date(s.timestamp).getTime()).filter(t => !isNaN(t));
+    if (timestamps.length > 0) {
+      const PAD = 10 * 60 * 1000;
+      const existingVendlive = await prisma.sale.findMany({
+        where: {
+          id: { startsWith: 'vl-' },
+          timestamp: {
+            gte: new Date(Math.min(...timestamps) - PAD),
+            lte: new Date(Math.max(...timestamps) + PAD),
+          },
+        },
+        select: { id: true, sku: true, timestamp: true },
+      });
+      const dupes = findLegacyDuplicates(newSales, existingVendlive);
+      const dupeIds = new Set(dupes.map(d => d.legacyId));
+      crossSourceSkipped = dupeIds.size;
+      newSales = newSales.filter(s => !dupeIds.has(s.id));
+    }
+  }
 
   // Bulk-create any products we haven't seen
   const skus = [...new Set(newSales.map(s => s.sku))];
@@ -136,7 +163,45 @@ router.post('/import', asyncHandler(async (req, res) => {
     recordsAdded: createResult.count,
     recordsSkipped: sales.length - createResult.count,
     recordsTotal: sales.length,
+    duplicatesOfVendliveSales: crossSourceSkipped,
     newProducts: productRows.map(p => p.sku),
+  });
+}));
+
+// Find (and optionally remove) legacy CSV rows that duplicate VendLive-synced
+// sales. dryRun defaults to TRUE — nothing is deleted unless the caller
+// explicitly sends { dryRun: false }. The VendLive copy is always the one
+// kept (actual amount paid, refund tracking, machine metadata).
+router.post('/deduplicate', asyncHandler(async (req, res) => {
+  const dryRun = req.body?.dryRun !== false;
+
+  const [legacy, vendlive] = await Promise.all([
+    prisma.sale.findMany({
+      where: { NOT: { id: { startsWith: 'vl-' } } },
+      select: { id: true, sku: true, timestamp: true, charged: true, productName: true },
+    }),
+    prisma.sale.findMany({
+      where: { id: { startsWith: 'vl-' } },
+      select: { id: true, sku: true, timestamp: true },
+    }),
+  ]);
+
+  const duplicates = findLegacyDuplicates(legacy, vendlive);
+  const value = duplicates.reduce((acc, d) => acc + d.charged, 0);
+
+  if (!dryRun && duplicates.length > 0) {
+    const result = await prisma.sale.deleteMany({
+      where: { id: { in: duplicates.map(d => d.legacyId) } },
+    });
+    console.log(`Sales dedupe: removed ${result.count} duplicate legacy rows (£${value.toFixed(2)})`);
+  }
+
+  res.json({
+    dryRun,
+    duplicates: duplicates.length,
+    value,
+    legacyTotal: legacy.length,
+    sample: duplicates.slice(0, 10),
   });
 }));
 
