@@ -1,5 +1,6 @@
 import prisma from '../utils/db.js';
 import * as vendliveApi from './vendlive.js';
+import { guessFreshMeal } from './meal-classifier.js';
 
 // ============ PAYLOAD NORMALIZERS ============
 
@@ -238,13 +239,17 @@ export async function processVendliveOrder(orderData, syncSource, config) {
       let product = await prisma.product.findUnique({ where: { sku } });
 
       if (!product && config?.autoCreateProducts) {
-        // Auto-create product with real name if available
+        // Auto-create product with real name if available. Best-effort fresh-meal
+        // guess (unconfirmed) so Frive flavours surface in the review queue.
+        const meal = guessFreshMeal(item.productName || sku);
         product = await prisma.product.create({
           data: {
             sku,
             name: item.productName || sku,
             unitCost: item.costPrice || null,
             salePrice: item.price || null,
+            isFreshMeal: meal.isFreshMeal,
+            mealType: meal.mealType,
           },
         });
       }
@@ -405,6 +410,7 @@ export async function runPollSync() {
 
         for (const sku of missingSkus) {
           const info = skuNames.get(sku) || { name: sku };
+          const meal = guessFreshMeal(info.name);
           try {
             const created = await prisma.product.create({
               data: {
@@ -412,6 +418,8 @@ export async function runPollSync() {
                 name: info.name,
                 unitCost: info.costPrice,
                 salePrice: info.salePrice,
+                isFreshMeal: meal.isFreshMeal,
+                mealType: meal.mealType,
               },
             });
             productMap.set(sku, created);

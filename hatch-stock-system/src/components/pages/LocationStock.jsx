@@ -2,8 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { useStock } from '../../context/StockContext';
 
 export default function LocationStock() {
-  const { data, updateLocationStock, updateLocationConfig, updateLocationAssignedItems, bulkImportProducts, setLocationStock } = useStock();
+  const { data, updateLocationStock, updateLocationConfig, updateLocationAssignedItems, bulkImportProducts, setLocationStock, updateMealTypeConfig } = useStock();
   const [selectedLocation, setSelectedLocation] = useState('');
+  // Which collapsed meal-type groups are expanded to show member flavours.
+  const [expandedGroups, setExpandedGroups] = useState({});
 
   // Update selected location when locations load or change
   useEffect(() => {
@@ -74,25 +76,43 @@ export default function LocationStock() {
     await updateLocationConfig(selectedLocation, sku, newConfig);
   };
 
-  const getStockStatus = (sku, qty) => {
-    const config = locConfig[sku] || {};
-    const min = config.minStock || 0;
-    const max = config.maxStock || 0;
-
+  // Shared status thresholds so per-SKU rows and collapsed meal groups agree.
+  const computeStatus = (qty, min = 0, max = 0) => {
     if (max > 0 && qty >= max) return { status: 'full', color: 'green' };
     if (min > 0 && qty <= min) return { status: 'low', color: 'red' };
     if (min > 0 && qty <= min * 1.5) return { status: 'warning', color: 'yellow' };
     return { status: 'ok', color: 'zinc' };
   };
 
+  const getStockStatus = (sku, qty) => {
+    const config = locConfig[sku] || {};
+    return computeStatus(qty, config.minStock || 0, config.maxStock || 0);
+  };
+
+  const getGroupStockStatus = (qty, config = {}) =>
+    computeStatus(qty, config.minStock || 0, config.maxStock || 0);
+
+  // Update group capacity (min/max) for a meal-type bucket at this location.
+  const handleUpdateMealConfig = async (mealType, field, value) => {
+    const current = (data.locationMealConfig[selectedLocation] || {})[mealType] || {};
+    await updateMealTypeConfig(selectedLocation, mealType, {
+      ...current,
+      [field]: parseInt(value) || 0,
+    });
+  };
+
   // AI-powered stock screenshot analysis
   const analyzeStockScreenshotWithAI = async (imageData, mimeType) => {
     const existingProducts = data.products.map(p => `- ${p.name} (SKU: ${p.sku}, Category: ${p.category || 'Unknown'})`).join('\n');
+    const mealTypeNames = (data.mealTypes || []).map(m => m.name);
+    const mealTypeList = mealTypeNames.length > 0 ? mealTypeNames.join(', ') : 'Meat, Veg/Vegan';
 
     const prompt = `Analyze this stock management screenshot and extract all product information.
 
 EXISTING PRODUCTS IN SYSTEM:
 ${existingProducts || 'No existing products'}
+
+FRESH MEAL TYPES (buckets for Frive fresh meals): ${mealTypeList}
 
 Return ONLY valid JSON with this exact structure (no markdown, no explanation):
 {
@@ -104,6 +124,8 @@ Return ONLY valid JSON with this exact structure (no markdown, no explanation):
       "stockCount": 0,
       "price": 0.00,
       "matchedSku": "SKU if it matches an existing product, otherwise null",
+      "isFreshMeal": false,
+      "mealType": "one of the FRESH MEAL TYPES above if this is a fresh meal, otherwise null",
       "confidence": "high/medium/low"
     }
   ],
@@ -119,6 +141,7 @@ MATCHING RULES:
 5. Categories are shown as section headers (Drinks, Meals, Breakfast, Snacks)
 6. If a product closely matches an existing one, use its SKU in matchedSku
 7. Be thorough - extract EVERY visible product row
+8. Fresh meals are Frive ready-meals (curries, pasta, lasagne, risotto, stews, etc.). Set isFreshMeal=true and pick the best mealType bucket from the list above (meat dishes → Meat; vegan/vegetarian/plant-based → Veg/Vegan). For ordinary snacks/drinks set isFreshMeal=false and mealType=null.
 
 Example parsing:
 - "Barebells Milkshake -..." with "Stock: 10" and "£3.25" → name: "Barebells Milkshake", stockCount: 10, price: 3.25
@@ -294,7 +317,11 @@ Example parsing:
             name: item.name,
             category: item.category || 'Other',
             unitCost: item.price || 0,
-            salePrice: item.price || 0
+            salePrice: item.price || 0,
+            // AI guess — lands unconfirmed for review in Admin → Fresh Meals
+            isFreshMeal: !!item.isFreshMeal,
+            mealType: item.mealType || null,
+            mealTypeConfirmed: false,
           });
         }
       }
@@ -381,11 +408,16 @@ Example parsing:
   const products = getProductsForLocation();
   const unassignedProducts = getUnassignedProducts();
 
-  // Products grouped by category (alphabetical, products alphabetical within),
-  // matching the Stock Levels page layout
+  // Frive fresh meals collapse into meal-type group rows; everything else renders
+  // per-SKU as before.
+  const freshMeals = products.filter(p => p.isFreshMeal);
+  const regularProducts = products.filter(p => !p.isFreshMeal);
+
+  // Regular products grouped by category (alphabetical, products alphabetical
+  // within), matching the Stock Levels page layout
   const groupedProducts = (() => {
     const groups = {};
-    products.forEach(p => {
+    regularProducts.forEach(p => {
       const cat = p.category || 'Uncategorised';
       if (!groups[cat]) groups[cat] = [];
       groups[cat].push(p);
@@ -398,6 +430,32 @@ Example parsing:
       }));
   })();
 
+  // Collapse fresh meals into one row per meal-type bucket. Current stock is the
+  // SUM of member SKUs' location stock (single source of truth — VendLive sync,
+  // restocks and screenshot import keep writing per-SKU). Capacity is per group.
+  const mealConfig = data.locationMealConfig[selectedLocation] || {};
+  const mealGroups = (() => {
+    const groups = {};
+    freshMeals.forEach(p => {
+      const key = p.mealType || 'Unclassified';
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(p);
+    });
+    const order = (data.mealTypes || []).map(m => m.name);
+    const rank = (name) => {
+      const i = order.indexOf(name);
+      return i === -1 ? 999 : i; // unknown/Unclassified buckets sort last
+    };
+    return Object.entries(groups)
+      .sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b))
+      .map(([mealType, items]) => ({
+        mealType,
+        items: items.sort((x, y) => (x.name || x.sku).localeCompare(y.name || y.sku)),
+        totalQty: items.reduce((acc, p) => acc + (locStock[p.sku] || 0), 0),
+        config: mealConfig[mealType] || {},
+      }));
+  })();
+
   // Gross margin from the VendLive-synced prices; null when either is missing
   const getMargin = (product) => {
     if (!product.salePrice || !product.unitCost) return null;
@@ -405,12 +463,185 @@ Example parsing:
     return { amount, pct: (amount / product.salePrice) * 100 };
   };
   const totalUnits = products.reduce((acc, p) => acc + (locStock[p.sku] || 0), 0);
-  const lowStockCount = products.filter(p => {
-    const config = locConfig[p.sku] || {};
-    return config.minStock && (locStock[p.sku] || 0) <= config.minStock;
-  }).length;
+  // Low-stock: regular products counted per-SKU; each meal group counted once.
+  const lowStockCount =
+    regularProducts.filter(p => {
+      const config = locConfig[p.sku] || {};
+      return config.minStock && (locStock[p.sku] || 0) <= config.minStock;
+    }).length +
+    mealGroups.filter(g => g.config.minStock && g.totalQty <= g.config.minStock).length;
+  const rowCount = regularProducts.length + mealGroups.length;
 
   const hasAssignedItems = location?.assignedItems?.length > 0;
+  const colSpan = showConfig ? 9 : 7;
+
+  // One per-SKU stock row. Reused for regular products and for the expanded
+  // member flavours inside a collapsed meal group (indent flag).
+  const renderProductRow = (product, { indent = false } = {}) => {
+    const qty = locStock[product.sku] || 0;
+    const config = locConfig[product.sku] || {};
+    const { status, color } = getStockStatus(product.sku, qty);
+    const margin = getMargin(product);
+
+    return (
+      <tr key={product.sku} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
+        <td className={`px-4 py-3 text-zinc-200 ${indent ? 'pl-10' : ''}`}>{product.name}</td>
+        <td className="px-4 py-3 text-zinc-500 text-xs font-mono">{product.sku}</td>
+        {showConfig && (
+          <>
+            <td className="px-4 py-3">
+              <input
+                type="number"
+                value={config.minStock || ''}
+                onChange={e => handleUpdateConfig(product.sku, 'minStock', e.target.value)}
+                placeholder="0"
+                className="w-20 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm text-center focus:outline-none focus:border-emerald-500"
+              />
+            </td>
+            <td className="px-4 py-3">
+              <input
+                type="number"
+                value={config.maxStock || ''}
+                onChange={e => handleUpdateConfig(product.sku, 'maxStock', e.target.value)}
+                placeholder="0"
+                className="w-20 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm text-center focus:outline-none focus:border-emerald-500"
+              />
+            </td>
+          </>
+        )}
+        <td className="px-4 py-3 text-right text-zinc-300">
+          {product.salePrice ? (
+            `£${product.salePrice.toFixed(2)}`
+          ) : (
+            <span className="text-xs bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded">No price</span>
+          )}
+        </td>
+        <td className="px-4 py-3 text-right">
+          {margin ? (
+            <span className={margin.amount >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+              £{margin.amount.toFixed(2)}
+              <span className="text-zinc-500 text-xs ml-1">({margin.pct.toFixed(0)}%)</span>
+            </span>
+          ) : (
+            <span className="text-zinc-600 text-xs" title="Needs both sale price and cost price">—</span>
+          )}
+        </td>
+        <td className="px-4 py-3 text-center">
+          <span className={`inline-block px-2 py-0.5 rounded text-xs ${
+            color === 'red' ? 'bg-red-500/20 text-red-400' :
+            color === 'yellow' ? 'bg-yellow-500/20 text-yellow-400' :
+            color === 'green' ? 'bg-emerald-500/20 text-emerald-400' :
+            'bg-zinc-700 text-zinc-400'
+          }`}>
+            {status}
+          </span>
+        </td>
+        <td className="px-4 py-3">
+          <input
+            type="number"
+            value={qty}
+            onChange={e => updateStock(product.sku, e.target.value)}
+            className="w-20 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm text-right focus:outline-none focus:border-emerald-500 ml-auto block"
+          />
+        </td>
+        <td className="px-4 py-3">
+          <div className="flex items-center justify-center gap-1">
+            <button onClick={() => adjustStock(product.sku, -10)} className="w-8 h-8 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white text-xs">-10</button>
+            <button onClick={() => adjustStock(product.sku, -1)} className="w-8 h-8 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white">-</button>
+            <button onClick={() => adjustStock(product.sku, 1)} className="w-8 h-8 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white">+</button>
+            <button onClick={() => adjustStock(product.sku, 10)} className="w-8 h-8 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white text-xs">+10</button>
+            {showConfig && hasAssignedItems && (
+              <button
+                onClick={() => removeProductFromLocation(product.sku)}
+                className="w-8 h-8 rounded bg-zinc-800 text-red-400 hover:bg-red-900/50 hover:text-red-300 ml-2"
+                title="Remove from location"
+              >
+                ×
+              </button>
+            )}
+          </div>
+        </td>
+      </tr>
+    );
+  };
+
+  // One collapsed meal-type group row, plus member flavour rows when expanded.
+  const renderMealGroup = (group) => {
+    const expanded = !!expandedGroups[group.mealType];
+    const { status, color } = getGroupStockStatus(group.totalQty, group.config);
+    const unclassified = group.mealType === 'Unclassified';
+
+    return (
+      <React.Fragment key={`meal-${group.mealType}`}>
+        <tr className="border-b border-zinc-800/50 bg-teal-500/5 hover:bg-teal-500/10">
+          <td className="px-4 py-3">
+            <button
+              onClick={() => setExpandedGroups(prev => ({ ...prev, [group.mealType]: !expanded }))}
+              className="flex items-center gap-2 text-left"
+            >
+              <span className="text-zinc-500 text-xs w-3">{expanded ? '▾' : '▸'}</span>
+              <span className="text-zinc-100 font-medium">{group.mealType}</span>
+            </button>
+          </td>
+          <td className="px-4 py-3 text-zinc-500 text-xs">
+            {group.items.length} flavour{group.items.length === 1 ? '' : 's'}
+          </td>
+          {showConfig && (
+            <>
+              <td className="px-4 py-3">
+                <input
+                  type="number"
+                  value={group.config.minStock || ''}
+                  onChange={e => handleUpdateMealConfig(group.mealType, 'minStock', e.target.value)}
+                  placeholder="0"
+                  className="w-20 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm text-center focus:outline-none focus:border-emerald-500"
+                />
+              </td>
+              <td className="px-4 py-3">
+                <input
+                  type="number"
+                  value={group.config.maxStock || ''}
+                  onChange={e => handleUpdateMealConfig(group.mealType, 'maxStock', e.target.value)}
+                  placeholder="0"
+                  className="w-20 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm text-center focus:outline-none focus:border-emerald-500"
+                />
+              </td>
+            </>
+          )}
+          <td className="px-4 py-3 text-right text-zinc-600 text-xs">—</td>
+          <td className="px-4 py-3 text-right text-zinc-600 text-xs">—</td>
+          <td className="px-4 py-3 text-center">
+            {unclassified ? (
+              <span className="inline-block px-2 py-0.5 rounded text-xs bg-zinc-700 text-zinc-400" title="Set a meal type in Admin → Fresh Meals">unclassified</span>
+            ) : (
+              <span className={`inline-block px-2 py-0.5 rounded text-xs ${
+                color === 'red' ? 'bg-red-500/20 text-red-400' :
+                color === 'yellow' ? 'bg-yellow-500/20 text-yellow-400' :
+                color === 'green' ? 'bg-emerald-500/20 text-emerald-400' :
+                'bg-zinc-700 text-zinc-400'
+              }`}>
+                {status}
+              </span>
+            )}
+          </td>
+          <td className="px-4 py-3 text-right">
+            <span className="text-lg font-semibold text-teal-300">{group.totalQty}</span>
+            <span className="text-zinc-500 text-xs ml-1">units</span>
+          </td>
+          <td className="px-4 py-3 text-center text-zinc-600 text-xs">
+            {expanded ? 'expanded' : 'tap to edit'}
+          </td>
+        </tr>
+        {expanded && (
+          group.items.length === 0 ? (
+            <tr><td colSpan={colSpan} className="px-4 py-3 pl-10 text-zinc-600 text-xs">No flavours stocked this week.</td></tr>
+          ) : (
+            group.items.map(product => renderProductRow(product, { indent: true }))
+          )
+        )}
+      </React.Fragment>
+    );
+  };
 
   // Show message if no locations exist
   if (data.locations.length === 0) {
@@ -667,8 +898,8 @@ Example parsing:
         <>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4">
-              <div className="text-2xl font-bold text-emerald-400">{products.length}</div>
-              <div className="text-xs text-zinc-500 mt-1">Products</div>
+              <div className="text-2xl font-bold text-emerald-400">{rowCount}</div>
+              <div className="text-xs text-zinc-500 mt-1">{mealGroups.length > 0 ? 'Products / meal groups' : 'Products'}</div>
             </div>
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4">
               <div className="text-2xl font-bold text-blue-400">{totalUnits}</div>
@@ -744,132 +975,44 @@ Example parsing:
                 </tr>
               </thead>
               <tbody>
-                {products.length === 0 ? (
+                {rowCount === 0 ? (
                   <tr>
-                    <td colSpan={showConfig ? 9 : 7} className="px-4 py-8 text-center text-zinc-600">
+                    <td colSpan={colSpan} className="px-4 py-8 text-center text-zinc-600">
                       No products assigned to this location
                     </td>
                   </tr>
                 ) : (
-                  groupedProducts.map(group => (
-                  <React.Fragment key={group.category}>
-                  <tr className="bg-zinc-800/60">
-                    <td colSpan={showConfig ? 9 : 7} className="px-4 py-2">
-                      <span className="text-emerald-400 font-medium text-xs uppercase tracking-wide">{group.category}</span>
-                      <span className="text-zinc-500 text-xs ml-3">
-                        {group.items.length} product{group.items.length === 1 ? '' : 's'} · {group.items.reduce((acc, p) => acc + (locStock[p.sku] || 0), 0)} units here
-                      </span>
-                    </td>
-                  </tr>
-                  {group.items.map(product => {
-                    const qty = locStock[product.sku] || 0;
-                    const config = locConfig[product.sku] || {};
-                    const { status, color } = getStockStatus(product.sku, qty);
-                    const margin = getMargin(product);
-
-                    return (
-                      <tr key={product.sku} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
-                        <td className="px-4 py-3 text-zinc-200">{product.name}</td>
-                        <td className="px-4 py-3 text-zinc-500 text-xs font-mono">{product.sku}</td>
-                        {showConfig && (
-                          <>
-                            <td className="px-4 py-3">
-                              <input
-                                type="number"
-                                value={config.minStock || ''}
-                                onChange={e => handleUpdateConfig(product.sku, 'minStock', e.target.value)}
-                                placeholder="0"
-                                className="w-20 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm text-center focus:outline-none focus:border-emerald-500"
-                              />
-                            </td>
-                            <td className="px-4 py-3">
-                              <input
-                                type="number"
-                                value={config.maxStock || ''}
-                                onChange={e => handleUpdateConfig(product.sku, 'maxStock', e.target.value)}
-                                placeholder="0"
-                                className="w-20 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm text-center focus:outline-none focus:border-emerald-500"
-                              />
-                            </td>
-                          </>
-                        )}
-                        <td className="px-4 py-3 text-right text-zinc-300">
-                          {product.salePrice ? (
-                            `£${product.salePrice.toFixed(2)}`
-                          ) : (
-                            <span className="text-xs bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded">No price</span>
-                          )}
-                        </td>
-                        <td className="px-4 py-3 text-right">
-                          {margin ? (
-                            <span className={margin.amount >= 0 ? 'text-emerald-400' : 'text-red-400'}>
-                              £{margin.amount.toFixed(2)}
-                              <span className="text-zinc-500 text-xs ml-1">({margin.pct.toFixed(0)}%)</span>
+                  <>
+                    {/* Frive fresh meals — collapsed into one row per meal type */}
+                    {mealGroups.length > 0 && (
+                      <React.Fragment key="fresh-meals">
+                        <tr className="bg-teal-900/40">
+                          <td colSpan={colSpan} className="px-4 py-2">
+                            <span className="text-teal-300 font-medium text-xs uppercase tracking-wide">Fresh Meals (Frive)</span>
+                            <span className="text-zinc-500 text-xs ml-3">
+                              {mealGroups.length} group{mealGroups.length === 1 ? '' : 's'} · {mealGroups.reduce((acc, g) => acc + g.totalQty, 0)} units here · combined volume per meal type
                             </span>
-                          ) : (
-                            <span className="text-zinc-600 text-xs" title="Needs both sale price and cost price">—</span>
-                          )}
-                        </td>
-                        <td className="px-4 py-3 text-center">
-                          <span className={`inline-block px-2 py-0.5 rounded text-xs ${
-                            color === 'red' ? 'bg-red-500/20 text-red-400' :
-                            color === 'yellow' ? 'bg-yellow-500/20 text-yellow-400' :
-                            color === 'green' ? 'bg-emerald-500/20 text-emerald-400' :
-                            'bg-zinc-700 text-zinc-400'
-                          }`}>
-                            {status}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3">
-                          <input
-                            type="number"
-                            value={qty}
-                            onChange={e => updateStock(product.sku, e.target.value)}
-                            className="w-20 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm text-right focus:outline-none focus:border-emerald-500 ml-auto block"
-                          />
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="flex items-center justify-center gap-1">
-                            <button
-                              onClick={() => adjustStock(product.sku, -10)}
-                              className="w-8 h-8 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white text-xs"
-                            >
-                              -10
-                            </button>
-                            <button
-                              onClick={() => adjustStock(product.sku, -1)}
-                              className="w-8 h-8 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white"
-                            >
-                              -
-                            </button>
-                            <button
-                              onClick={() => adjustStock(product.sku, 1)}
-                              className="w-8 h-8 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white"
-                            >
-                              +
-                            </button>
-                            <button
-                              onClick={() => adjustStock(product.sku, 10)}
-                              className="w-8 h-8 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white text-xs"
-                            >
-                              +10
-                            </button>
-                            {showConfig && hasAssignedItems && (
-                              <button
-                                onClick={() => removeProductFromLocation(product.sku)}
-                                className="w-8 h-8 rounded bg-zinc-800 text-red-400 hover:bg-red-900/50 hover:text-red-300 ml-2"
-                                title="Remove from location"
-                              >
-                                ×
-                              </button>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                  </React.Fragment>
-                  ))
+                          </td>
+                        </tr>
+                        {mealGroups.map(group => renderMealGroup(group))}
+                      </React.Fragment>
+                    )}
+
+                    {/* Everything else — per-SKU, grouped by category */}
+                    {groupedProducts.map(group => (
+                      <React.Fragment key={group.category}>
+                        <tr className="bg-zinc-800/60">
+                          <td colSpan={colSpan} className="px-4 py-2">
+                            <span className="text-emerald-400 font-medium text-xs uppercase tracking-wide">{group.category}</span>
+                            <span className="text-zinc-500 text-xs ml-3">
+                              {group.items.length} product{group.items.length === 1 ? '' : 's'} · {group.items.reduce((acc, p) => acc + (locStock[p.sku] || 0), 0)} units here
+                            </span>
+                          </td>
+                        </tr>
+                        {group.items.map(product => renderProductRow(product))}
+                      </React.Fragment>
+                    ))}
+                  </>
                 )}
               </tbody>
             </table>

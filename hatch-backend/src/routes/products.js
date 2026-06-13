@@ -1,6 +1,7 @@
 import express from 'express';
 import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
+import { guessFreshMeal } from '../services/meal-classifier.js';
 
 const router = express.Router();
 
@@ -103,6 +104,28 @@ router.get('/check-conflict', asyncHandler(async (req, res) => {
   });
 }));
 
+// List Frive fresh meals (for the Fresh Meals admin / review queue).
+// ?unconfirmed=true returns only meals awaiting human confirmation.
+// Must be declared BEFORE `/:sku` so Express doesn't capture `/fresh-meals` as an SKU.
+router.get('/fresh-meals', asyncHandler(async (req, res) => {
+  const where = { isFreshMeal: true };
+  if (req.query.unconfirmed === 'true') where.mealTypeConfirmed = false;
+
+  const products = await prisma.product.findMany({
+    where,
+    orderBy: { name: 'asc' },
+    select: {
+      sku: true,
+      name: true,
+      category: true,
+      mealType: true,
+      mealTypeConfirmed: true,
+      preferredSupplierId: true,
+    },
+  });
+  res.json(products);
+}));
+
 // Get single product
 router.get('/:sku', asyncHandler(async (req, res) => {
   const product = await prisma.product.findUnique({
@@ -126,7 +149,7 @@ router.get('/:sku', asyncHandler(async (req, res) => {
 
 // Create product
 router.post('/', asyncHandler(async (req, res) => {
-  const { sku, name, description, category, unitCost, salePrice, unitsPerBox, barcode, preferredSupplierId } = req.body;
+  const { sku, name, description, category, unitCost, salePrice, unitsPerBox, barcode, preferredSupplierId, isFreshMeal, mealType, mealTypeConfirmed } = req.body;
 
   if (!sku || !name) {
     return res.status(400).json({ error: 'SKU and name are required' });
@@ -143,6 +166,9 @@ router.post('/', asyncHandler(async (req, res) => {
       unitsPerBox: unitsPerBox ? parseInt(unitsPerBox) : 1,
       barcode: barcode || null,
       preferredSupplierId: preferredSupplierId || null,
+      ...(isFreshMeal !== undefined && { isFreshMeal: !!isFreshMeal }),
+      ...(mealType !== undefined && { mealType: mealType || null }),
+      ...(mealTypeConfirmed !== undefined && { mealTypeConfirmed: !!mealTypeConfirmed }),
     },
   });
 
@@ -151,7 +177,7 @@ router.post('/', asyncHandler(async (req, res) => {
 
 // Update product
 router.put('/:sku', asyncHandler(async (req, res) => {
-  const { name, description, category, unitCost, salePrice, unitsPerBox, barcode, preferredSupplierId } = req.body;
+  const { name, description, category, unitCost, salePrice, unitsPerBox, barcode, preferredSupplierId, isFreshMeal, mealType, mealTypeConfirmed } = req.body;
 
   const product = await prisma.product.update({
     where: { sku: req.params.sku },
@@ -164,6 +190,26 @@ router.put('/:sku', asyncHandler(async (req, res) => {
       ...(unitsPerBox !== undefined && { unitsPerBox: unitsPerBox ? parseInt(unitsPerBox) : 1 }),
       ...(barcode !== undefined && { barcode: barcode || null }),
       ...(preferredSupplierId !== undefined && { preferredSupplierId: preferredSupplierId || null }),
+      ...(isFreshMeal !== undefined && { isFreshMeal: !!isFreshMeal }),
+      ...(mealType !== undefined && { mealType: mealType || null }),
+      ...(mealTypeConfirmed !== undefined && { mealTypeConfirmed: !!mealTypeConfirmed }),
+    },
+  });
+
+  res.json(product);
+}));
+
+// Confirm / override a product's fresh-meal classification. Used by the Fresh
+// Meals review queue to accept an auto-guess or correct it.
+router.put('/:sku/meal', asyncHandler(async (req, res) => {
+  const { isFreshMeal, mealType, mealTypeConfirmed } = req.body;
+
+  const product = await prisma.product.update({
+    where: { sku: req.params.sku },
+    data: {
+      ...(isFreshMeal !== undefined && { isFreshMeal: !!isFreshMeal }),
+      ...(mealType !== undefined && { mealType: mealType || null }),
+      ...(mealTypeConfirmed !== undefined && { mealTypeConfirmed: !!mealTypeConfirmed }),
     },
   });
 
@@ -191,6 +237,17 @@ router.post('/import', asyncHandler(async (req, res) => {
 
   for (const product of products) {
     try {
+      // Auto-classify on first sight if the caller didn't supply a classification
+      // (e.g. screenshot import passes its own guess; CSV import does not). Always
+      // unconfirmed so a human confirms it in the Fresh Meals review queue.
+      const provided = product.isFreshMeal !== undefined || product.mealType !== undefined;
+      const guess = provided ? null : guessFreshMeal(product.name);
+      const mealFields = {
+        isFreshMeal: provided ? !!product.isFreshMeal : guess.isFreshMeal,
+        mealType: provided ? (product.mealType || null) : guess.mealType,
+        mealTypeConfirmed: !!product.mealTypeConfirmed,
+      };
+
       await prisma.product.upsert({
         where: { sku: product.sku },
         create: {
@@ -203,7 +260,10 @@ router.post('/import', asyncHandler(async (req, res) => {
           unitsPerBox: product.unitsPerBox ? parseInt(product.unitsPerBox) : 1,
           barcode: product.barcode || null,
           preferredSupplierId: product.preferredSupplierId || null,
+          ...mealFields,
         },
+        // Don't re-classify existing products on update — a human-confirmed
+        // classification must stay sticky. Only the catalog fields refresh.
         update: {
           name: product.name,
           description: product.description || null,

@@ -1,8 +1,10 @@
 ﻿import express from 'express';
+import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { findLegacyDuplicates } from '../utils/sales-dedupe.js';
+import { guessFreshMeal } from '../services/meal-classifier.js';
 
 const router = express.Router();
 
@@ -31,6 +33,17 @@ function analyticsWhere({ startDate, endDate, locationName }, { includeRefunded 
   }
   return Prisma.join(conditions, ' AND ');
 }
+
+// Effective category for category-level rollups: Frive fresh-meal flavours roll
+// up into their meal-type bucket instead of their raw category. Mirrors
+// effectiveCategory() in services/analytics.js — keep the two in lockstep.
+// Assumes the sales table is aliased `s` and joined to products aliased `p`.
+const EFFECTIVE_CATEGORY = Prisma.sql`
+  CASE
+    WHEN p.is_fresh_meal = true AND p.meal_type IS NOT NULL THEN 'Frive ' || p.meal_type
+    WHEN p.is_fresh_meal = true THEN 'Frive (unclassified)'
+    ELSE COALESCE(p.category, 'Other')
+  END`;
 
 // Get sales with filters
 router.get('/', asyncHandler(async (req, res) => {
@@ -123,12 +136,17 @@ router.post('/import', asyncHandler(async (req, res) => {
   for (const sale of newSales) {
     if (!existingSkus.has(sale.sku) && sale.productName) {
       existingSkus.add(sale.sku);
+      // Best-effort fresh-meal guess (unconfirmed) so Frive flavours imported
+      // via CSV also surface in the review queue.
+      const meal = guessFreshMeal(sale.productName);
       productRows.push({
         sku: sale.sku,
         name: sale.productName,
         category: sale.category || null,
         unitCost: sale.costPrice ?? null,
         salePrice: sale.charged ?? null,
+        isFreshMeal: meal.isFreshMeal,
+        mealType: meal.mealType,
       });
     }
   }
@@ -210,6 +228,66 @@ router.post('/deduplicate', asyncHandler(async (req, res) => {
   });
 }));
 
+// Distinct location names across all sales, with volume and date range —
+// powers the merge-locations admin tool (date ranges let the user verify an
+// alias doesn't span a machine move before merging it).
+router.get('/location-names', asyncHandler(async (req, res) => {
+  const rows = await prisma.$queryRaw`
+    SELECT
+      COALESCE(s.location_name, 'Unknown') AS name,
+      COUNT(*)::int                        AS sales,
+      COALESCE(SUM(s.charged), 0)::float   AS revenue,
+      MIN(s."timestamp")                   AS first_sale,
+      MAX(s."timestamp")                   AS last_sale
+    FROM sales s
+    GROUP BY 1
+    ORDER BY sales DESC
+  `;
+  res.json(rows.map(r => ({
+    name: r.name,
+    sales: r.sales,
+    revenue: r.revenue,
+    firstSale: r.first_sale,
+    lastSale: r.last_sale,
+  })));
+}));
+
+// Merge historical location names: rename sales recorded under alias names
+// (e.g. a machine name used before mappings existed) to the canonical site
+// name. NAME-based by design — never machine-based — so it stays correct
+// when machines move between sites: each alias only existed while the
+// machine sat at that site, and post-move sales carry the new site's name
+// from the machine mapping. dryRun defaults to TRUE.
+export const mergeLocationsSchema = z.object({
+  from: z.array(z.string().min(1)).min(1),
+  to: z.string().min(1),
+  dryRun: z.boolean().optional().default(true),
+});
+
+router.post('/merge-locations', asyncHandler(async (req, res) => {
+  const { from, to, dryRun } = mergeLocationsSchema.parse(req.body);
+  const sources = [...new Set(from)].filter(n => n !== to);
+  if (sources.length === 0) {
+    return res.status(400).json({ error: 'No source names to merge (the target name is excluded automatically)' });
+  }
+
+  const where = {
+    OR: sources.map(n => n === 'Unknown'
+      ? { OR: [{ locationName: null }, { locationName: 'Unknown' }] }
+      : { locationName: n }),
+  };
+
+  const affected = await prisma.sale.count({ where });
+  let renamed = 0;
+  if (!dryRun && affected > 0) {
+    const result = await prisma.sale.updateMany({ where, data: { locationName: to } });
+    renamed = result.count;
+    console.log(`Sales location merge: renamed ${renamed} sales from [${sources.join(', ')}] to "${to}"`);
+  }
+
+  res.json({ dryRun, affected, renamed, from: sources, to });
+}));
+
 // Get sales analytics -- aggregated in the database, refunds excluded
 router.get('/analytics', asyncHandler(async (req, res) => {
   const where = analyticsWhere(req.query);
@@ -236,7 +314,7 @@ router.get('/analytics', asyncHandler(async (req, res) => {
 
   const categoryRows = await prisma.$queryRaw`
     SELECT
-      COALESCE(p.category, 'Other')   AS category,
+      ${EFFECTIVE_CATEGORY}              AS category,
       COALESCE(SUM(s.charged), 0)::float AS revenue,
       COALESCE(SUM(s.quantity), 0)::int  AS units,
       COUNT(*)::int                      AS transactions
@@ -340,7 +418,7 @@ router.get('/by-category', asyncHandler(async (req, res) => {
 
   const rows = await prisma.$queryRaw`
     SELECT
-      COALESCE(p.category, 'Other')      AS category,
+      ${EFFECTIVE_CATEGORY}              AS category,
       COALESCE(SUM(s.charged), 0)::float AS revenue,
       COALESCE(SUM(s.quantity), 0)::int  AS units,
       COUNT(*)::int                      AS transactions
