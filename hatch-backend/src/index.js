@@ -19,6 +19,8 @@ import ordersRouter from './routes/orders.js';
 import suppliersRouter from './routes/suppliers.js';
 import routesRouter from './routes/routes.js';
 import salesRouter from './routes/sales.js';
+import analyticsRouter from './routes/analytics.js';
+import reportsRouter from './routes/reports.js';
 import vendliveRouter from './routes/vendlive.js';
 import vendliveStockRouter from './routes/vendlive-stock.js';
 import authRouter from './routes/auth.js';
@@ -138,6 +140,8 @@ app.use('/api/orders', ordersRouter);
 app.use('/api/suppliers', suppliersRouter);
 app.use('/api/routes', routesRouter);
 app.use('/api/sales', salesRouter);
+app.use('/api/analytics', analyticsRouter);
+app.use('/api/reports', reportsRouter);
 app.use('/api/vendlive', vendliveRouter);
 app.use('/api/vendlive/stock', vendliveStockRouter);
 
