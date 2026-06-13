@@ -21,6 +21,18 @@ import {
  * before extracting the local part.
  */
 
+/**
+ * Effective category for reporting. Frive fresh-meal flavours roll up into their
+ * meal-type bucket (e.g. "Frive Meat") instead of their raw category, so the
+ * dashboard category mix and the client PDF show the meaningful Meat vs Veg/Vegan
+ * split rather than a churn of weekly flavours. Mirrors the SQL CASE used in
+ * sales.js — keep the two in lockstep.
+ */
+export function effectiveCategory({ isFreshMeal, mealType, category }) {
+  if (isFreshMeal) return mealType ? `Frive ${mealType}` : 'Frive (unclassified)';
+  return category || 'Other';
+}
+
 // WHERE fragment for the sales table. Deliberately duplicated from sales.js's
 // analyticsWhere (not imported) so this module doesn't couple to the in-flight
 // edits on that file — TODO: dedupe into utils/sales-filter.js once that lands.
@@ -127,6 +139,8 @@ async function productStats({ startDate, endDate }, scope) {
     SELECT s.sku,
            COALESCE(MAX(s.product_name), s.sku)                            AS name,
            COALESCE(MAX(p.category), 'Other')                             AS category,
+           bool_or(COALESCE(p.is_fresh_meal, false))                      AS is_fresh_meal,
+           MAX(p.meal_type)                                               AS meal_type,
            COALESCE(SUM(s.charged), 0)::float                            AS revenue,
            COALESCE(SUM(COALESCE(s.cost_price, 0) * s.quantity), 0)::float AS cost,
            COALESCE(SUM(s.quantity), 0)::int                             AS units,
@@ -141,7 +155,8 @@ async function productStats({ startDate, endDate }, scope) {
   const list = rows.map((r) => ({
     sku: r.sku,
     name: r.name,
-    category: r.category,
+    // Fresh-meal flavours roll up to their bucket; everything else keeps its category.
+    category: effectiveCategory({ isFreshMeal: r.is_fresh_meal, mealType: r.meal_type, category: r.category }),
     revenue: r.revenue,
     cost: r.cost,
     profit: r.revenue - r.cost,
@@ -159,7 +174,7 @@ async function productStats({ startDate, endDate }, scope) {
     if (missing.length) {
       const prods = await prisma.product.findMany({
         where: { sku: { in: missing } },
-        select: { sku: true, name: true, category: true },
+        select: { sku: true, name: true, category: true, isFreshMeal: true, mealType: true },
       });
       const pm = new Map(prods.map((p) => [p.sku, p]));
       for (const sku of missing) {
@@ -167,7 +182,7 @@ async function productStats({ startDate, endDate }, scope) {
         list.push({
           sku,
           name: p?.name || sku,
-          category: p?.category || 'Other',
+          category: effectiveCategory({ isFreshMeal: p?.isFreshMeal, mealType: p?.mealType, category: p?.category }),
           revenue: 0,
           cost: 0,
           profit: 0,

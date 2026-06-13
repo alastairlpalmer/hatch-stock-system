@@ -7,7 +7,8 @@ import {
   warehousesService,
   suppliersService,
   routesService,
-  salesService 
+  salesService,
+  mealTypesService
 } from '../services';
 
 // Initial state structure
@@ -21,6 +22,8 @@ const INITIAL_STATE = {
   stock: {},           // { warehouseId: { sku: quantity } }
   locationStock: {},   // { locationId: { sku: quantity } }
   locationConfig: {},  // { locationId: { sku: { minStock, maxStock } } }
+  mealTypes: [],            // configurable fresh-meal buckets [{ id, name, sortOrder }]
+  locationMealConfig: {},   // { locationId: { mealType: { minStock, maxStock } } }
   stockBatches: [],
   removals: [],
   restockHistory: [],
@@ -54,7 +57,7 @@ export function StockProvider({ children }) {
   const initializeData = async () => {
     try {
       // Try to load from backend first
-      const [products, warehouses, locations, suppliers, routes, orders, sales, salesImports, warehouseStock, removals, stockBatches] = await Promise.all([
+      const [products, warehouses, locations, suppliers, routes, orders, sales, salesImports, warehouseStock, removals, stockBatches, mealTypes] = await Promise.all([
         productsService.getAll(),
         warehousesService.getAll(),
         locationsService.getAll(),
@@ -68,24 +71,29 @@ export function StockProvider({ children }) {
         // Without this, data.stockBatches stays [] in connected mode and the
         // expiry tab shows nothing even though batches/expiries are in the DB
         inventoryService.getBatches(),
+        // Configurable fresh-meal buckets (best-effort: tolerate older backends)
+        mealTypesService.getAll().catch(() => []),
       ]);
 
       // Load location stock, config, and history for each location
       const locationStock = {};
       const locationConfig = {};
+      const locationMealConfig = {};
       let allStockChecks = [];
       let allRestocks = [];
 
       await Promise.all(locations.map(async (loc) => {
         try {
-          const [stock, config, stockChecks, restocks] = await Promise.all([
+          const [stock, config, stockChecks, restocks, mealConfig] = await Promise.all([
             inventoryService.getLocationStock(loc.id),
             inventoryService.getLocationConfig(loc.id),
             inventoryService.getStockCheckHistory(loc.id),
             inventoryService.getRestockHistory(loc.id),
+            mealTypesService.getLocationMealConfig(loc.id).catch(() => ({})),
           ]);
           locationStock[loc.id] = stock;
           locationConfig[loc.id] = config;
+          locationMealConfig[loc.id] = mealConfig;
           // Add location info to history records for display
           allStockChecks = [...allStockChecks, ...stockChecks.map(sc => ({ ...sc, locationId: loc.id, locationName: loc.name }))];
           allRestocks = [...allRestocks, ...restocks.map(r => ({ ...r, locationId: loc.id, locationName: loc.name }))];
@@ -107,6 +115,8 @@ export function StockProvider({ children }) {
         stock: warehouseStock,
         locationStock,
         locationConfig,
+        mealTypes,
+        locationMealConfig,
         removals,
         stockBatches,
         stockCheckHistory: allStockChecks,
@@ -490,6 +500,62 @@ export function StockProvider({ children }) {
     }));
     return configData;
   }, [data, isOfflineMode]);
+
+  // ========== FRESH MEAL / MEAL TYPE OPERATIONS ==========
+
+  // Upsert per-location group capacity for a meal-type bucket.
+  const updateMealTypeConfig = useCallback(async (locationId, mealType, config) => {
+    if (isOfflineMode) {
+      const updated = {
+        ...data,
+        locationMealConfig: {
+          ...data.locationMealConfig,
+          [locationId]: {
+            ...(data.locationMealConfig[locationId] || {}),
+            [mealType]: { ...(data.locationMealConfig[locationId]?.[mealType] || {}), ...config },
+          },
+        },
+      };
+      await saveData(updated);
+      return;
+    }
+    await mealTypesService.updateLocationMealConfig(locationId, mealType, config);
+    const configData = await mealTypesService.getLocationMealConfig(locationId);
+    setData(prev => ({
+      ...prev,
+      locationMealConfig: { ...prev.locationMealConfig, [locationId]: configData },
+    }));
+  }, [data, isOfflineMode, saveData]);
+
+  const addMealType = useCallback(async (body) => {
+    const created = await mealTypesService.create(body);
+    setData(prev => ({ ...prev, mealTypes: [...prev.mealTypes, created] }));
+    return created;
+  }, []);
+
+  const updateMealType = useCallback(async (id, body) => {
+    const result = await mealTypesService.update(id, body);
+    setData(prev => ({
+      ...prev,
+      mealTypes: prev.mealTypes.map(m => m.id === id ? result : m),
+    }));
+    return result;
+  }, []);
+
+  const deleteMealType = useCallback(async (id) => {
+    await mealTypesService.remove(id);
+    setData(prev => ({ ...prev, mealTypes: prev.mealTypes.filter(m => m.id !== id) }));
+  }, []);
+
+  // Confirm / override a product's fresh-meal classification (review queue).
+  const updateProductMeal = useCallback(async (sku, body) => {
+    const result = await productsService.updateMeal(sku, body);
+    setData(prev => ({
+      ...prev,
+      products: prev.products.map(p => p.sku === sku ? { ...p, ...result } : p),
+    }));
+    return result;
+  }, []);
 
   // ========== SUPPLIER OPERATIONS ==========
 
@@ -982,6 +1048,13 @@ export function StockProvider({ children }) {
     // Location config operations
     updateLocationConfig,
     loadLocationConfig,
+
+    // Fresh meal / meal type operations
+    updateMealTypeConfig,
+    addMealType,
+    updateMealType,
+    deleteMealType,
+    updateProductMeal,
 
     // Supplier operations
     addSupplier,

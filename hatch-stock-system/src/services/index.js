@@ -5,6 +5,7 @@ export { inventoryService } from './inventory.service';
 export { ordersService } from './orders.service';
 export { locationsService } from './locations.service';
 export { salesService } from './sales.service';
+export { mealTypesService } from './mealTypes.service';
 export { vendliveService } from './vendlive.service';
 export {
   warehousesService,
@@ -18,5 +19,6 @@ export * from './inventory.service';
 export * from './orders.service';
 export * from './locations.service';
 export * from './sales.service';
+export * from './mealTypes.service';
 export * from './vendlive.service';
 export * from './entities.service';

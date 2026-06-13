@@ -24,6 +24,12 @@ model Product {
   unitsPerBox         Int?     @default(1) @map("units_per_box")
   barcode             String?  @unique
   preferredSupplierId String?  @map("preferred_supplier_id")
+  // Frive fresh-meal grouping. isFreshMeal flags a weekly-rotating Frive meal;
+  // mealType holds the configurable bucket name (see MealType); mealTypeConfirmed
+  // gates name-based auto-guesses until a human confirms them.
+  isFreshMeal         Boolean  @default(false) @map("is_fresh_meal")
+  mealType            String?  @map("meal_type")
+  mealTypeConfirmed   Boolean  @default(false) @map("meal_type_confirmed")
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
 
@@ -80,6 +86,7 @@ model Location {
   // Relations
   stock              LocationStock[]
   configs            LocationConfig[]
+  mealConfigs        LocationMealConfig[]
   restocks           RestockRecord[]
   stockChecks        StockCheck[]
   assignedItems      LocationAssignment[]
@@ -87,6 +94,34 @@ model Location {
   vendliveStockSyncs VendliveStockSync[]
 
   @@map("locations")
+}
+
+// Admin-managed list of fresh-meal buckets (e.g. "Meat", "Veg/Vegan").
+// Configurable rather than an enum. Referenced by Product.mealType and
+// LocationMealConfig.mealType by NAME (denormalised — renames are coordinated
+// transactionally in the meal-types route).
+model MealType {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  sortOrder Int      @default(0) @map("sort_order")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("meal_types")
+}
+
+// Per-(location, meal type) capacity for collapsed fresh-meal group rows.
+// Current stock for a group is the SUM of member SKUs' location_stock — only the
+// min/max capacity lives here.
+model LocationMealConfig {
+  locationId String @map("location_id")
+  mealType   String @map("meal_type")
+  minStock   Int?   @map("min_stock")
+  maxStock   Int?   @map("max_stock")
+
+  location Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  @@id([locationId, mealType])
+  @@map("location_meal_config")
 }
 
 model LocationStock {

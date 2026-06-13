@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useStock } from '../../context/StockContext';
 import AdminVendlive from './AdminVendlive';
 import AdminSalesImport from './AdminSalesImport';
+import AdminFreshMeals from './AdminFreshMeals';
 import BarcodeScanner from '../scanner/BarcodeScanner';
 import { unlockAudio } from '../../utils/feedback';
 
@@ -19,6 +20,7 @@ export default function Admin() {
           { id: 'locations', label: 'Locations' },
           { id: 'routes', label: 'Restock Routes' },
           { id: 'suppliers', label: 'Suppliers' },
+          { id: 'freshmeals', label: 'Fresh Meals' },
           { id: 'vendlive', label: 'VendLive' },
           { id: 'salesimport', label: 'Sales Import' },
           { id: 'data', label: 'Data Management' }
@@ -40,6 +42,7 @@ export default function Admin() {
       {adminTab === 'locations' && <AdminLocations />}
       {adminTab === 'routes' && <AdminRoutes />}
       {adminTab === 'suppliers' && <AdminSuppliers />}
+      {adminTab === 'freshmeals' && <AdminFreshMeals />}
       {adminTab === 'vendlive' && <AdminVendlive />}
       {adminTab === 'salesimport' && <AdminSalesImport />}
       {adminTab === 'data' && <AdminData />}

@@ -61,6 +61,25 @@ export const productsService = {
   },
 
   /**
+   * List Frive fresh meals.
+   * @param {Object} params - e.g. { unconfirmed: true } for the review queue
+   */
+  getFreshMeals: async (params = {}) => {
+    const response = await api.get('/products/fresh-meals', { params });
+    return response.data;
+  },
+
+  /**
+   * Confirm / override a product's fresh-meal classification.
+   * @param {string} sku
+   * @param {{ isFreshMeal?: boolean, mealType?: string|null, mealTypeConfirmed?: boolean }} body
+   */
+  updateMeal: async (sku, body) => {
+    const response = await api.put(`/products/${sku}/meal`, body);
+    return response.data;
+  },
+
+  /**
    * Check for SKU conflicts
    * @param {string} sku - SKU to check
    * @param {string} name - Product name to compare
