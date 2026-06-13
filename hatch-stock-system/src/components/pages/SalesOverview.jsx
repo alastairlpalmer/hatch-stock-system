@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { useStock } from '../../context/StockContext';
 import { vendliveService } from '../../services/vendlive.service';
 import { salesService } from '../../services/sales.service';
+import AnalyticsDashboard from './analytics/AnalyticsDashboard';
+import ClientReports from './reports/ClientReports';
 
 // Small hoverable (i) marker with an explanatory tooltip
 function InfoTip({ text }) {
@@ -19,7 +21,7 @@ function InfoTip({ text }) {
 
 export default function SalesOverview() {
   const { data } = useStock();
-  const [activeSubTab, setActiveSubTab] = useState('overview');
+  const [activeSubTab, setActiveSubTab] = useState('analytics');
   const [dateFilter, setDateFilter] = useState({ start: '', end: '' });
   // Multi-select: VendLive can report one physical site under several
   // location names, so users can tick several and combine the feeds.
@@ -193,10 +195,12 @@ export default function SalesOverview() {
 
       <div className="flex gap-2 border-b border-zinc-800 pb-4">
         {[
+          { id: 'analytics', label: 'Analytics' },
           { id: 'overview', label: 'Overview' },
           { id: 'products', label: 'By Product' },
           { id: 'daily', label: 'Daily Sales' },
-          { id: 'transactions', label: 'Transactions' }
+          { id: 'transactions', label: 'Transactions' },
+          { id: 'reports', label: 'Reports' }
         ].map(tab => (
           <button
             key={tab.id}
@@ -210,7 +214,9 @@ export default function SalesOverview() {
         ))}
       </div>
 
-      {/* Location + Date Filter */}
+      {/* Location + Date Filter — hidden on the Analytics and Reports tabs,
+          which own their own filters */}
+      {activeSubTab !== 'analytics' && activeSubTab !== 'reports' && (
       <div className="flex items-center gap-4 flex-wrap">
         <div className="flex items-center gap-2 relative">
           <span className="text-zinc-500 text-sm">Locations:</span>
@@ -288,6 +294,21 @@ export default function SalesOverview() {
           </span>
         )}
       </div>
+      )}
+
+      {activeSubTab === 'analytics' && (
+        <AnalyticsDashboard
+          locationOptions={salesLocations}
+          routes={data.restockRoutes || []}
+        />
+      )}
+
+      {activeSubTab === 'reports' && (
+        <ClientReports
+          locationOptions={salesLocations}
+          routes={data.restockRoutes || []}
+        />
+      )}
 
       {activeSubTab === 'overview' && (
         <div className="space-y-6">

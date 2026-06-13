@@ -304,6 +304,31 @@ model SalesImport {
   @@map("sales_imports")
 }
 
+// Generated client-facing PDF reports (Feature 2). The PDF bytes are stored
+// inline (pdf_data) so there is no external object store to manage. Regenerating
+// for the same site + period + scope creates a NEW row with an incremented
+// version rather than overwriting — reports are an audit trail. Client-safe by
+// construction: only usage/units/share data is ever rendered into the PDF (see
+// services/report-whitelist.js); no revenue, cost, margin or waste.
+model ClientReport {
+  id            String   @id @default(uuid())
+  clientName    String   @map("client_name")
+  siteName      String   @map("site_name")
+  locationNames Json     @map("location_names") // resolved sales location names in scope
+  routeId       String?  @map("route_id")
+  periodStart   DateTime @map("period_start")
+  periodEnd     DateTime @map("period_end")
+  version       Int      @default(1)
+  fileName      String   @map("file_name")
+  pdfData       Bytes    @map("pdf_data")
+  pdfSize       Int      @map("pdf_size")
+  generatedBy   String?  @map("generated_by")
+  generatedAt   DateTime @default(now()) @map("generated_at")
+
+  @@index([siteName, periodStart, periodEnd])
+  @@map("client_reports")
+}
+
 // ============ VENDLIVE INTEGRATION ============
 
 model VendliveConfig {
