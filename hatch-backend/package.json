@@ -28,6 +28,7 @@
     "node-cron": "^3.0.3",
     "pdfkit": "^0.19.1",
     "prisma": "^5.7.0",
+    "svg-to-pdfkit": "^0.1.8",
     "zod": "^3.22.4"
   },
   "devDependencies": {
