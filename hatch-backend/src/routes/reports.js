@@ -2,6 +2,7 @@ import express from 'express';
 import { z } from 'zod';
 import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
+import { contentDispositionAttachment } from '../utils/http.js';
 import { generateAndStoreReport, previousCalendarMonth, REPORT_LIST_SELECT } from '../services/client-report.js';
 
 const router = express.Router();
@@ -57,7 +58,9 @@ router.get('/client/:id/download', asyncHandler(async (req, res) => {
   if (!report) return res.status(404).json({ error: 'Report not found' });
 
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename="${report.fileName}"`);
+  // ASCII-safe header — a non-ASCII char in fileName (e.g. an en-dash from a
+  // multi-month period) would otherwise throw ERR_INVALID_CHAR and 500.
+  res.setHeader('Content-Disposition', contentDispositionAttachment(report.fileName));
   res.send(Buffer.from(report.pdfData));
 }));
 

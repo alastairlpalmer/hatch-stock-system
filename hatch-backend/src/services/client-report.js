@@ -205,8 +205,10 @@ export async function generateAndStoreReport(input) {
   });
   const version = (prior?.version || 0) + 1;
 
-  const safeSite = (input.siteName || 'site').replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase();
-  const fileName = `hatch-report-${safeSite}-${dto.meta.periodLabel.replace(/\s+/g, '-')}-v${version}.pdf`;
+  // Slug both parts to ASCII alphanumerics so the filename is always header-safe
+  // (the period label can contain an en-dash for multi-month ranges).
+  const slug = (s) => String(s || '').normalize('NFKD').replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase();
+  const fileName = `hatch-report-${slug(input.siteName) || 'site'}-${slug(dto.meta.periodLabel)}-v${version}.pdf`;
 
   const row = await prisma.clientReport.create({
     data: {

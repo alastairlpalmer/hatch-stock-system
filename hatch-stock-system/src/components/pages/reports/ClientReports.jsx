@@ -34,6 +34,8 @@ export default function ClientReports({ locationOptions = [], routes = [] }) {
   const [error, setError] = useState(null);
   const [reports, setReports] = useState([]);
   const [loadingList, setLoadingList] = useState(true);
+  const [downloadingId, setDownloadingId] = useState(null);
+  const [downloadError, setDownloadError] = useState(null);
 
   const refresh = () => {
     setLoadingList(true);
@@ -72,6 +74,18 @@ export default function ClientReports({ locationOptions = [], routes = [] }) {
       setError(e?.response?.data?.error || e.message || 'Failed to generate report');
     } finally {
       setGenerating(false);
+    }
+  };
+
+  const handleDownload = async (r) => {
+    setDownloadError(null);
+    setDownloadingId(r.id);
+    try {
+      await reportsService.download(r.id, r.fileName);
+    } catch (e) {
+      setDownloadError(`Couldn’t download "${r.fileName}": ${e?.response?.status ? `server error ${e.response.status}` : e.message}`);
+    } finally {
+      setDownloadingId(null);
     }
   };
 
@@ -195,6 +209,9 @@ export default function ClientReports({ locationOptions = [], routes = [] }) {
           </h3>
           <button onClick={refresh} className="text-xs text-zinc-400 hover:text-white">Refresh</button>
         </div>
+        {downloadError && (
+          <div className="mx-6 mb-3 bg-red-500/10 border border-red-500/30 text-red-400 rounded p-3 text-sm">{downloadError}</div>
+        )}
         {loadingList ? (
           <p className="px-6 pb-6 text-sm text-zinc-500">Loading…</p>
         ) : reports.length === 0 ? (
@@ -224,10 +241,11 @@ export default function ClientReports({ locationOptions = [], routes = [] }) {
                   <td className="px-4 py-3 text-zinc-500 text-xs">{formatDate(r.generatedAt, { includeTime: true })}</td>
                   <td className="px-6 py-3 text-right">
                     <button
-                      onClick={() => reportsService.download(r.id, r.fileName)}
-                      className="text-emerald-400 hover:text-emerald-300 text-sm"
+                      onClick={() => handleDownload(r)}
+                      disabled={downloadingId === r.id}
+                      className="text-emerald-400 hover:text-emerald-300 text-sm disabled:opacity-50"
                     >
-                      Download
+                      {downloadingId === r.id ? 'Downloading…' : 'Download'}
                     </button>
                   </td>
                 </tr>
