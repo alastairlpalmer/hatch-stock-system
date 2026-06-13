@@ -570,6 +570,8 @@ Example parsing:
     const expanded = !!expandedGroups[group.mealType];
     const { status, color } = getGroupStockStatus(group.totalQty, group.config);
     const unclassified = group.mealType === 'Unclassified';
+    // Restock planning aid: how many to load to reach the group's target (max).
+    const toAdd = group.config.maxStock ? Math.max(0, group.config.maxStock - group.totalQty) : 0;
 
     return (
       <React.Fragment key={`meal-${group.mealType}`}>
@@ -625,11 +627,16 @@ Example parsing:
             )}
           </td>
           <td className="px-4 py-3 text-right">
-            <span className="text-lg font-semibold text-teal-300">{group.totalQty}</span>
-            <span className="text-zinc-500 text-xs ml-1">units</span>
+            <div>
+              <span className="text-lg font-semibold text-teal-300">{group.totalQty}</span>
+              <span className="text-zinc-500 text-xs ml-1">units</span>
+            </div>
+            {toAdd > 0 && (
+              <div className="text-amber-400 text-xs mt-0.5">add {toAdd} → {group.config.maxStock}</div>
+            )}
           </td>
           <td className="px-4 py-3 text-center text-zinc-600 text-xs">
-            {expanded ? 'expanded' : 'tap to edit'}
+            {expanded ? 'expanded' : 'tap to expand'}
           </td>
         </tr>
         {expanded && (
