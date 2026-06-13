@@ -98,6 +98,25 @@ function fmtDay(iso) {
   return `${parseInt(d, 10)} ${MONTH_ABBR[parseInt(m, 10) - 1]}`;
 }
 
+// Truncate text with an ellipsis so it fits maxWidth on a single line. pdfkit's
+// own lineBreak:false/ellipsis can still wrap, so we measure and cut explicitly.
+function ellipsize(doc, text, maxWidth, font = 'Helvetica', size = 10) {
+  doc.font(font).fontSize(size);
+  if (doc.widthOfString(text) <= maxWidth) return text;
+  let t = String(text);
+  while (t.length > 1 && doc.widthOfString(`${t}…`) > maxWidth) t = t.slice(0, -1);
+  return `${t.trimEnd()}…`;
+}
+
+// Largest font size in [min, max] at which text fits maxWidth (so long values
+// like "Wednesday" don't overflow a stat card).
+function fitFontSize(doc, text, maxWidth, font, max, min) {
+  doc.font(font);
+  let s = max;
+  while (s > min && doc.fontSize(s).widthOfString(String(text)) > maxWidth) s -= 0.5;
+  return s;
+}
+
 function coverPage(doc, dto) {
   const W = doc.page.width;
   const H = doc.page.height;
@@ -110,23 +129,24 @@ function coverPage(doc, dto) {
 
   doc.save().moveTo(W / 2 - 36, 300).lineTo(W / 2 + 36, 300).lineWidth(1).strokeColor(BRAND.coverRule).stroke().restore();
 
+  // All centred text uses x:0 + full page width so they share the exact centre.
   doc.fillColor(BRAND.cream).font('Helvetica').fontSize(12)
-    .text('VENDING PERFORMANCE REPORT', 0, 326, { align: 'center', characterSpacing: 3 });
+    .text('VENDING PERFORMANCE REPORT', 0, 326, { align: 'center', width: W, characterSpacing: 3 });
 
   doc.fillColor(BRAND.cream).font('Helvetica-Bold').fontSize(26)
-    .text(dto.meta.siteName, 70, 362, { align: 'center', width: W - 140 });
+    .text(dto.meta.siteName, 0, 362, { align: 'center', width: W });
 
   doc.fillColor('#C9D6CF').font('Helvetica').fontSize(13)
-    .text(`Prepared for ${dto.meta.clientName}`, 70, doc.y + 10, { align: 'center', width: W - 140 });
+    .text(`Prepared for ${dto.meta.clientName}`, 0, doc.y + 10, { align: 'center', width: W });
 
   doc.fillColor('#A9BDB4').font('Helvetica').fontSize(13)
-    .text(dto.meta.periodLabel, 0, doc.y + 16, { align: 'center' });
+    .text(dto.meta.periodLabel, 0, doc.y + 16, { align: 'center', width: W });
 
   if (dto.meta.scopeLabel) {
-    doc.fillColor('#7F988D').fontSize(9).text(dto.meta.scopeLabel, 70, H - 96, { align: 'center', width: W - 140 });
+    doc.fillColor('#7F988D').fontSize(9).text(dto.meta.scopeLabel, 0, H - 96, { align: 'center', width: W });
   }
   doc.fillColor('#6F877C').fontSize(8)
-    .text('Confidential — prepared for the named client only.', 0, H - 70, { align: 'center' });
+    .text('Confidential — prepared for the named client only.', 0, H - 70, { align: 'center', width: W });
 }
 
 function pageHeader(doc) {
@@ -139,11 +159,15 @@ function pageHeader(doc) {
 }
 
 function pageFooter(doc, dto, pageNum, pageCount) {
-  const y = doc.page.height - 48;
+  // Footer text sits in the bottom margin band. pdfkit auto-adds a page when
+  // text is drawn past the bottom margin, so temporarily drop the bottom margin
+  // to zero for this page (these pages are already laid out).
+  doc.page.margins.bottom = 0;
+  const y = doc.page.height - 42;
   doc.save().moveTo(MARGIN, y).lineTo(doc.page.width - MARGIN, y).lineWidth(0.5).strokeColor(BRAND.line).stroke().restore();
   doc.fillColor(BRAND.faint).font('Helvetica').fontSize(8);
   doc.text(dto.meta.periodLabel, MARGIN, y + 7, { width: 260, align: 'left', lineBreak: false });
-  doc.text(`Page ${pageNum} of ${pageCount}`, doc.page.width - MARGIN - 120, y + 7, { width: 120, align: 'right' });
+  doc.text(`Page ${pageNum} of ${pageCount}`, doc.page.width - MARGIN - 120, y + 7, { width: 120, align: 'right', lineBreak: false });
 }
 
 // Section heading with a short green underline. Returns the y below it.
@@ -163,8 +187,12 @@ function statCards(doc, cards, y) {
     const x = MARGIN + i * (cardW + gap);
     doc.save().roundedRect(x, y, cardW, cardH, 6).fill('#F7FAF9').restore();
     doc.save().roundedRect(x, y, cardW, cardH, 6).lineWidth(0.5).strokeColor(BRAND.line).stroke().restore();
-    doc.fillColor(BRAND.green).font('Helvetica-Bold').fontSize(16).text(c.value, x + 10, y + 13, { width: cardW - 20, lineBreak: false });
-    doc.fillColor(BRAND.sub).font('Helvetica').fontSize(7.5).text(c.label.toUpperCase(), x + 10, y + 40, { width: cardW - 18, characterSpacing: 0.4 });
+    // Auto-fit the value so long words (e.g. "Wednesday") stay on one line.
+    const valueSize = fitFontSize(doc, c.value, cardW - 20, 'Helvetica-Bold', 16, 10);
+    doc.fillColor(BRAND.green).font('Helvetica-Bold').fontSize(valueSize)
+      .text(c.value, x + 10, y + 13 + (16 - valueSize) * 0.6, { width: cardW - 20, lineBreak: false });
+    doc.fillColor(BRAND.sub).font('Helvetica').fontSize(7.5)
+      .text(c.label.toUpperCase(), x + 10, y + 42, { width: cardW - 16, characterSpacing: 0.4 });
   });
   return y + cardH;
 }
@@ -231,8 +259,10 @@ function rankedBars(doc, rows, y, { labelW, valueOf, valueLabel, empty }) {
     if (r.rank) {
       doc.fillColor(BRAND.faint).font('Helvetica-Bold').fontSize(9).text(String(i + 1).padStart(2, '0'), MARGIN, cy + 1, { width: 16 });
     }
-    doc.fillColor(BRAND.ink).font('Helvetica').fontSize(10)
-      .text(r.label, MARGIN + (r.rank ? 22 : 0), cy, { width: labelW - (r.rank ? 22 : 0), lineBreak: false, ellipsis: true });
+    const nameX = MARGIN + (r.rank ? 22 : 0);
+    const nameW = labelW - (r.rank ? 22 : 0);
+    const label = ellipsize(doc, r.label, nameW, 'Helvetica', 10);
+    doc.fillColor(BRAND.ink).font('Helvetica').fontSize(10).text(label, nameX, cy, { width: nameW, lineBreak: false });
     doc.save().roundedRect(barX, cy + 2, barMax, 7, 3).fill(BRAND.barBg).restore();
     doc.save().roundedRect(barX, cy + 2, Math.max(2, (valueOf(r) / max) * barMax), 7, 3).fill(BRAND.green).restore();
     doc.fillColor(BRAND.sub).font('Helvetica').fontSize(9)
