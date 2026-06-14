@@ -1,11 +1,65 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useStock } from '../../context/StockContext';
+import vendliveService from '../../services/vendlive.service';
 
 export default function LocationStock() {
   const { data, updateLocationStock, updateLocationConfig, updateLocationAssignedItems, bulkImportProducts, setLocationStock, updateMealTypeConfig } = useStock();
   const [selectedLocation, setSelectedLocation] = useState('');
   // Which collapsed meal-type groups are expanded to show member flavours.
   const [expandedGroups, setExpandedGroups] = useState({});
+
+  // VendLive truth: machine→location mappings (loaded once) and the live channel
+  // stock for the selected location's mapped machine(s).
+  const [machineMappings, setMachineMappings] = useState([]);
+  const [liveStock, setLiveStock] = useState({});       // { sku: stockLevel }
+  // status: 'none' (no machine mapped) | 'loading' | 'live' | 'error'
+  const [liveStatus, setLiveStatus] = useState('none');
+  const [liveUpdatedAt, setLiveUpdatedAt] = useState(null);
+
+  useEffect(() => {
+    vendliveService.getMachineMappings()
+      .then(setMachineMappings)
+      .catch(() => setMachineMappings([]));
+  }, []);
+
+  // Machines mapped to the currently selected location.
+  const locationMachines = machineMappings.filter(m => m.locationId === selectedLocation);
+
+  // Fetch VendLive's live channel stock for the selected location and aggregate
+  // by SKU. Sums across machines if a location has more than one. No DB writes —
+  // this is read-only truth straight from VendLive.
+  const fetchLiveStock = useCallback(async () => {
+    if (locationMachines.length === 0) {
+      setLiveStock({});
+      setLiveStatus('none');
+      setLiveUpdatedAt(null);
+      return;
+    }
+    setLiveStatus('loading');
+    try {
+      const responses = await Promise.all(
+        locationMachines.map(m => vendliveService.getLiveStock(m.vendliveMachineId))
+      );
+      const map = {};
+      for (const res of responses) {
+        for (const p of res.products || []) {
+          map[p.sku] = (map[p.sku] || 0) + Math.round(p.totalStock || 0);
+        }
+      }
+      setLiveStock(map);
+      setLiveStatus('live');
+      setLiveUpdatedAt(new Date());
+    } catch (err) {
+      console.error('VendLive live stock fetch failed:', err);
+      setLiveStatus('error');
+    }
+  }, [JSON.stringify(locationMachines.map(m => m.vendliveMachineId))]);
+
+  useEffect(() => { fetchLiveStock(); }, [fetchLiveStock]);
+
+  // True when we're showing VendLive truth (a machine is mapped and the fetch
+  // succeeded). Drives read-only display and which number feeds totals/status.
+  const isLive = liveStatus === 'live';
 
   // Update selected location when locations load or change
   useEffect(() => {
@@ -28,6 +82,11 @@ export default function LocationStock() {
   const location = data.locations.find(l => l.id === selectedLocation);
   const locStock = data.locationStock[selectedLocation] || {};
   const locConfig = data.locationConfig[selectedLocation] || {};
+
+  // The displayed quantity for a SKU. When VendLive truth is available we show
+  // its live channel level; otherwise we fall back to the stored DB estimate
+  // (non-VendLive locations, or if the live fetch failed).
+  const getQty = (sku) => (isLive ? (liveStock[sku] || 0) : (locStock[sku] || 0));
 
   const getProductsForLocation = () => {
     if (!location) return [];
@@ -451,7 +510,7 @@ Example parsing:
       .map(([mealType, items]) => ({
         mealType,
         items: items.sort((x, y) => (x.name || x.sku).localeCompare(y.name || y.sku)),
-        totalQty: items.reduce((acc, p) => acc + (locStock[p.sku] || 0), 0),
+        totalQty: items.reduce((acc, p) => acc + getQty(p.sku), 0),
         config: mealConfig[mealType] || {},
       }));
   })();
@@ -462,12 +521,12 @@ Example parsing:
     const amount = product.salePrice - product.unitCost;
     return { amount, pct: (amount / product.salePrice) * 100 };
   };
-  const totalUnits = products.reduce((acc, p) => acc + (locStock[p.sku] || 0), 0);
+  const totalUnits = products.reduce((acc, p) => acc + getQty(p.sku), 0);
   // Low-stock: regular products counted per-SKU; each meal group counted once.
   const lowStockCount =
     regularProducts.filter(p => {
       const config = locConfig[p.sku] || {};
-      return config.minStock && (locStock[p.sku] || 0) <= config.minStock;
+      return config.minStock && getQty(p.sku) <= config.minStock;
     }).length +
     mealGroups.filter(g => g.config.minStock && g.totalQty <= g.config.minStock).length;
   const rowCount = regularProducts.length + mealGroups.length;
@@ -478,7 +537,7 @@ Example parsing:
   // One per-SKU stock row. Reused for regular products and for the expanded
   // member flavours inside a collapsed meal group (indent flag).
   const renderProductRow = (product, { indent = false } = {}) => {
-    const qty = locStock[product.sku] || 0;
+    const qty = getQty(product.sku);
     const config = locConfig[product.sku] || {};
     const { status, color } = getStockStatus(product.sku, qty);
     const margin = getMargin(product);
@@ -537,29 +596,53 @@ Example parsing:
           </span>
         </td>
         <td className="px-4 py-3">
-          <input
-            type="number"
-            value={qty}
-            onChange={e => updateStock(product.sku, e.target.value)}
-            className="w-20 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm text-right focus:outline-none focus:border-emerald-500 ml-auto block"
-          />
+          {isLive ? (
+            // VendLive truth — read-only. Hand-editing would diverge from the
+            // machine. The future "found at machine" count (for shrinkage) lands
+            // in its own column, not here.
+            <div className="text-right">
+              <span className="text-sm text-zinc-200 font-medium">{qty}</span>
+            </div>
+          ) : (
+            <input
+              type="number"
+              value={qty}
+              onChange={e => updateStock(product.sku, e.target.value)}
+              className="w-20 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm text-right focus:outline-none focus:border-emerald-500 ml-auto block"
+            />
+          )}
         </td>
         <td className="px-4 py-3">
-          <div className="flex items-center justify-center gap-1">
-            <button onClick={() => adjustStock(product.sku, -10)} className="w-8 h-8 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white text-xs">-10</button>
-            <button onClick={() => adjustStock(product.sku, -1)} className="w-8 h-8 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white">-</button>
-            <button onClick={() => adjustStock(product.sku, 1)} className="w-8 h-8 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white">+</button>
-            <button onClick={() => adjustStock(product.sku, 10)} className="w-8 h-8 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white text-xs">+10</button>
-            {showConfig && hasAssignedItems && (
-              <button
-                onClick={() => removeProductFromLocation(product.sku)}
-                className="w-8 h-8 rounded bg-zinc-800 text-red-400 hover:bg-red-900/50 hover:text-red-300 ml-2"
-                title="Remove from location"
-              >
-                ×
-              </button>
-            )}
-          </div>
+          {isLive ? (
+            <div className="flex items-center justify-center gap-1">
+              <span className="text-xs text-zinc-600" title="Stock is read from VendLive">via VendLive</span>
+              {showConfig && hasAssignedItems && (
+                <button
+                  onClick={() => removeProductFromLocation(product.sku)}
+                  className="w-8 h-8 rounded bg-zinc-800 text-red-400 hover:bg-red-900/50 hover:text-red-300 ml-2"
+                  title="Remove from location"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="flex items-center justify-center gap-1">
+              <button onClick={() => adjustStock(product.sku, -10)} className="w-8 h-8 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white text-xs">-10</button>
+              <button onClick={() => adjustStock(product.sku, -1)} className="w-8 h-8 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white">-</button>
+              <button onClick={() => adjustStock(product.sku, 1)} className="w-8 h-8 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white">+</button>
+              <button onClick={() => adjustStock(product.sku, 10)} className="w-8 h-8 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white text-xs">+10</button>
+              {showConfig && hasAssignedItems && (
+                <button
+                  onClick={() => removeProductFromLocation(product.sku)}
+                  className="w-8 h-8 rounded bg-zinc-800 text-red-400 hover:bg-red-900/50 hover:text-red-300 ml-2"
+                  title="Remove from location"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+          )}
         </td>
       </tr>
     );
@@ -671,6 +754,34 @@ Example parsing:
           <p className="text-zinc-500 text-sm mt-1 hidden md:block">View and update stock levels at each location</p>
         </div>
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:gap-3">
+          {liveStatus !== 'none' && (
+            <div className="flex items-center gap-2">
+              {liveStatus === 'loading' && (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs bg-zinc-800 text-zinc-400">
+                  <span className="animate-spin">↻</span> Loading VendLive…
+                </span>
+              )}
+              {liveStatus === 'live' && (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs bg-emerald-500/15 text-emerald-400" title={liveUpdatedAt ? `Updated ${liveUpdatedAt.toLocaleTimeString()}` : ''}>
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" /> VendLive · live
+                  {liveUpdatedAt && <span className="text-emerald-600/70">{liveUpdatedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>}
+                </span>
+              )}
+              {liveStatus === 'error' && (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs bg-red-500/15 text-red-400" title="Showing last-known DB stock instead">
+                  <span className="w-1.5 h-1.5 rounded-full bg-red-400" /> VendLive unreachable
+                </span>
+              )}
+              <button
+                onClick={fetchLiveStock}
+                disabled={liveStatus === 'loading'}
+                className="px-2.5 py-1 rounded text-xs bg-zinc-800 text-zinc-400 hover:text-white disabled:opacity-50"
+                title="Refresh from VendLive"
+              >
+                ↻ Refresh
+              </button>
+            </div>
+          )}
           <select
             value={selectedLocation}
             onChange={e => { setSelectedLocation(e.target.value); setShowAddProduct(false); }}
@@ -977,7 +1088,7 @@ Example parsing:
                   <th className="text-right px-4 py-3 text-zinc-500 font-medium">Sale Price</th>
                   <th className="text-right px-4 py-3 text-zinc-500 font-medium">Margin</th>
                   <th className="text-center px-4 py-3 text-zinc-500 font-medium">Status</th>
-                  <th className="text-right px-4 py-3 text-zinc-500 font-medium">Current Stock</th>
+                  <th className="text-right px-4 py-3 text-zinc-500 font-medium">{isLive ? 'Stock (VendLive)' : 'Current Stock'}</th>
                   <th className="text-center px-4 py-3 text-zinc-500 font-medium">Actions</th>
                 </tr>
               </thead>
@@ -1012,7 +1123,7 @@ Example parsing:
                           <td colSpan={colSpan} className="px-4 py-2">
                             <span className="text-emerald-400 font-medium text-xs uppercase tracking-wide">{group.category}</span>
                             <span className="text-zinc-500 text-xs ml-3">
-                              {group.items.length} product{group.items.length === 1 ? '' : 's'} · {group.items.reduce((acc, p) => acc + (locStock[p.sku] || 0), 0)} units here
+                              {group.items.length} product{group.items.length === 1 ? '' : 's'} · {group.items.reduce((acc, p) => acc + getQty(p.sku), 0)} units here
                             </span>
                           </td>
                         </tr>
