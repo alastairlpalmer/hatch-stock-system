@@ -26,6 +26,13 @@ export const vendliveService = {
     return response.data;
   },
 
+  // Live channel stock for a machine — VendLive's own current stock levels,
+  // read-only proxy (no DB writes). Returns { machineId, totalChannels, products: [...] }.
+  getLiveStock: async (machineId) => {
+    const response = await api.get(`/vendlive/stock/live/${machineId}`);
+    return response.data;
+  },
+
   updateMachineMapping: async (vendliveMachineId, data) => {
     const response = await api.put(`/vendlive/machine-mappings/${vendliveMachineId}`, data);
     return response.data;
