@@ -54,9 +54,11 @@ model Warehouse {
   createdAt DateTime @default(now()) @map("created_at")
 
   // Relations
-  stock        WarehouseStock[]
-  stockBatches StockBatch[]
-  removals     StockRemoval[]
+  stock         WarehouseStock[]
+  stockBatches  StockBatch[]
+  removals      StockRemoval[]
+  transfersFrom StockTransfer[]  @relation("TransfersFrom")
+  transfersTo   StockTransfer[]  @relation("TransfersTo")
 
   @@map("warehouses")
 }
@@ -250,6 +252,23 @@ model StockRemoval {
 
   @@index([warehouseId, createdAt])
   @@map("stock_removals")
+}
+
+model StockTransfer {
+  id              String   @id @default(uuid())
+  fromWarehouseId String   @map("from_warehouse_id")
+  toWarehouseId   String   @map("to_warehouse_id")
+  performedBy     String?  @map("performed_by")
+  notes           String?
+  items           Json // [{ sku, quantity }]
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  fromWarehouse Warehouse @relation("TransfersFrom", fields: [fromWarehouseId], references: [id])
+  toWarehouse   Warehouse @relation("TransfersTo", fields: [toWarehouseId], references: [id])
+
+  @@index([fromWarehouseId, createdAt])
+  @@index([toWarehouseId, createdAt])
+  @@map("stock_transfers")
 }
 
 model RestockRecord {
