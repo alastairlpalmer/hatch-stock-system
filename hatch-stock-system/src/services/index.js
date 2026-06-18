@@ -7,6 +7,7 @@ export { locationsService } from './locations.service';
 export { salesService } from './sales.service';
 export { mealTypesService } from './mealTypes.service';
 export { vendliveService } from './vendlive.service';
+export { authService } from './auth.service';
 export {
   warehousesService,
   suppliersService,
