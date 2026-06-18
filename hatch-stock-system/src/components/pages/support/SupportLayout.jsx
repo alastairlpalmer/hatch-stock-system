@@ -1,13 +1,23 @@
 import React from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
+import { useAuth } from '../../../context/AuthContext';
 
-const tabs = [
+const baseTabs = [
   { to: 'docs', label: 'Restocking Docs' },
   { to: 'settings', label: 'Settings' },
   { to: 'history', label: 'History' },
 ];
 
 export default function SupportLayout() {
+  const { isAdmin } = useAuth();
+  const authEnabled = import.meta.env.VITE_AUTH_ENABLED === 'true';
+
+  // The Users tab is admin-only; with auth disabled it stays hidden since
+  // user management is only meaningful once auth is on.
+  const tabs = authEnabled && isAdmin
+    ? [...baseTabs, { to: 'users', label: 'Users' }]
+    : baseTabs;
+
   return (
     <div className="space-y-6">
       <div className="flex gap-2 border-b border-zinc-800 pb-4 overflow-x-auto">

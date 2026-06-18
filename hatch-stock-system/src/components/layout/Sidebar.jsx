@@ -1,6 +1,7 @@
 import React from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { cn } from '../../utils/helpers';
+import { useAuth } from '../../context/AuthContext';
 import HatchLogo from '../ui/HatchLogo';
 import SyncIndicator from '../ui/SyncIndicator';
 
@@ -23,11 +24,11 @@ export default function Sidebar({
   syncStatus,
 }) {
   const navigate = useNavigate();
+  const { user, logout } = useAuth();
   const authEnabled = import.meta.env.VITE_AUTH_ENABLED === 'true';
 
   const handleLogout = () => {
-    localStorage.removeItem('auth_token');
-    localStorage.removeItem('auth_user');
+    logout();
     navigate('/login');
   };
 
@@ -87,7 +88,15 @@ export default function Sidebar({
       </nav>
 
       {authEnabled && (
-        <div className="p-3 border-t border-zinc-800">
+        <div className="p-3 border-t border-zinc-800 space-y-1">
+          {user && (isMobile || !collapsed) && (
+            <div className="px-3 py-2">
+              <p className="text-sm text-zinc-200 truncate">{user.name || user.email}</p>
+              <p className="text-xs text-zinc-500 truncate">
+                {user.role === 'admin' ? 'Administrator' : 'Member'}
+              </p>
+            </div>
+          )}
           <button
             onClick={handleLogout}
             className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 transition-all"

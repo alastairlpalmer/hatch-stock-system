@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useStock } from './context/StockContext';
+import { useAuth } from './context/AuthContext';
 
 // Page components
 import Dashboard from './components/pages/Dashboard';
@@ -16,6 +17,7 @@ import Shrinkage from './components/pages/Shrinkage';
 import Admin from './components/pages/Admin';
 import RestockingDocs from './components/pages/RestockingDocs';
 import Login from './components/pages/Login';
+import Users from './components/pages/Users';
 
 // Parent layouts
 import OrdersLayout from './components/pages/orders/OrdersLayout';
@@ -30,11 +32,23 @@ import Header from './components/layout/Header';
 import LoadingScreen from './components/ui/LoadingScreen';
 import ErrorBoundary from './components/ErrorBoundary';
 
-// Redirects to /login when auth is enabled and no token is stored
+const AUTH_ENABLED = import.meta.env.VITE_AUTH_ENABLED === 'true';
+
+// Redirects to /login when auth is enabled and there is no active session.
 function RequireAuth({ children }) {
-  const authEnabled = import.meta.env.VITE_AUTH_ENABLED === 'true';
-  if (authEnabled && !localStorage.getItem('auth_token')) {
+  const { isAuthenticated } = useAuth();
+  if (AUTH_ENABLED && !isAuthenticated) {
     return <Navigate to="/login" replace />;
+  }
+  return children;
+}
+
+// Admin-only route guard. Non-admins are redirected home; the backend
+// (adminOnly middleware) is the real enforcement for the data itself.
+function AdminOnly({ children }) {
+  const { isAdmin } = useAuth();
+  if (AUTH_ENABLED && !isAdmin) {
+    return <Navigate to="/" replace />;
   }
   return children;
 }
@@ -134,6 +148,14 @@ function AppLayout() {
                 <Route path="docs" element={<RestockingDocs />} />
                 <Route path="settings" element={<Admin />} />
                 <Route path="history" element={<History />} />
+                <Route
+                  path="users"
+                  element={
+                    <AdminOnly>
+                      <Users />
+                    </AdminOnly>
+                  }
+                />
               </Route>
 
               <Route path="*" element={<Navigate to="/" replace />} />
