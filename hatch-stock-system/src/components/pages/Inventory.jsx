@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import { useStock } from '../../context/StockContext';
+import inventoryService from '../../services/inventory.service';
 
 export default function Inventory() {
-  const { data, addProduct, updateProduct, bulkImportProducts, updateWarehouseStock, bulkUpdateWarehouseStock, createBatch, updateBatch } = useStock();
+  const { data, addProduct, updateProduct, bulkImportProducts, updateWarehouseStock, bulkUpdateWarehouseStock, createBatch, updateBatch, transferWarehouseStock } = useStock();
   const [selectedWarehouse, setSelectedWarehouse] = useState('all');
   const [activeSubTab, setActiveSubTab] = useState('stock');
   const [loading, setLoading] = useState(false);
@@ -43,6 +44,17 @@ export default function Inventory() {
   // Edit Stock states
   const [editingStock, setEditingStock] = useState(null); // { warehouseId, sku, currentQty }
   const [editStockQty, setEditStockQty] = useState('');
+
+  // Warehouse-to-warehouse transfer states
+  const [showTransfer, setShowTransfer] = useState(false);
+  const [transferForm, setTransferForm] = useState({ fromWarehouseId: '', toWarehouseId: '', notes: '' });
+  const [transferQtys, setTransferQtys] = useState({}); // { [sku]: qtyString }
+  const [transferring, setTransferring] = useState(false);
+  const [transferError, setTransferError] = useState(null);
+  // Recent transfers history
+  const [showTransfers, setShowTransfers] = useState(false);
+  const [transfers, setTransfers] = useState([]);
+  const [transfersLoaded, setTransfersLoaded] = useState(false);
 
   // CSV Upload states
   const [showCsvUpload, setShowCsvUpload] = useState(false);
@@ -269,6 +281,70 @@ export default function Inventory() {
       setError(err.message || 'Failed to add stock');
     } finally {
       setLoading(false);
+    }
+  };
+
+  // ===== Warehouse-to-warehouse transfer =====
+  const openTransfer = () => {
+    const from = selectedWarehouse !== 'all' ? selectedWarehouse : (data.warehouses[0]?.id || '');
+    const to = data.warehouses.find(w => w.id !== from)?.id || '';
+    setTransferForm({ fromWarehouseId: from, toWarehouseId: to, notes: '' });
+    setTransferQtys({});
+    setTransferError(null);
+    setShowTransfer(true);
+  };
+
+  const refreshTransfers = async () => {
+    try {
+      const list = await inventoryService.getTransfers();
+      setTransfers(list);
+      setTransfersLoaded(true);
+    } catch (err) {
+      // history is best-effort; don't block the page
+      setTransfersLoaded(true);
+    }
+  };
+
+  const toggleTransfers = () => {
+    const next = !showTransfers;
+    setShowTransfers(next);
+    if (next && !transfersLoaded) refreshTransfers();
+  };
+
+  const handleTransferSubmit = async () => {
+    const { fromWarehouseId, toWarehouseId, notes } = transferForm;
+    if (!fromWarehouseId || !toWarehouseId) return;
+    if (fromWarehouseId === toWarehouseId) {
+      setTransferError('Source and destination warehouses must differ');
+      return;
+    }
+    const sourceStock = data.stock[fromWarehouseId] || {};
+    const items = [];
+    for (const [sku, raw] of Object.entries(transferQtys)) {
+      const qty = parseInt(raw) || 0;
+      if (qty <= 0) continue;
+      const available = sourceStock[sku] || 0;
+      if (qty > available) {
+        setTransferError(`Cannot transfer ${qty} of ${sku}: only ${available} available`);
+        return;
+      }
+      items.push({ sku, quantity: qty });
+    }
+    if (items.length === 0) {
+      setTransferError('Enter a quantity for at least one product');
+      return;
+    }
+
+    setTransferring(true);
+    setTransferError(null);
+    try {
+      await transferWarehouseStock({ fromWarehouseId, toWarehouseId, items, notes: notes || undefined });
+      setShowTransfer(false);
+      if (transfersLoaded) refreshTransfers();
+    } catch (err) {
+      setTransferError(err.response?.data?.error || err.message || 'Transfer failed');
+    } finally {
+      setTransferring(false);
     }
   };
 
@@ -540,6 +616,14 @@ export default function Inventory() {
             >
               + Add Stock
             </button>
+            <button
+              onClick={openTransfer}
+              disabled={data.warehouses.length < 2}
+              title={data.warehouses.length < 2 ? 'Needs at least two warehouses' : 'Transfer stock between warehouses'}
+              className="flex-1 sm:flex-none px-3 py-2.5 bg-blue-600 text-white rounded text-sm font-medium hover:bg-blue-500 disabled:opacity-50"
+            >
+              Transfer
+            </button>
             <label className="flex-1 sm:flex-none px-3 py-2.5 bg-teal-600 text-white rounded text-sm font-medium hover:bg-teal-500 cursor-pointer text-center">
               CSV
               <input
@@ -711,6 +795,109 @@ export default function Inventory() {
           </div>
         </div>
       )}
+
+      {/* Transfer Stock Modal */}
+      {showTransfer && (() => {
+        const { fromWarehouseId, toWarehouseId } = transferForm;
+        const sourceStock = data.stock[fromWarehouseId] || {};
+        const sourceRows = Object.entries(sourceStock)
+          .filter(([, qty]) => qty > 0)
+          .map(([sku, qty]) => ({ sku, qty, name: data.products.find(p => p.sku === sku)?.name || sku }))
+          .sort((a, b) => a.name.localeCompare(b.name));
+        const totalToMove = Object.values(transferQtys).reduce((sum, v) => sum + (parseInt(v) || 0), 0);
+        return (
+          <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="font-medium text-zinc-200">Transfer Stock Between Warehouses</h3>
+              <button onClick={() => setShowTransfer(false)} className="text-zinc-500 hover:text-zinc-300 text-xl">x</button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs text-zinc-500 mb-1">From *</label>
+                <select
+                  value={fromWarehouseId}
+                  onChange={e => { setTransferForm({ ...transferForm, fromWarehouseId: e.target.value }); setTransferQtys({}); }}
+                  className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm"
+                >
+                  {data.warehouses.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs text-zinc-500 mb-1">To *</label>
+                <select
+                  value={toWarehouseId}
+                  onChange={e => setTransferForm({ ...transferForm, toWarehouseId: e.target.value })}
+                  className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm"
+                >
+                  <option value="">Select destination...</option>
+                  {data.warehouses.filter(w => w.id !== fromWarehouseId).map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
+                </select>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs text-zinc-500 mb-2">Products to move (max = available at source)</label>
+              {sourceRows.length === 0 ? (
+                <p className="text-zinc-500 text-sm">No stock available at the source warehouse.</p>
+              ) : (
+                <div className="max-h-72 overflow-y-auto border border-zinc-800 rounded divide-y divide-zinc-800">
+                  {sourceRows.map(row => (
+                    <div key={row.sku} className="flex items-center justify-between gap-3 px-3 py-2">
+                      <div className="min-w-0">
+                        <p className="text-sm text-zinc-200 truncate">{row.name}</p>
+                        <p className="text-xs text-zinc-500">{row.sku} · {row.qty} available</p>
+                      </div>
+                      <input
+                        type="number"
+                        min="0"
+                        max={row.qty}
+                        value={transferQtys[row.sku] || ''}
+                        onChange={e => setTransferQtys({ ...transferQtys, [row.sku]: e.target.value })}
+                        placeholder="0"
+                        className="w-20 bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-sm text-right"
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div>
+              <label className="block text-xs text-zinc-500 mb-1">Notes</label>
+              <input
+                type="text"
+                value={transferForm.notes}
+                onChange={e => setTransferForm({ ...transferForm, notes: e.target.value })}
+                placeholder="Optional — reason / reference"
+                className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm"
+              />
+            </div>
+
+            {transferError && (
+              <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 text-red-400 text-sm">
+                {transferError}
+              </div>
+            )}
+
+            <div className="flex gap-3 pt-4 border-t border-zinc-800">
+              <button
+                onClick={handleTransferSubmit}
+                disabled={!toWarehouseId || totalToMove <= 0 || transferring}
+                className="px-4 py-2 bg-blue-600 text-white rounded text-sm font-medium hover:bg-blue-500 disabled:opacity-50"
+              >
+                {transferring ? 'Transferring...' : `Transfer${totalToMove > 0 ? ` ${totalToMove} unit${totalToMove === 1 ? '' : 's'}` : ''}`}
+              </button>
+              <button
+                onClick={() => setShowTransfer(false)}
+                className="px-4 py-2 bg-zinc-700 text-zinc-300 rounded text-sm hover:bg-zinc-600"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Edit Stock Modal */}
       {editingStock && (
@@ -1310,6 +1497,42 @@ export default function Inventory() {
               </table>
             </div>
           )}
+
+          {/* Recent warehouse-to-warehouse transfers */}
+          <div className="pt-2">
+            <button
+              onClick={toggleTransfers}
+              className="text-sm text-zinc-400 hover:text-zinc-200"
+            >
+              {showTransfers ? '▾' : '▸'} Recent transfers
+            </button>
+            {showTransfers && (
+              <div className="mt-3 border border-zinc-800 rounded-lg divide-y divide-zinc-800">
+                {!transfersLoaded ? (
+                  <p className="px-4 py-3 text-sm text-zinc-500">Loading…</p>
+                ) : transfers.length === 0 ? (
+                  <p className="px-4 py-3 text-sm text-zinc-500">No transfers recorded yet.</p>
+                ) : (
+                  transfers.map(t => {
+                    const itemCount = Array.isArray(t.items) ? t.items.reduce((s, i) => s + (i.quantity || 0), 0) : 0;
+                    const skuCount = Array.isArray(t.items) ? t.items.length : 0;
+                    return (
+                      <div key={t.id} className="px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1">
+                        <div className="text-sm text-zinc-200">
+                          <span className="text-zinc-400">{t.fromWarehouse?.name || t.fromWarehouseId}</span>
+                          <span className="text-zinc-600 mx-2">→</span>
+                          <span className="text-zinc-400">{t.toWarehouse?.name || t.toWarehouseId}</span>
+                          <span className="text-zinc-500 ml-3">{itemCount} unit{itemCount === 1 ? '' : 's'} · {skuCount} SKU{skuCount === 1 ? '' : 's'}</span>
+                          {t.notes && <span className="text-zinc-600 ml-3 italic">{t.notes}</span>}
+                        </div>
+                        <div className="text-xs text-zinc-500">{new Date(t.createdAt).toLocaleString()}</div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            )}
+          </div>
         </>
       )}
 

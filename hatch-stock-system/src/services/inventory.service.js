@@ -160,6 +160,30 @@ export const inventoryService = {
     return response.data;
   },
 
+  /**
+   * Transfer stock between two warehouses (atomic)
+   * @param {Object} transfer - { fromWarehouseId, toWarehouseId, items: [{ sku, quantity }], notes }
+   */
+  transferWarehouseStock: async ({ fromWarehouseId, toWarehouseId, items, notes }) => {
+    const response = await api.post('/inventory/transfers', {
+      fromWarehouseId,
+      toWarehouseId,
+      items,
+      notes,
+    });
+    return response.data;
+  },
+
+  /**
+   * Get recent warehouse-to-warehouse transfers
+   * @param {string} warehouseId - Optional filter (matches either side)
+   */
+  getTransfers: async (warehouseId = null) => {
+    const params = warehouseId ? { warehouseId } : {};
+    const response = await api.get('/inventory/transfers', { params });
+    return response.data;
+  },
+
   // ========== STOCK CHECK / RESTOCK ==========
 
   /**
