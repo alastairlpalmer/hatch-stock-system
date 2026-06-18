@@ -722,6 +722,35 @@ export function StockProvider({ children }) {
     return result;
   }, [data, isOfflineMode, saveData]);
 
+  const transferWarehouseStock = useCallback(async ({ fromWarehouseId, toWarehouseId, items, notes }) => {
+    if (isOfflineMode) {
+      const stock = { ...data.stock };
+      stock[fromWarehouseId] = { ...(stock[fromWarehouseId] || {}) };
+      stock[toWarehouseId] = { ...(stock[toWarehouseId] || {}) };
+      items.forEach(item => {
+        stock[fromWarehouseId][item.sku] = Math.max(0, (stock[fromWarehouseId][item.sku] || 0) - item.quantity);
+        stock[toWarehouseId][item.sku] = (stock[toWarehouseId][item.sku] || 0) + item.quantity;
+      });
+      await saveData({ ...data, stock });
+      return { id: `transfer-${Date.now()}`, fromWarehouseId, toWarehouseId, items, notes };
+    }
+    const result = await inventoryService.transferWarehouseStock({ fromWarehouseId, toWarehouseId, items, notes });
+    // Refresh both warehouses' stock after the move
+    const [fromStock, toStock] = await Promise.all([
+      inventoryService.getWarehouseStock(fromWarehouseId),
+      inventoryService.getWarehouseStock(toWarehouseId),
+    ]);
+    setData(prev => ({
+      ...prev,
+      stock: {
+        ...prev.stock,
+        [fromWarehouseId]: fromStock[fromWarehouseId] || {},
+        [toWarehouseId]: toStock[toWarehouseId] || {},
+      },
+    }));
+    return result;
+  }, [data, isOfflineMode, saveData]);
+
   const loadRemovalHistory = useCallback(async (filters = {}) => {
     if (isOfflineMode) {
       return data.removals;
@@ -1080,6 +1109,7 @@ export function StockProvider({ children }) {
 
     // Stock movement operations
     recordStockRemoval,
+    transferWarehouseStock,
     loadRemovalHistory,
     recordRestock,
     loadRestockHistory,

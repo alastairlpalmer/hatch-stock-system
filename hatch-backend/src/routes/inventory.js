@@ -119,6 +119,86 @@ router.post('/warehouse/bulk', asyncHandler(async (req, res) => {
   res.json({ updated: items.length, errors: [] });
 }));
 
+// ============ WAREHOUSE-TO-WAREHOUSE TRANSFERS ============
+
+export const transferSchema = z.object({
+  fromWarehouseId: z.string().min(1),
+  toWarehouseId: z.string().min(1),
+  items: z.array(z.object({ sku: skuSchema, quantity: positiveQty })).min(1),
+  notes: z.string().optional(),
+  performedBy: z.string().optional(),
+});
+
+// Record a transfer of stock between two warehouses (atomic).
+router.post('/transfers', asyncHandler(async (req, res) => {
+  const { fromWarehouseId, toWarehouseId, items, notes, performedBy } =
+    transferSchema.parse(req.body);
+
+  if (fromWarehouseId === toWarehouseId) {
+    return res.status(400).json({ error: 'Source and destination warehouses must differ' });
+  }
+
+  const transfer = await prisma.$transaction(async (tx) => {
+    // Pre-check source stock: applyStockDelta clamps at 0, so reject the whole
+    // transfer if any SKU is short rather than silently losing product.
+    for (const { sku, quantity } of items) {
+      const source = await tx.warehouseStock.findUnique({
+        where: { warehouseId_sku: { warehouseId: fromWarehouseId, sku } },
+      });
+      const available = source?.quantity ?? 0;
+      if (available < quantity) {
+        const err = new Error(
+          `Insufficient stock for ${sku} at source: have ${available}, need ${quantity}`
+        );
+        err.status = 400;
+        throw err;
+      }
+    }
+
+    for (const { sku, quantity } of items) {
+      await applyStockDelta(
+        tx, 'warehouseStock',
+        { warehouseId_sku: { warehouseId: fromWarehouseId, sku } },
+        { warehouseId: fromWarehouseId, sku },
+        -quantity,
+      );
+      await applyStockDelta(
+        tx, 'warehouseStock',
+        { warehouseId_sku: { warehouseId: toWarehouseId, sku } },
+        { warehouseId: toWarehouseId, sku },
+        quantity,
+      );
+    }
+
+    return tx.stockTransfer.create({
+      data: { fromWarehouseId, toWarehouseId, items, notes, performedBy },
+    });
+  });
+
+  res.json(transfer);
+}));
+
+// List recent transfers (optionally filtered to a warehouse, either side).
+router.get('/transfers', asyncHandler(async (req, res) => {
+  const { warehouseId } = req.query;
+
+  const where = warehouseId
+    ? { OR: [{ fromWarehouseId: warehouseId }, { toWarehouseId: warehouseId }] }
+    : {};
+
+  const transfers = await prisma.stockTransfer.findMany({
+    where,
+    include: {
+      fromWarehouse: { select: { id: true, name: true } },
+      toWarehouse: { select: { id: true, name: true } },
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 50,
+  });
+
+  res.json(transfers);
+}));
+
 // ============ LOCATION STOCK ============
 
 // Get location stock
