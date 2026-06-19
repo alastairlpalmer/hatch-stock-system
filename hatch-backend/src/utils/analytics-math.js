@@ -142,7 +142,12 @@ export function computeSuggestions(products, { portfolioMarginPct, periodDays: d
   const out = [];
   for (const p of products) {
     const velocity = p.units / days;
-    const m = p.marginPct != null ? p.marginPct : marginPct(p.revenue, p.cost);
+    // Margin is computed on paid vends only (free £0 vends excluded). Use the
+    // paid figures for both the rule and its (i) tooltip arithmetic so the
+    // numbers shown reconcile with the margin %.
+    const mRev = p.paidRevenue != null ? p.paidRevenue : p.revenue;
+    const mCost = p.paidCost != null ? p.paidCost : p.cost;
+    const m = p.marginPct != null ? p.marginPct : marginPct(mRev, mCost);
 
     // Rule A — high velocity, below-average margin → candidate for price increase
     if (
@@ -162,7 +167,7 @@ export function computeSuggestions(products, { portfolioMarginPct, periodDays: d
         calc:
           `Fires when velocity ≥ ${thresholds.priceIncreaseMinVelocity}/day AND margin% < portfolio average margin. ` +
           `Here: velocity = ${p.units} units ÷ ${f(days)} days = ${f2(velocity)}/day; ` +
-          `margin% = (${money(p.revenue)} − ${money(p.cost)}) ÷ ${money(p.revenue)} = ${f(m)}%; ` +
+          `margin% = (${money(mRev)} − ${money(mCost)}) ÷ ${money(mRev)} = ${f(m)}%; ` +
           `portfolio average margin = ${f(portfolioMarginPct)}%.`,
         metrics: { velocity, marginPct: m, portfolioMarginPct, units: p.units },
       });
