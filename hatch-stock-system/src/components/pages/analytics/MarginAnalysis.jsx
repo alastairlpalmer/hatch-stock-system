@@ -17,16 +17,41 @@ function MarginTable({ rows, empty }) {
       </thead>
       <tbody>
         {rows.map((p) => {
-          const avgPrice = p.units > 0 ? p.revenue / p.units : 0;
-          const avgCost = p.units > 0 ? p.cost / p.units : 0;
+          // Avg price/cost are over PAID units only — free £0 vends are excluded
+          // from the margin basis so they don't drag the average toward zero.
+          const basis = p.paidUnits ?? p.units;
+          const avgPrice = basis > 0 ? p.revenue / basis : 0;
+          const avgCost = basis > 0 ? p.cost / basis : 0;
           const low = p.marginPct != null && p.marginPct < 25;
           return (
             <tr key={p.sku} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
-              <td className="px-6 py-3 text-zinc-200">{p.name}</td>
-              <td className="text-right px-4 py-3 text-zinc-300">{p.units.toLocaleString('en-GB')}</td>
-              <td className="text-right px-4 py-3 text-zinc-300">{formatCurrency(avgPrice)}</td>
-              <td className="text-right px-4 py-3 text-zinc-500">{formatCurrency(avgCost)}</td>
-              <td className={`text-right px-6 py-3 ${low ? 'text-red-400' : 'text-zinc-300'}`}>
+              <td className="px-6 py-3 text-zinc-200">
+                {p.name}
+                {(p.freeVends > 0 || p.discountedVends > 0) && (
+                  <div className="mt-1 flex flex-wrap gap-1.5">
+                    {p.freeVends > 0 && (
+                      <span
+                        className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300"
+                        title="Free £0 vends (e.g. test or sample dispenses). Excluded from the margin calculation, tracked here."
+                      >
+                        {p.freeVends} free vend{p.freeVends === 1 ? '' : 's'}
+                      </span>
+                    )}
+                    {p.discountedVends > 0 && (
+                      <span
+                        className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300"
+                        title="Discounted / promotional vends (paid, but below list price). Included in margin."
+                      >
+                        {p.discountedVends} promo
+                      </span>
+                    )}
+                  </div>
+                )}
+              </td>
+              <td className="text-right px-4 py-3 text-zinc-300 align-top">{p.units.toLocaleString('en-GB')}</td>
+              <td className="text-right px-4 py-3 text-zinc-300 align-top">{formatCurrency(avgPrice)}</td>
+              <td className="text-right px-4 py-3 text-zinc-500 align-top">{formatCurrency(avgCost)}</td>
+              <td className={`text-right px-6 py-3 align-top ${low ? 'text-red-400' : 'text-zinc-300'}`}>
                 {p.marginPct != null ? `${p.marginPct.toFixed(1)}%` : '—'}
               </td>
             </tr>
@@ -55,7 +80,7 @@ export default function MarginAnalysis({ margin }) {
           Portfolio Margin
           <InfoTip
             width="w-72"
-            text="(Total revenue − total cost) ÷ total revenue across all products in scope. This is the benchmark the 'price increase' suggestions compare each product against. Cost comes from each sale's recorded cost price; sales with no cost contribute £0 cost."
+            text="(Total revenue − total cost) ÷ total revenue across all products in scope, counting paid sales only. Free £0 vends (e.g. test or sample dispenses) are excluded so giveaways don't distort the benchmark the 'price increase' suggestions compare each product against. Cost comes from each sale's recorded cost price; sales with no cost contribute £0 cost."
           />
         </div>
       </div>
@@ -67,7 +92,7 @@ export default function MarginAnalysis({ margin }) {
               Lowest Margin
               <InfoTip
                 width="w-72"
-                text="Products with the lowest margin % (sold in the period, with a known cost). Margin % = (revenue − cost) ÷ revenue. Values under 25% are highlighted red."
+                text="Products with the lowest margin % (sold in the period, with a known cost). Margin % = (revenue − cost) ÷ revenue, on paid sales only — free £0 vends are excluded so test/sample dispenses don't show a false negative margin. Free and promo vend counts are flagged on each row. Avg price/cost are per paid unit. Values under 25% are highlighted red."
               />
             </h3>
           </div>

@@ -144,7 +144,16 @@ async function productStats({ startDate, endDate }, scope) {
            COALESCE(SUM(s.charged), 0)::float                            AS revenue,
            COALESCE(SUM(COALESCE(s.cost_price, 0) * s.quantity), 0)::float AS cost,
            COALESCE(SUM(s.quantity), 0)::int                             AS units,
-           COUNT(*)::int                                                 AS transactions
+           COUNT(*)::int                                                 AS transactions,
+           -- Margin basis: PAID vends only (charged > 0). Free £0 vends — early
+           -- test dispenses and ongoing free vends — carry full cost but no
+           -- revenue, so including them turns margin wildly negative and makes
+           -- the avg "price" meaningless. Tracked separately via free_vends.
+           COALESCE(SUM(s.charged) FILTER (WHERE s.charged > 0), 0)::float                            AS paid_revenue,
+           COALESCE(SUM(COALESCE(s.cost_price, 0) * s.quantity) FILTER (WHERE s.charged > 0), 0)::float AS paid_cost,
+           COALESCE(SUM(s.quantity) FILTER (WHERE s.charged > 0), 0)::int                             AS paid_units,
+           COUNT(*) FILTER (WHERE s.charged = 0)::int                                                 AS free_vends,
+           COUNT(*) FILTER (WHERE COALESCE(s.discount_value, 0) > 0 AND s.charged > 0)::int           AS discounted_vends
     FROM sales s
     LEFT JOIN products p ON p.sku = s.sku
     WHERE ${where}
@@ -162,7 +171,13 @@ async function productStats({ startDate, endDate }, scope) {
     profit: r.revenue - r.cost,
     units: r.units,
     transactions: r.transactions,
-    marginPct: marginPct(r.revenue, r.cost),
+    // Paid-only basis drives margin; free/promo vends are counted for callouts.
+    paidRevenue: r.paid_revenue,
+    paidCost: r.paid_cost,
+    paidUnits: r.paid_units,
+    freeVends: r.free_vends,
+    discountedVends: r.discounted_vends,
+    marginPct: marginPct(r.paid_revenue, r.paid_cost),
     stockOnHand: stock ? stock.get(r.sku) ?? 0 : null,
   }));
 
@@ -188,6 +203,11 @@ async function productStats({ startDate, endDate }, scope) {
           profit: 0,
           units: 0,
           transactions: 0,
+          paidRevenue: 0,
+          paidCost: 0,
+          paidUnits: 0,
+          freeVends: 0,
+          discountedVends: 0,
           marginPct: null,
           stockOnHand: stock.get(sku),
         });
@@ -251,9 +271,12 @@ export async function getDashboard(query = {}) {
     namesWithNoSales(range, scope.names),
   ]);
 
-  const sumRevenue = products.reduce((a, p) => a + p.revenue, 0);
-  const sumCost = products.reduce((a, p) => a + p.cost, 0);
-  const portfolioMarginPct = marginPct(sumRevenue, sumCost);
+  // Portfolio margin is computed on the same paid-only basis as per-product
+  // margin (free £0 vends excluded) so the "vs portfolio average" comparison in
+  // the suggestion rules stays apples-to-apples.
+  const sumPaidRevenue = products.reduce((a, p) => a + p.paidRevenue, 0);
+  const sumPaidCost = products.reduce((a, p) => a + p.paidCost, 0);
+  const portfolioMarginPct = marginPct(sumPaidRevenue, sumPaidCost);
 
   const withSales = products.filter((p) => p.units > 0);
   const topByUnits = [...withSales].sort((a, b) => b.units - a.units).slice(0, 10);
@@ -273,9 +296,23 @@ export async function getDashboard(query = {}) {
   }
   const categories = [...catMap.values()].sort((a, b) => b.units - a.units);
 
+  // Margin-table rows expose the paid-only basis (revenue/cost/units) so the
+  // displayed avg price/cost reflect real paid sales, plus free/promo counts the
+  // UI surfaces as badges. Total units stay available for the volume sort.
+  const marginRow = (p) => ({
+    sku: p.sku,
+    name: p.name,
+    units: p.units,
+    paidUnits: p.paidUnits,
+    revenue: p.paidRevenue,
+    cost: p.paidCost,
+    marginPct: p.marginPct,
+    freeVends: p.freeVends,
+    discountedVends: p.discountedVends,
+  });
   const marginable = withSales.filter((p) => p.marginPct != null);
-  const byLowestMargin = [...marginable].sort((a, b) => a.marginPct - b.marginPct).slice(0, 10);
-  const byHighestVolume = [...withSales].sort((a, b) => b.units - a.units).slice(0, 10);
+  const byLowestMargin = [...marginable].sort((a, b) => a.marginPct - b.marginPct).slice(0, 10).map(marginRow);
+  const byHighestVolume = [...withSales].sort((a, b) => b.units - a.units).slice(0, 10).map(marginRow);
 
   const stockResolved = scope.isAll || (scope.locationIds && scope.locationIds.length > 0);
   const suggestions = days ? computeSuggestions(products, { portfolioMarginPct, periodDays: days }) : [];
