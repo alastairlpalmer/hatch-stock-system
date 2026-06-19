@@ -1,0 +1,13 @@
+# Repo-root ignores. The two apps (hatch-backend, hatch-stock-system) keep their
+# own .gitignore for app-specific build output; this file covers things that
+# appear at the repo root or span both apps.
+
+# Dependencies — never commit installed packages (covers root + nested).
+node_modules/
+
+# Local scratch / read-only DB probe scripts. These are dev throwaways (several
+# hit the live database) and must not ship in the repo.
+hatch-backend/scripts/tmp-*
+
+# One-off whole-app dump kept locally as a backup, not part of the build.
+hatch-stock-system/src/FULL_APP.jsx
