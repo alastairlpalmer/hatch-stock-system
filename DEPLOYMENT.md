@@ -46,9 +46,17 @@ In Railway dashboard, go to your project → **Variables** tab and add:
 |----------|-------|
 | `PORT` | `8000` |
 | `NODE_ENV` | `production` |
-| `DATABASE_URL` | `postgresql://postgres:YOUR_PASSWORD@db.YOUR_PROJECT.supabase.co:5432/postgres` |
+| `DATABASE_URL` | `postgresql://postgres.YOUR_PROJECT:YOUR_PASSWORD@YOUR_REGION.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=10` |
+| `DIRECT_DATABASE_URL` | `postgresql://postgres:YOUR_PASSWORD@db.YOUR_PROJECT.supabase.co:5432/postgres` (migrations only) |
 | `FRONTEND_URL` | `https://your-app.vercel.app` (update after Vercel deploy) |
 | `JWT_SECRET` | `your-secure-random-string` |
+
+> ⚠️ **`DATABASE_URL` must use the Transaction Pooler (port `6543`) with
+> `?pgbouncer=true&connection_limit=10`** — not the direct connection or the
+> session pooler (port `5432`). The session pooler is capped at ~15 clients and
+> Prisma's default pool exhausts it, causing `EMAXCONNSESSION` errors that
+> silently halt the VendLive sales poll (the June 2026 outage). See
+> `hatch-backend/.env.example` for the full explanation.
 
 ### 2.4 Deploy
 Railway will automatically deploy. Note your backend URL (e.g., `https://hatch-backend-production.up.railway.app`)
@@ -134,7 +142,10 @@ FRONTEND_URL=https://your-app.vercel.app,https://yourdomain.com
 ```env
 PORT=8000
 NODE_ENV=production
-DATABASE_URL=postgresql://postgres:PASSWORD@db.PROJECT.supabase.co:5432/postgres
+# DATABASE_URL: Transaction Pooler (port 6543) + pgbouncer + bounded pool.
+DATABASE_URL=postgresql://postgres.PROJECT:PASSWORD@YOUR_REGION.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=10
+# DIRECT_DATABASE_URL: direct connection, used only by prisma migrate / db push.
+DIRECT_DATABASE_URL=postgresql://postgres:PASSWORD@db.PROJECT.supabase.co:5432/postgres
 FRONTEND_URL=https://your-frontend-domain.com
 JWT_SECRET=your-secure-secret-key
 ```
@@ -157,6 +168,17 @@ VITE_DEBUG_MODE=false
 - Verify your Supabase project is active (not paused)
 - Check the DATABASE_URL is correctly formatted
 - Ensure password special characters are URL-encoded
+
+### `EMAXCONNSESSION` / "max clients reached in session mode" (pool exhaustion)
+Railway logs fill with `FATAL: (EMAXCONNSESSION) max clients reached in session
+mode - max clients are limited to pool_size: 15` and queries fail intermittently
+(including the VendLive sales poll, which then silently stops ingesting).
+- **Cause:** `DATABASE_URL` is pointing at the **session pooler (port 5432)** or
+  the direct connection. The session pooler caps at ~15 clients and Prisma's
+  default pool `(cores * 2) + 1` exhausts it.
+- **Fix:** switch `DATABASE_URL` to the **Transaction Pooler (port `6543`)** with
+  `?pgbouncer=true&connection_limit=10`, then redeploy. A healthy boot logs
+  `VendLive schedulers started` with no `EMAXCONNSESSION` lines.
 
 ### Build Failures
 - Check Railway/Vercel build logs for specific errors
