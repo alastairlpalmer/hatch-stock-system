@@ -91,11 +91,32 @@ export const inventoryService = {
 
   /**
    * Bulk set location stock (from stock check or screenshot import)
-   * @param {string} locationId 
+   * @param {string} locationId
    * @param {Array} items - [{ sku, quantity }]
    */
   setLocationStock: async (locationId, items) => {
     const response = await api.post(`/inventory/locations/${locationId}/set`, { items });
+    return response.data;
+  },
+
+  /**
+   * Get per-location ordering config (lead time + cover days).
+   * Returns { resolved, overrides, defaults }.
+   * @param {string} locationId
+   */
+  getOrderingConfig: async (locationId) => {
+    const response = await api.get(`/inventory/locations/${locationId}/ordering`);
+    return response.data;
+  },
+
+  /**
+   * Set per-location ordering config. Pass null for a field to clear the
+   * override and fall back to the default.
+   * @param {string} locationId
+   * @param {Object} config - { leadTimeDays, coverDays }
+   */
+  setOrderingConfig: async (locationId, config) => {
+    const response = await api.put(`/inventory/locations/${locationId}/ordering`, config);
     return response.data;
   },
 

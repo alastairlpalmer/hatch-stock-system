@@ -76,6 +76,16 @@ export const salesService = {
     const response = await api.post('/sales/deduplicate', { dryRun });
     return response.data;
   },
+
+  /**
+   * Diagnose how reliably sales resolve to a locationId (machine mapping vs
+   * name fallback vs unresolved) — readiness check for per-location velocity.
+   * @param {Object} params - { startDate, endDate }
+   */
+  getLocationResolution: async (params = {}) => {
+    const response = await api.get('/sales/location-resolution', { params });
+    return response.data;
+  },
 };
 
 export default salesService;

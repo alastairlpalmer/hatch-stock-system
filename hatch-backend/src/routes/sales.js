@@ -5,6 +5,7 @@ import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { findLegacyDuplicates } from '../utils/sales-dedupe.js';
 import { guessFreshMeal } from '../services/meal-classifier.js';
+import { SALE_LOCATION_JOINS } from '../utils/sales-location.js';
 
 const router = express.Router();
 
@@ -250,6 +251,52 @@ router.get('/location-names', asyncHandler(async (req, res) => {
     firstSale: r.first_sale,
     lastSale: r.last_sale,
   })));
+}));
+
+// Diagnose how reliably sales resolve to a Hatch locationId — the prerequisite
+// for per-location sales velocity in order generation. Reports the split by
+// resolution path (machine mapping vs name fallback vs unresolved) and lists the
+// top unresolved names / unmapped machine ids so the admin knows what to fix
+// (add a machine mapping, or merge an alias name onto a Location's name).
+router.get('/location-resolution', asyncHandler(async (req, res) => {
+  const { startDate, endDate } = req.query;
+  const conditions = [Prisma.sql`s.is_refunded = false`];
+  if (startDate) conditions.push(Prisma.sql`s."timestamp" >= ${new Date(startDate)}`);
+  if (endDate) conditions.push(Prisma.sql`s."timestamp" <= ${new Date(endDate)}`);
+  const where = Prisma.join(conditions, ' AND ');
+
+  const [summary] = await prisma.$queryRaw`
+    SELECT
+      COUNT(*)::int                                                                AS total,
+      COUNT(*) FILTER (WHERE vmm.location_id IS NOT NULL)::int                      AS via_machine,
+      COUNT(*) FILTER (WHERE vmm.location_id IS NULL AND lname.id IS NOT NULL)::int AS via_name,
+      COUNT(*) FILTER (WHERE vmm.location_id IS NULL AND lname.id IS NULL)::int     AS unresolved
+    FROM sales s
+    ${SALE_LOCATION_JOINS}
+    WHERE ${where}
+  `;
+
+  const unresolved = await prisma.$queryRaw`
+    SELECT
+      COALESCE(s.location_name, 'Unknown') AS location_name,
+      s.vendlive_machine_id                AS vendlive_machine_id,
+      COUNT(*)::int                        AS sales
+    FROM sales s
+    ${SALE_LOCATION_JOINS}
+    WHERE ${where} AND vmm.location_id IS NULL AND lname.id IS NULL
+    GROUP BY 1, 2
+    ORDER BY sales DESC
+    LIMIT 50
+  `;
+
+  res.json({
+    summary,
+    unresolved: unresolved.map(r => ({
+      locationName: r.location_name,
+      vendliveMachineId: r.vendlive_machine_id,
+      sales: r.sales,
+    })),
+  });
 }));
 
 // Merge historical location names: rename sales recorded under alias names

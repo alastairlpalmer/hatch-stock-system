@@ -85,6 +85,11 @@ model Location {
   address   String?
   createdAt DateTime @default(now()) @map("created_at")
 
+  // Ordering parameters (nullable overrides; null -> code defaults in
+  // src/config/ordering.js). See manual-sql/006_ordering_config.sql.
+  leadTimeDays Int? @map("lead_time_days")
+  coverDays    Int? @map("cover_days")
+
   // Relations
   stock              LocationStock[]
   configs            LocationConfig[]

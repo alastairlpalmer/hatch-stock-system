@@ -3,6 +3,7 @@ import { z } from 'zod';
 import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { categorizeBatchesByExpiry } from '../utils/expiry.js';
+import { resolveOrderingConfig, DEFAULT_LEAD_TIME_DAYS, DEFAULT_COVER_DAYS } from '../config/ordering.js';
 
 const router = express.Router();
 
@@ -298,6 +299,45 @@ router.put('/locations/:id/config/:sku', asyncHandler(async (req, res) => {
   });
 
   res.json(config);
+}));
+
+// Get per-location ordering config (lead time + cover days). Returns the
+// resolved values (defaults applied), the raw overrides, and the defaults — so
+// the UI can show whether a location is on the default or a custom value.
+router.get('/locations/:id/ordering', asyncHandler(async (req, res) => {
+  const location = await prisma.location.findUnique({
+    where: { id: req.params.id },
+    select: { leadTimeDays: true, coverDays: true },
+  });
+  if (!location) return res.status(404).json({ error: 'Location not found' });
+
+  res.json({
+    resolved: resolveOrderingConfig(location),
+    overrides: { leadTimeDays: location.leadTimeDays, coverDays: location.coverDays },
+    defaults: { leadTimeDays: DEFAULT_LEAD_TIME_DAYS, coverDays: DEFAULT_COVER_DAYS },
+  });
+}));
+
+// Update per-location ordering config. Send null for a field to clear the
+// override and fall back to the code default.
+const orderingConfigSchema = z.object({
+  leadTimeDays: z.coerce.number().int().min(0).nullish(),
+  coverDays: z.coerce.number().int().min(0).nullish(),
+});
+
+router.put('/locations/:id/ordering', asyncHandler(async (req, res) => {
+  const data = orderingConfigSchema.parse(req.body);
+  const location = await prisma.location.update({
+    where: { id: req.params.id },
+    data,
+    select: { leadTimeDays: true, coverDays: true },
+  });
+
+  res.json({
+    resolved: resolveOrderingConfig(location),
+    overrides: { leadTimeDays: location.leadTimeDays, coverDays: location.coverDays },
+    defaults: { leadTimeDays: DEFAULT_LEAD_TIME_DAYS, coverDays: DEFAULT_COVER_DAYS },
+  });
 }));
 
 // ============ BATCHES ============
