@@ -1,5 +1,21 @@
 import React, { useState } from 'react';
 import { useStock } from '../../context/StockContext';
+import ordersService from '../../services/orders.service';
+import vendliveService from '../../services/vendlive.service';
+
+// Compact "2h ago" / "just now" formatter for sync timestamps.
+function formatRelativeTime(ts) {
+  if (!ts) return 'never';
+  const diffMs = Date.now() - new Date(ts).getTime();
+  if (!Number.isFinite(diffMs)) return 'unknown';
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ago`;
+}
 
 function OrderCard({ order, data, onEdit, onDelete }) {
   const [expanded, setExpanded] = useState(false);
@@ -155,10 +171,14 @@ export default function Orders() {
   // Generate Order states
   const [showGenerateOrder, setShowGenerateOrder] = useState(false);
   const [suggestedItems, setSuggestedItems] = useState([]);
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false);
+  const [suggestionMeta, setSuggestionMeta] = useState(null); // { leadTimeDays, coverDays, velocityWindows }
   const [selectedLocation, setSelectedLocation] = useState('');
   const [orderSupplier, setOrderSupplier] = useState('');
   const [orderNotes, setOrderNotes] = useState('');
   const [generatingPdf, setGeneratingPdf] = useState(false);
+  const [stockFreshness, setStockFreshness] = useState([]); // [{ locationId, mapped, lastSyncedAt }]
+  const [syncingStock, setSyncingStock] = useState(false);
 
   const [form, setForm] = useState({
     supplierId: '',
@@ -197,94 +217,76 @@ export default function Orders() {
     setInvoiceError(null);
   };
 
-  // Generate Order - Analyze low stock and suggest items
-  // Only suggests items where shortage >= 50% of maxStock
-  // Rounds order quantities up to box sizes (unitsPerBox)
-  const analyzeAndSuggestOrder = (locationId) => {
-    const location = data.locations.find(l => l.id === locationId);
-    if (!location) return [];
-
-    const locStock = data.locationStock[locationId] || {};
-    const locConfig = data.locationConfig[locationId] || {};
-    const assignedItems = location.assignedItems || [];
-
-    const suggestions = [];
-
-    const locationProducts = assignedItems.length > 0
-      ? data.products.filter(p => assignedItems.includes(p.sku))
-      : data.products;
-
-    for (const product of locationProducts) {
-      const currentStock = locStock[product.sku] || 0;
-      const config = locConfig[product.sku] || {};
-      const minStock = config.minStock || 0;
-      const maxStock = config.maxStock || 0;
-      const unitsPerBox = product.unitsPerBox || 1;
-
-      // Skip if no maxStock is configured
-      if (maxStock <= 0) continue;
-
-      // Calculate shortage
-      const shortage = maxStock - currentStock;
-      const shortagePercentage = (shortage / maxStock) * 100;
-
-      // Only suggest if shortage >= 50% of maxStock
-      if (shortagePercentage < 50) continue;
-
-      // Determine priority based on current stock vs minStock
-      let priority = 'normal';
-      if (minStock > 0 && currentStock <= minStock) {
-        priority = 'critical';
-      } else if (minStock > 0 && currentStock <= minStock * 1.5) {
-        priority = 'warning';
-      } else {
-        priority = 'warning'; // Still warning since it's below 50% threshold
-      }
-
-      // Round up to nearest box size
-      const rawOrderQty = shortage;
-      const boxesNeeded = Math.ceil(rawOrderQty / unitsPerBox);
-      const orderQty = boxesNeeded * unitsPerBox;
-
-      suggestions.push({
-        sku: product.sku,
-        name: product.name,
-        category: product.category,
-        currentStock,
-        minStock,
-        maxStock,
-        shortage,
-        shortagePercentage: Math.round(shortagePercentage),
-        unitsPerBox,
-        boxesNeeded,
-        suggestedQty: rawOrderQty,
-        orderQty,
-        unitPrice: product.unitCost || 0,
-        priority,
-        selected: true
-      });
+  // Fetch suggestions from the server engine (velocity / days-of-cover model,
+  // Frive fresh meals collapsed into meal-type groups). Each line is tagged with
+  // a stable id, an editable unitPrice (from unit cost) and selected=true.
+  const fetchSuggestions = async (locationId) => {
+    if (!locationId) {
+      setSuggestedItems([]);
+      setSuggestionMeta(null);
+      return;
     }
+    setSuggestionsLoading(true);
+    try {
+      const res = await ordersService.generateSuggestions(locationId);
+      setSuggestionMeta({
+        leadTimeDays: res.leadTimeDays,
+        coverDays: res.coverDays,
+        velocityWindows: res.velocityWindows,
+      });
+      setSuggestedItems((res.suggestions || []).map(s => ({
+        ...s,
+        id: s.type === 'freshMealGroup' ? `frive:${s.mealType}` : s.sku,
+        category: s.category || (s.type === 'freshMealGroup' ? 'Fresh Meal' : 'Other'),
+        unitPrice: s.unitCost ?? 0,
+        selected: true,
+      })));
+    } catch (err) {
+      console.error('Failed to load order suggestions:', err);
+      setSuggestedItems([]);
+      setSuggestionMeta(null);
+    } finally {
+      setSuggestionsLoading(false);
+    }
+  };
 
-    return suggestions.sort((a, b) => {
-      if (a.priority === 'critical' && b.priority !== 'critical') return -1;
-      if (b.priority === 'critical' && a.priority !== 'critical') return 1;
-      // Then sort by shortage percentage (highest first)
-      return b.shortagePercentage - a.shortagePercentage;
-    });
+  const loadStockFreshness = async () => {
+    try {
+      setStockFreshness(await vendliveService.getStockFreshness());
+    } catch (err) {
+      console.error('Failed to load stock freshness:', err);
+    }
+  };
+
+  // On-demand: pull VendLive truth into LocationStock for this location, then
+  // re-fetch suggestions so they reflect the freshened stock.
+  const syncLocationStock = async () => {
+    if (!selectedLocation) return;
+    setSyncingStock(true);
+    try {
+      await vendliveService.syncLocationStock(selectedLocation);
+      await Promise.all([fetchSuggestions(selectedLocation), loadStockFreshness()]);
+    } catch (err) {
+      console.error('Stock sync failed:', err);
+      alert(err.response?.data?.error || 'Stock sync failed');
+    } finally {
+      setSyncingStock(false);
+    }
   };
 
   const openGenerateOrder = () => {
     const firstLocation = data.locations[0]?.id || '';
     setSelectedLocation(firstLocation);
-    setSuggestedItems(analyzeAndSuggestOrder(firstLocation));
     setOrderSupplier('');
     setOrderNotes('');
     setShowGenerateOrder(true);
+    loadStockFreshness();
+    fetchSuggestions(firstLocation);
   };
 
   const handleLocationChange = (locId) => {
     setSelectedLocation(locId);
-    setSuggestedItems(analyzeAndSuggestOrder(locId));
+    fetchSuggestions(locId);
   };
 
   const updateSuggestedItem = (idx, field, value) => {
@@ -305,9 +307,45 @@ export default function Orders() {
       .reduce((acc, i) => acc + (i.orderQty * i.unitPrice), 0);
   };
 
+  // Orders carry concrete SKUs, but a Frive suggestion is a meal-type group.
+  // Split a group's quantity across its flavour SKUs by recent sell-through
+  // (even split if there's no sales signal), assigning any rounding remainder to
+  // the strongest sellers. Non-group lines pass through as a single SKU line.
+  const expandSuggestionToLines = (item) => {
+    if (item.type !== 'freshMealGroup') {
+      return [{ sku: item.sku, quantity: item.orderQty, unitPrice: item.unitPrice }];
+    }
+    const members = item.members || [];
+    if (members.length === 0) return [];
+
+    const totalVel = members.reduce((a, m) => a + (m.velocityLong || 0), 0);
+    const shares = members.map(m => ({
+      sku: m.sku,
+      raw: totalVel > 0
+        ? item.orderQty * ((m.velocityLong || 0) / totalVel)
+        : item.orderQty / members.length,
+    }));
+
+    let assigned = 0;
+    const lines = shares.map(s => {
+      const q = Math.floor(s.raw);
+      assigned += q;
+      return { sku: s.sku, quantity: q, frac: s.raw - q };
+    });
+    let remainder = item.orderQty - assigned;
+    lines.sort((a, b) => b.frac - a.frac);
+    for (let i = 0; remainder > 0; i++, remainder--) lines[i % lines.length].quantity += 1;
+
+    return lines
+      .filter(l => l.quantity > 0)
+      .map(l => ({ sku: l.sku, quantity: l.quantity, unitPrice: item.unitPrice }));
+  };
+
   const createOrderFromSuggestions = () => {
     const selectedItems = suggestedItems.filter(i => i.selected && i.orderQty > 0);
     if (selectedItems.length === 0) return;
+
+    const lines = selectedItems.flatMap(expandSuggestionToLines);
 
     setForm({
       supplierId: orderSupplier,
@@ -315,10 +353,10 @@ export default function Orders() {
       deliveryType: 'warehouse',
       warehouseId: data.warehouses[0]?.id || '',
       customAddress: '',
-      items: selectedItems.map(i => ({
-        sku: i.sku,
-        quantity: i.orderQty.toString(),
-        unitPrice: i.unitPrice.toString()
+      items: lines.map(l => ({
+        sku: l.sku,
+        quantity: l.quantity.toString(),
+        unitPrice: l.unitPrice.toString()
       })),
       expectedDate: '',
       deliveryFee: '0',
@@ -873,11 +911,41 @@ Return ONLY valid JSON with this exact structure (no markdown, no explanation):
         <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-6 space-y-5">
           <div className="flex items-center justify-between">
             <div>
-              <h3 className="font-medium text-zinc-200">Generate Order from Low Stock</h3>
-              <p className="text-zinc-500 text-sm mt-1">Automatically suggests items below or nearing minimum stock levels</p>
+              <h3 className="font-medium text-zinc-200">Generate Order</h3>
+              <p className="text-zinc-500 text-sm mt-1">
+                Suggests quantities from sales velocity and days of cover
+                {suggestionMeta && ` · ${suggestionMeta.leadTimeDays}d lead + ${suggestionMeta.coverDays}d cover`}
+              </p>
             </div>
             <button onClick={() => setShowGenerateOrder(false)} className="text-zinc-500 hover:text-zinc-300 text-xl">×</button>
           </div>
+
+          {(() => {
+            const fresh = stockFreshness.find(f => f.locationId === selectedLocation);
+            const unmapped = fresh && !fresh.mapped;
+            return (
+              <div className={`flex items-center justify-between gap-3 rounded-lg px-3 py-2 text-xs border ${
+                unmapped ? 'bg-yellow-500/5 border-yellow-500/30 text-yellow-300' : 'bg-zinc-800/40 border-zinc-700 text-zinc-400'
+              }`}>
+                <span>
+                  {unmapped
+                    ? 'No VendLive machine linked — stock is a manual estimate, not live truth.'
+                    : fresh?.lastSyncedAt
+                      ? `Stock last synced from VendLive ${formatRelativeTime(fresh.lastSyncedAt)}`
+                      : 'Stock not yet synced from VendLive for this location.'}
+                </span>
+                {!unmapped && (
+                  <button
+                    onClick={syncLocationStock}
+                    disabled={syncingStock || !selectedLocation}
+                    className="shrink-0 px-2.5 py-1 bg-zinc-700 text-zinc-200 rounded hover:bg-zinc-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {syncingStock ? 'Syncing…' : 'Sync stock'}
+                  </button>
+                )}
+              </div>
+            );
+          })()}
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
@@ -926,16 +994,20 @@ Return ONLY valid JSON with this exact structure (no markdown, no explanation):
             </div>
           </div>
 
-          {suggestedItems.length === 0 ? (
+          {suggestionsLoading ? (
+            <div className="bg-zinc-800/40 border border-zinc-700 rounded-lg p-6 text-center">
+              <p className="text-zinc-400 text-sm">Analysing stock and sales velocity…</p>
+            </div>
+          ) : suggestedItems.length === 0 ? (
             <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-6 text-center">
               <p className="text-emerald-400 font-medium">All stocked up!</p>
-              <p className="text-zinc-500 text-sm mt-1">No items are below or near minimum stock levels for this location.</p>
+              <p className="text-zinc-500 text-sm mt-1">Nothing is below its days-of-cover target for this location.</p>
             </div>
           ) : (
             <div className="space-y-2 max-h-80 overflow-y-auto">
               {suggestedItems.map((item, idx) => (
                 <div
-                  key={item.sku}
+                  key={item.id}
                   className={`flex items-center gap-3 p-3 rounded-lg border transition-all ${
                     item.selected
                       ? item.priority === 'critical'
@@ -958,11 +1030,24 @@ Return ONLY valid JSON with this exact structure (no markdown, no explanation):
                         {item.priority === 'critical' ? 'CRITICAL' : 'LOW'}
                       </span>
                       <span className="text-xs bg-zinc-700 px-1.5 py-0.5 rounded text-zinc-400">{item.category || 'Other'}</span>
-                      <span className="text-xs bg-teal-500/20 text-teal-400 px-1.5 py-0.5 rounded">{item.shortagePercentage}% short</span>
+                      {item.daysOfCover != null ? (
+                        <span className="text-xs bg-teal-500/20 text-teal-400 px-1.5 py-0.5 rounded">
+                          {item.daysOfCover}d cover
+                        </span>
+                      ) : item.basis === 'par_fallback' ? (
+                        <span className="text-xs bg-zinc-600/40 text-zinc-300 px-1.5 py-0.5 rounded">no recent sales</span>
+                      ) : null}
                     </div>
-                    <p className="text-sm text-zinc-200 mt-1">{item.name}</p>
+                    <p className="text-sm text-zinc-200 mt-1">
+                      {item.name}
+                      {item.type === 'freshMealGroup' && item.members && (
+                        <span className="text-zinc-500"> · {item.members.length} flavour{item.members.length > 1 ? 's' : ''}</span>
+                      )}
+                    </p>
                     <p className="text-xs text-zinc-500">
-                      Stock: {item.currentStock}/{item.maxStock} | Need: {item.shortage} | Box: {item.unitsPerBox} units ({item.boxesNeeded} boxes)
+                      Stock: {item.currentStock}{item.maxStock != null ? `/${item.maxStock}` : ''}
+                      {' · '}Selling {item.blendedVelocity}/day{' · '}Target {item.targetStock}
+                      {item.unitsPerBox > 1 && ` · ${item.boxesNeeded} box${item.boxesNeeded > 1 ? 'es' : ''} × ${item.unitsPerBox}`}
                     </p>
                   </div>
                   <div className="text-center">
