@@ -33,6 +33,20 @@ export const vendliveService = {
     return response.data;
   },
 
+  // Sync LocationStock <- VendLive truth for every machine at a location.
+  // Used to freshen a location's stock right before generating a purchase order.
+  syncLocationStock: async (locationId) => {
+    const response = await api.post(`/vendlive/stock/sync-location/${locationId}`);
+    return response.data;
+  },
+
+  // Per-location stock freshness: machine-mapping status + last successful sync.
+  // Returns [{ locationId, locationName, machines, mapped, lastSyncedAt }].
+  getStockFreshness: async () => {
+    const response = await api.get('/vendlive/stock/freshness');
+    return response.data;
+  },
+
   updateMachineMapping: async (vendliveMachineId, data) => {
     const response = await api.put(`/vendlive/machine-mappings/${vendliveMachineId}`, data);
     return response.data;

@@ -61,6 +61,43 @@ router.post('/sync-all', asyncHandler(async (req, res) => {
 }));
 
 /**
+ * POST /api/vendlive/stock/sync-location/:locationId
+ * On-demand: sync LocationStock <- VendLive truth for every machine mapped to
+ * a location. Used to freshen a location's stock right before generating a
+ * purchase order. (Distinct path from /sync/:machineId — no route collision.)
+ */
+router.post('/sync-location/:locationId', asyncHandler(async (req, res) => {
+  const config = await prisma.vendliveConfig.findUnique({ where: { id: 'default' } });
+  if (!config?.apiToken) {
+    return res.status(400).json({ error: 'VendLive API token not configured' });
+  }
+
+  const { locationId } = req.params;
+  const mappings = await prisma.vendliveMachineMapping.findMany({ where: { locationId } });
+  if (mappings.length === 0) {
+    return res.status(400).json({ error: 'No VendLive machine mapped to this location. Map it in Admin first.' });
+  }
+
+  const results = [];
+  for (const m of mappings) {
+    try {
+      const r = await syncMachineStock(m.vendliveMachineId, locationId, config, 'manual_pull');
+      results.push({ vendliveMachineId: m.vendliveMachineId, machineName: m.machineName, ...r });
+    } catch (err) {
+      console.error(`Location stock sync error for machine ${m.vendliveMachineId}:`, err.message);
+      results.push({ vendliveMachineId: m.vendliveMachineId, machineName: m.machineName, error: err.message });
+    }
+  }
+
+  res.json({
+    success: results.some(r => !r.error),
+    machinesSynced: results.filter(r => !r.error).length,
+    machinesErrored: results.filter(r => r.error).length,
+    results,
+  });
+}));
+
+/**
  * GET /api/vendlive/stock/movements/:machineId
  * Proxy VendLive stock movements for a machine (last 7 days by default).
  */
@@ -194,6 +231,45 @@ router.get('/syncs', asyncHandler(async (req, res) => {
     limit,
     offset,
   });
+}));
+
+/**
+ * GET /api/vendlive/stock/freshness
+ * Per-location stock freshness: machine-mapping status + the last successful
+ * sync time. Lets the UI flag stale or unmapped (non-VendLive-backed) locations
+ * before their stock is trusted for ordering.
+ */
+router.get('/freshness', asyncHandler(async (req, res) => {
+  const [locations, mappings, lastSyncs] = await Promise.all([
+    prisma.location.findMany({ select: { id: true, name: true } }),
+    prisma.vendliveMachineMapping.findMany({
+      where: { locationId: { not: null } },
+      select: { locationId: true, vendliveMachineId: true, machineName: true },
+    }),
+    prisma.vendliveStockSync.groupBy({
+      by: ['locationId'],
+      where: { status: 'success' },
+      _max: { createdAt: true },
+    }),
+  ]);
+
+  const machinesByLoc = {};
+  for (const m of mappings) {
+    (machinesByLoc[m.locationId] ||= []).push({
+      vendliveMachineId: m.vendliveMachineId,
+      machineName: m.machineName,
+    });
+  }
+  const lastByLoc = {};
+  for (const s of lastSyncs) lastByLoc[s.locationId] = s._max.createdAt;
+
+  res.json(locations.map(loc => ({
+    locationId: loc.id,
+    locationName: loc.name,
+    machines: machinesByLoc[loc.id] || [],
+    mapped: (machinesByLoc[loc.id] || []).length > 0,
+    lastSyncedAt: lastByLoc[loc.id] || null,
+  })));
 }));
 
 // ============ API DISCOVERY ENDPOINTS ============
