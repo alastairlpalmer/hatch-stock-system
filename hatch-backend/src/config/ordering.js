@@ -9,6 +9,24 @@
 export const DEFAULT_LEAD_TIME_DAYS = 3; // order placed -> stock in hand
 export const DEFAULT_COVER_DAYS = 7;     // days of demand to top up to
 
+// Trailing windows (days) over which sales velocity is measured. We compute a
+// short and a long window and blend them: the short window reacts to recent
+// demand shifts, the long one smooths weekly noise.
+export const VELOCITY_WINDOW_DAYS = { short: 14, long: 28 };
+
+// Recency-weighted blend of the two windows. Weights must sum to 1.
+export const VELOCITY_BLEND_WEIGHTS = { short: 0.6, long: 0.4 };
+
+/**
+ * Blend short- and long-window velocities (units/day) into a single figure.
+ */
+export function blendVelocity(vShort, vLong) {
+  return (
+    (vShort || 0) * VELOCITY_BLEND_WEIGHTS.short +
+    (vLong || 0) * VELOCITY_BLEND_WEIGHTS.long
+  );
+}
+
 /**
  * Resolve the effective ordering config for a location, applying defaults for
  * any unset (null/undefined) override.

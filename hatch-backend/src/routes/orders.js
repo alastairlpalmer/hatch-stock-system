@@ -3,6 +3,7 @@ import { z } from 'zod';
 import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { batchInputFromReceivedItem } from '../utils/receiving.js';
+import { buildOrderSuggestions } from '../services/order-suggestions.js';
 
 const router = express.Router();
 
@@ -33,72 +34,22 @@ router.get('/', asyncHandler(async (req, res) => {
   res.json(orders);
 }));
 
-// Generate order suggestions.
+// Generate order suggestions — velocity / days-of-cover model with par-level
+// guardrails. Non-fresh products per SKU; Frive fresh meals collapsed into one
+// line per meal-type group. Logic lives in services/order-suggestions.js.
 // NOTE: must be declared BEFORE `/:id` or Express matches `:id = "suggestions"`.
 router.get('/suggestions', asyncHandler(async (req, res) => {
   const { locationId } = req.query;
-
   if (!locationId) {
     return res.status(400).json({ error: 'locationId required' });
   }
 
-  // Get location stock and config
-  const location = await prisma.location.findUnique({
-    where: { id: locationId },
-    include: {
-      stock: true,
-      configs: true,
-      assignedItems: true,
-    },
-  });
-
-  if (!location) {
+  const result = await buildOrderSuggestions(locationId);
+  if (!result) {
     return res.status(404).json({ error: 'Location not found' });
   }
 
-  // Fetch all assigned products in one query (was a per-assignment lookup)
-  const products = await prisma.product.findMany({
-    where: { sku: { in: location.assignedItems.map(a => a.sku) } },
-  });
-  const productMap = new Map(products.map(p => [p.sku, p]));
-
-  // Build suggestions
-  const suggestions = [];
-
-  for (const assignment of location.assignedItems) {
-    const stockRecord = location.stock.find(s => s.sku === assignment.sku);
-    const config = location.configs.find(c => c.sku === assignment.sku);
-
-    const currentQty = stockRecord?.quantity || 0;
-    const minStock = config?.minStock || 0;
-    const maxStock = config?.maxStock || 10;
-
-    // Suggest if at or below min stock
-    if (currentQty <= minStock * 1.5) {
-      const product = productMap.get(assignment.sku);
-
-      suggestions.push({
-        sku: assignment.sku,
-        name: product?.name || assignment.sku,
-        category: product?.category,
-        currentStock: currentQty,
-        minStock,
-        maxStock,
-        suggestedQty: maxStock - currentQty,
-        priority: currentQty <= minStock ? 'critical' : 'warning',
-        unitCost: product?.unitCost,
-      });
-    }
-  }
-
-  // Sort by priority
-  suggestions.sort((a, b) => {
-    if (a.priority === 'critical' && b.priority !== 'critical') return -1;
-    if (a.priority !== 'critical' && b.priority === 'critical') return 1;
-    return b.suggestedQty - a.suggestedQty;
-  });
-
-  res.json(suggestions);
+  res.json(result);
 }));
 
 // Get single order
