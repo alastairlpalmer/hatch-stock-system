@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import { useStock } from '../../context/StockContext';
 import inventoryService from '../../services/inventory.service';
+import vendliveService from '../../services/vendlive.service';
 
 export default function Inventory() {
-  const { data, addProduct, updateProduct, bulkImportProducts, updateWarehouseStock, bulkUpdateWarehouseStock, createBatch, updateBatch, transferWarehouseStock } = useStock();
+  const { data, addProduct, updateProduct, bulkImportProducts, updateWarehouseStock, bulkUpdateWarehouseStock, createBatch, updateBatch, deleteBatch, transferWarehouseStock, refresh } = useStock();
   const [selectedWarehouse, setSelectedWarehouse] = useState('all');
   const [activeSubTab, setActiveSubTab] = useState('stock');
   const [loading, setLoading] = useState(false);
@@ -180,19 +181,6 @@ export default function Inventory() {
     return { status: 'ok', label: `${daysUntil}d`, days: daysUntil, color: 'text-emerald-400 bg-emerald-500/20' };
   };
 
-  // Get earliest expiry for a SKU
-  const getEarliestExpiry = (sku, warehouseId = null) => {
-    const batches = (data.stockBatches || []).filter(b =>
-      b.sku === sku &&
-      b.remainingQty > 0 &&
-      b.expiryDate &&
-      (warehouseId ? b.warehouseId === warehouseId : true)
-    );
-    if (batches.length === 0) return null;
-    const sorted = batches.sort((a, b) => new Date(a.expiryDate) - new Date(b.expiryDate));
-    return sorted[0].expiryDate;
-  };
-
   // Summary stats
   const expiredBatches = getBatches().filter(b => {
     const status = getExpiryStatus(b.expiryDate);
@@ -222,6 +210,217 @@ export default function Inventory() {
     } finally {
       setSavingExpiryId(null);
     }
+  };
+
+  // ===== PER-PRODUCT BATCH VIEW / EDIT =====
+
+  // Expanded product on the Stock Levels tab: `${sku}` (all-warehouses view) or
+  // `${sku}|${warehouseId}` (single-warehouse view).
+  const [expandedBatchKey, setExpandedBatchKey] = useState(null);
+  // Inline batch edits keyed by batch id: { remainingQty, expiryDate, hasDamage }
+  const [batchEdits, setBatchEdits] = useState({});
+  const [savingBatchId, setSavingBatchId] = useState(null);
+  const [deletingBatchId, setDeletingBatchId] = useState(null);
+
+  // VendLive product-catalog sync (pulls all VendLive products into our DB)
+  const [syncingProducts, setSyncingProducts] = useState(false);
+  const [syncMessage, setSyncMessage] = useState(null);
+
+  // Batches with remaining stock for a SKU, earliest-expiry first (FEFO order);
+  // missing-expiry batches sort last, oldest received first as a tiebreak.
+  const batchesForSku = (sku, warehouseId = null) =>
+    (data.stockBatches || [])
+      .filter(b => b.sku === sku && b.remainingQty > 0 && (warehouseId ? b.warehouseId === warehouseId : true))
+      .sort((a, b) => {
+        if (!a.expiryDate && !b.expiryDate) return new Date(a.receivedAt) - new Date(b.receivedAt);
+        if (!a.expiryDate) return 1;
+        if (!b.expiryDate) return -1;
+        return new Date(a.expiryDate) - new Date(b.expiryDate);
+      });
+
+  const startBatchEdit = (batch) => setBatchEdits(prev => ({
+    ...prev,
+    [batch.id]: {
+      remainingQty: String(batch.remainingQty),
+      expiryDate: batch.expiryDate ? new Date(batch.expiryDate).toISOString().slice(0, 10) : '',
+      hasDamage: !!batch.hasDamage,
+    },
+  }));
+
+  const cancelBatchEdit = (batchId) => setBatchEdits(prev => {
+    const next = { ...prev };
+    delete next[batchId];
+    return next;
+  });
+
+  const saveBatchEditRow = async (batchId) => {
+    const edit = batchEdits[batchId];
+    if (!edit) return;
+    const qty = parseInt(edit.remainingQty);
+    if (isNaN(qty) || qty < 0) { setError('Quantity must be 0 or more'); return; }
+    setSavingBatchId(batchId);
+    setError(null);
+    try {
+      await updateBatch(batchId, {
+        remainingQty: qty,
+        expiryDate: edit.expiryDate || null,
+        hasDamage: edit.hasDamage,
+      });
+      cancelBatchEdit(batchId);
+    } catch (err) {
+      setError(err.response?.data?.error || err.message || 'Failed to update batch');
+    } finally {
+      setSavingBatchId(null);
+    }
+  };
+
+  const deleteBatchRow = async (batchId) => {
+    if (!window.confirm('Delete this batch? Its units are removed from stock. If this is wastage you need to record, use write-off instead.')) return;
+    setDeletingBatchId(batchId);
+    setError(null);
+    try {
+      await deleteBatch(batchId);
+    } catch (err) {
+      setError(err.response?.data?.error || err.message || 'Failed to delete batch');
+    } finally {
+      setDeletingBatchId(null);
+    }
+  };
+
+  const handleSyncProducts = async () => {
+    setSyncingProducts(true);
+    setSyncMessage(null);
+    setError(null);
+    try {
+      const result = await vendliveService.syncProducts();
+      setSyncMessage(`Synced ${result.total} VendLive products — ${result.created} new, ${result.updated} updated.`);
+      // New products won't be in context until we reload the dataset.
+      if (refresh) await refresh();
+    } catch (err) {
+      setError(err.response?.data?.error || err.message || 'Product sync failed');
+    } finally {
+      setSyncingProducts(false);
+    }
+  };
+
+  // Expandable batch breakdown for a product row on the Stock Levels tab.
+  // Rendered as a full-width sub-row; reused by both the all-warehouses and
+  // single-warehouse tables (pass warehouseId to scope to one warehouse).
+  const renderBatchDetailRow = (sku, warehouseId, colSpan) => {
+    const batches = batchesForSku(sku, warehouseId);
+    return (
+      <tr key={`${sku}-${warehouseId || 'all'}-batches`} className="bg-zinc-950/40">
+        <td colSpan={colSpan} className="px-4 py-3">
+          <div className="text-xs text-zinc-500 mb-2">Batches — earliest expiry first (taken out first)</div>
+          {batches.length === 0 ? (
+            <div className="text-zinc-600 text-sm">No batches with remaining stock.</div>
+          ) : (
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-zinc-500">
+                  <th className="text-left py-1 font-medium">Qty</th>
+                  <th className="text-left py-1 font-medium">Expiry</th>
+                  {!warehouseId && <th className="text-left py-1 font-medium">Warehouse</th>}
+                  <th className="text-left py-1 font-medium">Received</th>
+                  <th className="text-left py-1 font-medium">Condition</th>
+                  <th className="text-right py-1 font-medium">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {batches.map(batch => {
+                  const editing = batchEdits[batch.id];
+                  const wh = data.warehouses.find(w => w.id === batch.warehouseId);
+                  const status = getExpiryStatus(batch.expiryDate);
+                  return (
+                    <tr key={batch.id} className="border-t border-zinc-800/50">
+                      <td className="py-1.5 pr-3">
+                        {editing ? (
+                          <input
+                            type="number" min="0" value={editing.remainingQty}
+                            onChange={e => setBatchEdits(p => ({ ...p, [batch.id]: { ...p[batch.id], remainingQty: e.target.value } }))}
+                            className="w-16 bg-zinc-800 border border-zinc-700 rounded px-2 py-1"
+                          />
+                        ) : <span className="text-zinc-200">{batch.remainingQty}</span>}
+                      </td>
+                      <td className="py-1.5 pr-3">
+                        {editing ? (
+                          <input
+                            type="date" value={editing.expiryDate}
+                            onChange={e => setBatchEdits(p => ({ ...p, [batch.id]: { ...p[batch.id], expiryDate: e.target.value } }))}
+                            className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1"
+                          />
+                        ) : batch.expiryDate ? (
+                          <span className={`px-2 py-0.5 rounded ${status?.color || ''}`}>{new Date(batch.expiryDate).toLocaleDateString('en-GB')}</span>
+                        ) : <span className="text-amber-400">No expiry</span>}
+                      </td>
+                      {!warehouseId && <td className="py-1.5 pr-3 text-zinc-400">{wh?.name || batch.warehouseId}</td>}
+                      <td className="py-1.5 pr-3 text-zinc-500">{new Date(batch.receivedAt).toLocaleDateString('en-GB')}</td>
+                      <td className="py-1.5 pr-3">
+                        {editing ? (
+                          <label className="flex items-center gap-1 text-zinc-400">
+                            <input
+                              type="checkbox" checked={editing.hasDamage}
+                              onChange={e => setBatchEdits(p => ({ ...p, [batch.id]: { ...p[batch.id], hasDamage: e.target.checked } }))}
+                            />
+                            Damaged
+                          </label>
+                        ) : batch.hasDamage ? <span className="text-red-400">Damaged</span> : <span className="text-emerald-400">OK</span>}
+                      </td>
+                      <td className="py-1.5 text-right whitespace-nowrap">
+                        {editing ? (
+                          <>
+                            <button
+                              onClick={() => saveBatchEditRow(batch.id)} disabled={savingBatchId === batch.id}
+                              className="px-2 py-1 bg-emerald-600 text-white rounded mr-1 disabled:opacity-50"
+                            >
+                              {savingBatchId === batch.id ? '...' : 'Save'}
+                            </button>
+                            <button onClick={() => cancelBatchEdit(batch.id)} className="px-2 py-1 bg-zinc-700 text-zinc-300 rounded">Cancel</button>
+                          </>
+                        ) : (
+                          <>
+                            <button onClick={() => startBatchEdit(batch)} className="text-emerald-400 hover:text-emerald-300 mr-3">Edit</button>
+                            <button
+                              onClick={() => deleteBatchRow(batch.id)} disabled={deletingBatchId === batch.id}
+                              className="text-red-400 hover:text-red-300 disabled:opacity-50"
+                            >
+                              {deletingBatchId === batch.id ? '...' : 'Delete'}
+                            </button>
+                          </>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </td>
+      </tr>
+    );
+  };
+
+  // Clickable expiry/batch summary cell for a Stock Levels product row.
+  const renderBatchSummaryCell = (sku, warehouseId) => {
+    const key = warehouseId ? `${sku}|${warehouseId}` : sku;
+    const skuBatches = batchesForSku(sku, warehouseId);
+    if (skuBatches.length === 0) return <span className="text-zinc-600 text-xs">-</span>;
+    const earliest = skuBatches.find(b => b.expiryDate)?.expiryDate || null;
+    const st = getExpiryStatus(earliest);
+    const isOpen = expandedBatchKey === key;
+    return (
+      <button
+        onClick={() => setExpandedBatchKey(isOpen ? null : key)}
+        className="inline-flex items-center gap-1.5 text-xs hover:underline"
+        title="View / edit batches"
+      >
+        <span className="text-zinc-500">{isOpen ? '▾' : '▸'}</span>
+        <span className={`px-2 py-0.5 rounded ${st?.color || 'text-zinc-400'}`}>
+          {earliest ? new Date(earliest).toLocaleDateString('en-GB') : 'No expiry'}
+        </span>
+        <span className="text-zinc-500">· {skuBatches.length} batch{skuBatches.length === 1 ? '' : 'es'}</span>
+      </button>
+    );
   };
 
   // ===== ADD STOCK FUNCTIONS =====
@@ -264,11 +463,9 @@ export default function Inventory() {
         });
       }
 
-      // Update stock (pass qty as delta, not absolute value)
-      await updateWarehouseStock(addStockForm.warehouseId, addStockForm.sku, qty, true);
-
-      // Track the addition as a batch so it shows in expiry tracking.
-      // No expiry typed -> created with null expiry and flagged as "missing".
+      // Add the stock as a batch — batches are authoritative, so creating the
+      // batch raises the warehouse total. No separate stock write (which would
+      // double-count). No expiry typed -> null expiry, flagged as "missing".
       await createBatch({
         warehouseId: addStockForm.warehouseId,
         sku: addStockForm.sku,
@@ -633,6 +830,14 @@ export default function Inventory() {
                 className="hidden"
               />
             </label>
+            <button
+              onClick={handleSyncProducts}
+              disabled={syncingProducts}
+              title="Pull the full product catalogue from VendLive so every product exists here, even ones never sold"
+              className="flex-1 sm:flex-none px-3 py-2.5 bg-indigo-600 text-white rounded text-sm font-medium hover:bg-indigo-500 disabled:opacity-50"
+            >
+              {syncingProducts ? 'Syncing…' : 'Sync VendLive'}
+            </button>
           </div>
         </div>
       </div>
@@ -640,6 +845,13 @@ export default function Inventory() {
       {error && (
         <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 text-red-400 text-sm">
           {error}
+        </div>
+      )}
+
+      {syncMessage && (
+        <div className="bg-indigo-500/10 border border-indigo-500/30 rounded-lg p-4 text-indigo-300 text-sm flex items-center justify-between gap-4">
+          <span>{syncMessage}</span>
+          <button onClick={() => setSyncMessage(null)} className="text-indigo-400 hover:text-indigo-200">×</button>
         </div>
       )}
 
@@ -766,15 +978,35 @@ export default function Inventory() {
           </div>
 
           {addStockForm.sku && data.products.find(p => p.sku === addStockForm.sku) && (
-            <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-3">
+            <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-3 space-y-2">
               <p className="text-emerald-400 text-sm">
-                Adding to existing product: <strong>{data.products.find(p => p.sku === addStockForm.sku)?.name}</strong>
+                Adding a new batch to: <strong>{data.products.find(p => p.sku === addStockForm.sku)?.name}</strong>
                 {addStockForm.warehouseId && (
                   <span className="text-zinc-400 ml-2">
                     (Current stock: {(data.stock[addStockForm.warehouseId] || {})[addStockForm.sku] || 0})
                   </span>
                 )}
               </p>
+              {(() => {
+                const existing = batchesForSku(addStockForm.sku, addStockForm.warehouseId || null);
+                if (existing.length === 0) {
+                  return <p className="text-xs text-zinc-500">No existing batches{addStockForm.warehouseId ? ' in this warehouse' : ''} — this will be the first.</p>;
+                }
+                return (
+                  <div className="text-xs text-zinc-400">
+                    <p className="text-zinc-500 mb-1">Existing batches (this add creates a separate one):</p>
+                    <ul className="space-y-0.5">
+                      {existing.map(b => (
+                        <li key={b.id} className="flex items-center gap-2">
+                          <span className="text-zinc-300">{b.remainingQty} units</span>
+                          <span className="text-zinc-600">·</span>
+                          <span>{b.expiryDate ? `expires ${new Date(b.expiryDate).toLocaleDateString('en-GB')}` : 'no expiry'}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                );
+              })()}
             </div>
           )}
 
@@ -1362,27 +1594,20 @@ export default function Inventory() {
                               </tr>
                               {group.items.map(({ sku, locs, total, product }) => {
                                 const value = (product?.unitCost || 0) * total;
-                                const earliestExpiry = getEarliestExpiry(sku);
-                                const expiryStatus = getExpiryStatus(earliestExpiry);
                                 return (
-                                  <tr key={sku} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
-                                    <td className="px-4 py-3 text-zinc-200">{product?.name || '-'}</td>
-                                    <td className="px-4 py-3 text-zinc-500 text-xs">{sku}</td>
-                                    {data.warehouses.map(wh => (
-                                      <td key={wh.id} className="text-right px-4 py-3 text-zinc-400">{locs[wh.id] || '-'}</td>
-                                    ))}
-                                    <td className="text-right px-4 py-3 text-emerald-400 font-medium">{total}</td>
-                                    <td className="text-center px-4 py-3">
-                                      {earliestExpiry ? (
-                                        <span className={`text-xs px-2 py-0.5 rounded ${expiryStatus?.color || ''}`}>
-                                          {new Date(earliestExpiry).toLocaleDateString('en-GB')}
-                                        </span>
-                                      ) : (
-                                        <span className="text-zinc-600 text-xs">-</span>
-                                      )}
-                                    </td>
-                                    <td className="text-right px-4 py-3 text-zinc-400">{value.toFixed(2)}</td>
-                                  </tr>
+                                  <React.Fragment key={sku}>
+                                    <tr className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
+                                      <td className="px-4 py-3 text-zinc-200">{product?.name || '-'}</td>
+                                      <td className="px-4 py-3 text-zinc-500 text-xs">{sku}</td>
+                                      {data.warehouses.map(wh => (
+                                        <td key={wh.id} className="text-right px-4 py-3 text-zinc-400">{locs[wh.id] || '-'}</td>
+                                      ))}
+                                      <td className="text-right px-4 py-3 text-emerald-400 font-medium">{total}</td>
+                                      <td className="text-center px-4 py-3">{renderBatchSummaryCell(sku, null)}</td>
+                                      <td className="text-right px-4 py-3 text-zinc-400">{value.toFixed(2)}</td>
+                                    </tr>
+                                    {expandedBatchKey === sku && renderBatchDetailRow(sku, null, colCount)}
+                                  </React.Fragment>
                                 );
                               })}
                             </React.Fragment>
@@ -1453,32 +1678,25 @@ export default function Inventory() {
                             </tr>
                             {group.items.map(({ sku, total: qty, product }) => {
                               const value = (product?.unitCost || 0) * qty;
-                              const earliestExpiry = getEarliestExpiry(sku, selectedWarehouse);
-                              const expiryStatus = getExpiryStatus(earliestExpiry);
                               return (
-                                <tr key={sku} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
-                                  <td className="px-4 py-3 text-zinc-200">{product?.name || '-'}</td>
-                                  <td className="px-4 py-3 text-zinc-500 text-xs">{sku}</td>
-                                  <td className="text-right px-4 py-3 text-emerald-400 font-medium">{qty}</td>
-                                  <td className="text-center px-4 py-3">
-                                    {earliestExpiry ? (
-                                      <span className={`text-xs px-2 py-0.5 rounded ${expiryStatus?.color || ''}`}>
-                                        {new Date(earliestExpiry).toLocaleDateString('en-GB')}
-                                      </span>
-                                    ) : (
-                                      <span className="text-zinc-600 text-xs">-</span>
-                                    )}
-                                  </td>
-                                  <td className="text-right px-4 py-3 text-zinc-400">{value.toFixed(2)}</td>
-                                  <td className="text-right px-4 py-3">
-                                    <button
-                                      onClick={() => openEditStock(selectedWarehouse, sku, qty)}
-                                      className="text-emerald-400 hover:text-emerald-300 text-sm"
-                                    >
-                                      Edit
-                                    </button>
-                                  </td>
-                                </tr>
+                                <React.Fragment key={sku}>
+                                  <tr className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
+                                    <td className="px-4 py-3 text-zinc-200">{product?.name || '-'}</td>
+                                    <td className="px-4 py-3 text-zinc-500 text-xs">{sku}</td>
+                                    <td className="text-right px-4 py-3 text-emerald-400 font-medium">{qty}</td>
+                                    <td className="text-center px-4 py-3">{renderBatchSummaryCell(sku, selectedWarehouse)}</td>
+                                    <td className="text-right px-4 py-3 text-zinc-400">{value.toFixed(2)}</td>
+                                    <td className="text-right px-4 py-3">
+                                      <button
+                                        onClick={() => openEditStock(selectedWarehouse, sku, qty)}
+                                        className="text-emerald-400 hover:text-emerald-300 text-sm"
+                                      >
+                                        Edit
+                                      </button>
+                                    </td>
+                                  </tr>
+                                  {expandedBatchKey === `${sku}|${selectedWarehouse}` && renderBatchDetailRow(sku, selectedWarehouse, 6)}
+                                </React.Fragment>
                               );
                             })}
                           </React.Fragment>
@@ -1695,6 +1913,10 @@ export default function Inventory() {
 
       {activeSubTab === 'batches' && (
         <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg overflow-hidden">
+          <div className="px-4 py-3 border-b border-zinc-800 flex items-center gap-2">
+            <h3 className="text-sm font-medium text-zinc-400">All Batches</h3>
+            <span className="text-xs text-zinc-500">— grouped by product, earliest expiry first. Edit volume / expiry or delete a mistaken batch.</span>
+          </div>
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-zinc-800">
@@ -1704,57 +1926,126 @@ export default function Inventory() {
                 <th className="text-center px-4 py-3 text-zinc-500 font-medium">Expiry</th>
                 <th className="text-center px-4 py-3 text-zinc-500 font-medium">Received</th>
                 <th className="text-center px-4 py-3 text-zinc-500 font-medium">Condition</th>
+                <th className="text-right px-4 py-3 text-zinc-500 font-medium">Actions</th>
               </tr>
             </thead>
             <tbody>
-              {getBatches().length === 0 ? (
-                <tr>
-                  <td colSpan={6} className="px-4 py-8 text-center text-zinc-600">No batch records</td>
-                </tr>
-              ) : (
-                getBatches()
-                  .sort((a, b) => new Date(b.receivedAt) - new Date(a.receivedAt))
-                  .map(batch => {
-                    const product = data.products.find(p => p.sku === batch.sku);
-                    const warehouse = data.warehouses.find(w => w.id === batch.warehouseId);
-                    const expiryStatus = getExpiryStatus(batch.expiryDate);
-                    return (
-                      <tr key={batch.id} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
-                        <td className="px-4 py-3">
-                          <div className="text-zinc-200">{product?.name || batch.sku}</div>
-                          <div className="text-zinc-600 text-xs">{batch.sku}</div>
-                        </td>
-                        <td className="px-4 py-3 text-zinc-400">{warehouse?.name || batch.warehouseId}</td>
-                        <td className="text-right px-4 py-3 text-zinc-300">{batch.remainingQty}</td>
-                        <td className="text-center px-4 py-3">
-                          {batch.expiryDate ? (
-                            <span className={`text-xs px-2 py-0.5 rounded ${expiryStatus?.color || ''}`}>
-                              {new Date(batch.expiryDate).toLocaleDateString('en-GB')}
-                            </span>
-                          ) : (
-                            <span className="text-xs bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded" title="No expiry recorded — set one in the Expiry Tracking tab">
-                              No expiry
-                            </span>
-                          )}
-                        </td>
-                        <td className="text-center px-4 py-3 text-zinc-500 text-xs">
-                          {new Date(batch.receivedAt).toLocaleDateString('en-GB')}
-                        </td>
-                        <td className="text-center px-4 py-3">
-                          {batch.hasDamage ? (
-                            <span className="text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded" title={batch.damageNotes}>
-                              Damaged
-                            </span>
-                          ) : (
-                            <span className="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded">
-                              OK
-                            </span>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })
-              )}
+              {(() => {
+                const batches = getBatches();
+                if (batches.length === 0) {
+                  return (
+                    <tr>
+                      <td colSpan={7} className="px-4 py-8 text-center text-zinc-600">No batch records</td>
+                    </tr>
+                  );
+                }
+                // Group by SKU, products alphabetical, batches earliest-expiry first
+                const bySku = {};
+                batches.forEach(b => { (bySku[b.sku] ||= []).push(b); });
+                const groups = Object.keys(bySku)
+                  .map(sku => ({
+                    sku,
+                    name: data.products.find(p => p.sku === sku)?.name || sku,
+                    batches: bySku[sku].sort((a, b) => {
+                      if (!a.expiryDate && !b.expiryDate) return new Date(a.receivedAt) - new Date(b.receivedAt);
+                      if (!a.expiryDate) return 1;
+                      if (!b.expiryDate) return -1;
+                      return new Date(a.expiryDate) - new Date(b.expiryDate);
+                    }),
+                  }))
+                  .sort((a, b) => a.name.localeCompare(b.name));
+
+                return groups.map(group => (
+                  <React.Fragment key={group.sku}>
+                    <tr className="bg-zinc-800/60">
+                      <td colSpan={7} className="px-4 py-2">
+                        <span className="text-emerald-400 font-medium text-xs">{group.name}</span>
+                        <span className="text-zinc-500 text-xs ml-3">
+                          {group.sku} · {group.batches.length} batch{group.batches.length === 1 ? '' : 'es'} · {group.batches.reduce((acc, b) => acc + b.remainingQty, 0)} units
+                        </span>
+                      </td>
+                    </tr>
+                    {group.batches.map(batch => {
+                      const warehouse = data.warehouses.find(w => w.id === batch.warehouseId);
+                      const expiryStatus = getExpiryStatus(batch.expiryDate);
+                      const editing = batchEdits[batch.id];
+                      return (
+                        <tr key={batch.id} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
+                          <td className="px-4 py-3 text-zinc-600 text-xs">{batch.sku}</td>
+                          <td className="px-4 py-3 text-zinc-400">{warehouse?.name || batch.warehouseId}</td>
+                          <td className="text-right px-4 py-3 text-zinc-300">
+                            {editing ? (
+                              <input
+                                type="number" min="0" value={editing.remainingQty}
+                                onChange={e => setBatchEdits(p => ({ ...p, [batch.id]: { ...p[batch.id], remainingQty: e.target.value } }))}
+                                className="w-16 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-right"
+                              />
+                            ) : batch.remainingQty}
+                          </td>
+                          <td className="text-center px-4 py-3">
+                            {editing ? (
+                              <input
+                                type="date" value={editing.expiryDate}
+                                onChange={e => setBatchEdits(p => ({ ...p, [batch.id]: { ...p[batch.id], expiryDate: e.target.value } }))}
+                                className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs"
+                              />
+                            ) : batch.expiryDate ? (
+                              <span className={`text-xs px-2 py-0.5 rounded ${expiryStatus?.color || ''}`}>
+                                {new Date(batch.expiryDate).toLocaleDateString('en-GB')}
+                              </span>
+                            ) : (
+                              <span className="text-xs bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded" title="No expiry recorded">
+                                No expiry
+                              </span>
+                            )}
+                          </td>
+                          <td className="text-center px-4 py-3 text-zinc-500 text-xs">
+                            {new Date(batch.receivedAt).toLocaleDateString('en-GB')}
+                          </td>
+                          <td className="text-center px-4 py-3">
+                            {editing ? (
+                              <label className="flex items-center justify-center gap-1 text-zinc-400 text-xs">
+                                <input
+                                  type="checkbox" checked={editing.hasDamage}
+                                  onChange={e => setBatchEdits(p => ({ ...p, [batch.id]: { ...p[batch.id], hasDamage: e.target.checked } }))}
+                                />
+                                Damaged
+                              </label>
+                            ) : batch.hasDamage ? (
+                              <span className="text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded" title={batch.damageNotes}>Damaged</span>
+                            ) : (
+                              <span className="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded">OK</span>
+                            )}
+                          </td>
+                          <td className="text-right px-4 py-3 whitespace-nowrap text-xs">
+                            {editing ? (
+                              <>
+                                <button
+                                  onClick={() => saveBatchEditRow(batch.id)} disabled={savingBatchId === batch.id}
+                                  className="px-2 py-1 bg-emerald-600 text-white rounded mr-1 disabled:opacity-50"
+                                >
+                                  {savingBatchId === batch.id ? '...' : 'Save'}
+                                </button>
+                                <button onClick={() => cancelBatchEdit(batch.id)} className="px-2 py-1 bg-zinc-700 text-zinc-300 rounded">Cancel</button>
+                              </>
+                            ) : (
+                              <>
+                                <button onClick={() => startBatchEdit(batch)} className="text-emerald-400 hover:text-emerald-300 mr-3">Edit</button>
+                                <button
+                                  onClick={() => deleteBatchRow(batch.id)} disabled={deletingBatchId === batch.id}
+                                  className="text-red-400 hover:text-red-300 disabled:opacity-50"
+                                >
+                                  {deletingBatchId === batch.id ? '...' : 'Delete'}
+                                </button>
+                              </>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </React.Fragment>
+                ));
+              })()}
             </tbody>
           </table>
         </div>

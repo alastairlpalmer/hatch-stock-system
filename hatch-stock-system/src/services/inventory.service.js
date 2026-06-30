@@ -151,6 +151,16 @@ export const inventoryService = {
   },
 
   /**
+   * Hard-delete a batch created in error (distinct from write-off, which
+   * journals wastage). Recomputes the warehouse total from surviving batches.
+   * @param {string} batchId
+   */
+  deleteBatch: async (batchId) => {
+    const response = await api.delete(`/inventory/batches/${batchId}`);
+    return response.data;
+  },
+
+  /**
    * Get expiry alerts
    * @param {number} daysThreshold - Days until expiry to include
    */
