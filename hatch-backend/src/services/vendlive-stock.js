@@ -1,5 +1,6 @@
 import prisma from '../utils/db.js';
 import * as vendliveApi from './vendlive.js';
+import { guessFreshMeal } from './meal-classifier.js';
 
 /**
  * Aggregate channel data into per-product stock totals.
@@ -266,6 +267,93 @@ export async function syncAllMachines(config) {
     machinesErrored: results.filter(r => r.error).length,
     results,
   };
+}
+
+/**
+ * Proactively sync the full VendLive product catalog into our products table.
+ *
+ * Products are normally created lazily — only when first SOLD (sales ingest) or
+ * when a mapped machine's stock is synced. That leaves VendLive products that
+ * have never sold absent from our DB. This pulls EVERY channel across ALL
+ * machines (getChannels with no machineId returns the whole planogram) and
+ * upserts each distinct product:
+ *   - missing products are created (with a best-effort fresh-meal guess, exactly
+ *     like the sales-ingest auto-create path);
+ *   - existing products have their name / category / cost / sale price refreshed
+ *     from VendLive, but their fresh-meal classification is left untouched so a
+ *     human-confirmed (or pending-review) mealType is never clobbered.
+ *
+ * Prices are only written when VendLive reports a positive value, so a real
+ * cost/price is never overwritten with 0.
+ *
+ * Returns { created, updated, total, channelCount }.
+ */
+export async function syncProductCatalog(config) {
+  console.log('Product catalog sync: fetching all channels from VendLive...');
+  const channels = await vendliveApi.getChannels(config, {}); // no machineId → all machines
+  const catalog = aggregateChannelStock(channels);
+  const allSkus = Object.keys(catalog);
+
+  // Bulk-check which products already exist so we can count created vs updated
+  // and apply create-only fields (fresh-meal guess) to new products only.
+  const existing = await prisma.product.findMany({
+    where: { sku: { in: allSkus } },
+    select: { sku: true },
+  });
+  const existingSet = new Set(existing.map(p => p.sku));
+
+  let created = 0;
+  let updated = 0;
+  const ops = [];
+
+  for (const [sku, vl] of Object.entries(catalog)) {
+    if (existingSet.has(sku)) {
+      ops.push(prisma.product.update({
+        where: { sku },
+        data: {
+          name: vl.productName,
+          ...(vl.category != null && { category: vl.category }),
+          ...(vl.costPrice > 0 && { unitCost: vl.costPrice }),
+          ...(vl.salePrice > 0 && { salePrice: vl.salePrice }),
+        },
+      }));
+      updated++;
+    } else {
+      const meal = guessFreshMeal(vl.productName);
+      ops.push(prisma.product.create({
+        data: {
+          sku,
+          name: vl.productName,
+          category: vl.category || null,
+          unitCost: vl.costPrice > 0 ? vl.costPrice : null,
+          salePrice: vl.salePrice > 0 ? vl.salePrice : null,
+          isFreshMeal: meal.isFreshMeal,
+          mealType: meal.mealType,
+        },
+      }));
+      created++;
+    }
+  }
+
+  // Run in batched transactions to avoid exhausting the connection pool
+  // (same chunking pattern as syncMachineStock).
+  const CHUNK = 50;
+  for (let i = 0; i < ops.length; i += CHUNK) {
+    await prisma.$transaction(ops.slice(i, i + CHUNK));
+  }
+
+  await prisma.vendliveSyncLog.create({
+    data: {
+      syncType: 'product_catalog',
+      status: 'success',
+      salesCreated: created,   // generic counters reused: created products
+      salesSkipped: updated,   //                          updated products
+      metadata: { created, updated, total: allSkus.length, channelCount: channels.length },
+    },
+  }).catch(() => {}); // logging is best-effort, never fail the sync over it
+
+  console.log(`Product catalog sync: ${created} created, ${updated} updated (${allSkus.length} products across ${channels.length} channels)`);
+  return { created, updated, total: allSkus.length, channelCount: channels.length };
 }
 
 /**

@@ -5,6 +5,7 @@ import { asyncHandler } from '../middleware/errorHandler.js';
 import { encrypt, decrypt, hasEncryptionKey } from '../utils/encryption.js';
 import * as vendliveApi from '../services/vendlive.js';
 import { normalizeWebhookPayload, processVendliveOrder, runPollSync } from '../services/vendlive-sync.js';
+import { syncProductCatalog } from '../services/vendlive-stock.js';
 
 const router = express.Router();
 
@@ -93,7 +94,7 @@ router.get('/config', asyncHandler(async (req, res) => {
 
 // PUT /api/vendlive/config — update config
 router.put('/config', asyncHandler(async (req, res) => {
-  const { apiToken, accountId, baseUrl, webhookSecret, salesSyncEnabled, pollIntervalMin, autoCreateProducts } = req.body;
+  const { apiToken, accountId, baseUrl, webhookSecret, salesSyncEnabled, pollIntervalMin, autoCreateProducts, productSyncEnabled, productSyncIntervalMin } = req.body;
 
   const data = {};
   if (accountId !== undefined) data.accountId = accountId;
@@ -101,6 +102,8 @@ router.put('/config', asyncHandler(async (req, res) => {
   if (salesSyncEnabled !== undefined) data.salesSyncEnabled = salesSyncEnabled;
   if (pollIntervalMin !== undefined) data.pollIntervalMin = parseInt(pollIntervalMin);
   if (autoCreateProducts !== undefined) data.autoCreateProducts = autoCreateProducts;
+  if (productSyncEnabled !== undefined) data.productSyncEnabled = productSyncEnabled;
+  if (productSyncIntervalMin !== undefined) data.productSyncIntervalMin = parseInt(productSyncIntervalMin);
 
   // Encrypt token if provided and not the masked value
   if (apiToken && apiToken !== '***') {
@@ -307,6 +310,22 @@ router.post('/sync/sales', asyncHandler(async (req, res) => {
 
   try {
     const result = await runPollSync();
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}));
+
+// POST /api/vendlive/sync/products — proactively pull the full product catalog
+// from VendLive so products exist in our DB before they are ever sold.
+router.post('/sync/products', asyncHandler(async (req, res) => {
+  const config = await prisma.vendliveConfig.findUnique({ where: { id: 'default' } });
+  if (!config?.apiToken) {
+    return res.status(400).json({ error: 'API token not configured' });
+  }
+
+  try {
+    const result = await syncProductCatalog(config);
     res.json({ success: true, ...result });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });

@@ -406,6 +406,11 @@ model VendliveConfig {
   stockPollIntervalMin Int       @default(10) @map("stock_poll_interval_min")
   restockMovementTypes String    @default("In") @map("restock_movement_types")
   autoShrinkageCalc    Boolean   @default(true) @map("auto_shrinkage_calc")
+  // Product-catalog sync: proactively pulls all VendLive products (see
+  // services/vendlive-stock.js syncProductCatalog). Defaults to daily.
+  productSyncEnabled     Boolean   @default(false) @map("product_sync_enabled")
+  productSyncIntervalMin Int       @default(1440) @map("product_sync_interval_min")
+  lastProductSyncAt      DateTime? @map("last_product_sync_at")
   createdAt            DateTime  @default(now()) @map("created_at")
   updatedAt            DateTime  @updatedAt @map("updated_at")
 

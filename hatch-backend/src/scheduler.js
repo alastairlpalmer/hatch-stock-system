@@ -1,10 +1,11 @@
 import cron from 'node-cron';
 import prisma from './utils/db.js';
 import { runPollSync } from './services/vendlive-sync.js';
-import { runStockPollJob } from './services/vendlive-stock.js';
+import { runStockPollJob, syncProductCatalog } from './services/vendlive-stock.js';
 
 let salesJobRunning = false;
 let stockJobRunning = false;
+let productJobRunning = false;
 // The config table has no lastStockPollAt column, so the stock job tracks its
 // own last run in memory (fine for a single Railway instance; worst case after
 // a restart is one early run).
@@ -64,5 +65,35 @@ export function startScheduler() {
     }
   });
 
-  console.log('VendLive schedulers started (sales + stock, checked every minute)');
+  // Product catalog poll — proactively pulls the full VendLive product catalog
+  // so products exist in our DB before they are ever sold. Honours
+  // productSyncEnabled / productSyncIntervalMin (default daily). lastProductSyncAt
+  // is persisted on the config so the cadence survives restarts.
+  cron.schedule('* * * * *', async () => {
+    if (productJobRunning) return;
+
+    try {
+      const config = await prisma.vendliveConfig.findUnique({ where: { id: 'default' } });
+      if (!config?.productSyncEnabled || !config?.apiToken) return;
+
+      const intervalMs = (config.productSyncIntervalMin || 1440) * 60 * 1000;
+      const lastSync = config.lastProductSyncAt ? new Date(config.lastProductSyncAt).getTime() : 0;
+      if (Date.now() - lastSync < intervalMs) return;
+
+      productJobRunning = true;
+      console.log('VendLive product catalog sync starting...');
+      const result = await syncProductCatalog(config);
+      await prisma.vendliveConfig.update({
+        where: { id: 'default' },
+        data: { lastProductSyncAt: new Date() },
+      });
+      console.log(`VendLive product catalog sync complete: ${result.created} created, ${result.updated} updated`);
+    } catch (err) {
+      console.error('VendLive product sync scheduler error:', err.message);
+    } finally {
+      productJobRunning = false;
+    }
+  });
+
+  console.log('VendLive schedulers started (sales + stock + products, checked every minute)');
 }
