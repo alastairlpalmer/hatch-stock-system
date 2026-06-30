@@ -265,12 +265,15 @@ export async function processVendliveOrder(orderData, syncSource, config) {
       productMap.set(sku, product);
       pricedItems.push(item);
 
-      // Look up machine mapping for location
+      // Look up machine mapping for location by FRIENDLY NAME. The order-sales /
+      // webhook machine id is a different namespace from the /machines id stored
+      // on the mapping (see runPollSync for the full explanation); the friendly
+      // name is the only identifier that matches across both.
       let locationName = orderData.locationName;
       let locationId = null;
-      if (item.machineId) {
-        const mapping = await prisma.vendliveMachineMapping.findUnique({
-          where: { vendliveMachineId: item.machineId },
+      if (orderData.machineName) {
+        const mapping = await prisma.vendliveMachineMapping.findFirst({
+          where: { machineName: orderData.machineName },
           include: { location: { select: { id: true, name: true } } },
         });
         if (mapping?.location) {
@@ -383,14 +386,22 @@ export async function runPollSync() {
     });
     const productMap = new Map(existingProducts.map(p => [p.sku, p]));
 
-    const uniqueMachineIds = [...new Set(allItems.map(({ item }) => item.machineId).filter(Boolean))];
-    const existingMappings = uniqueMachineIds.length > 0
+    // Resolve machine -> location mappings by FRIENDLY NAME, not numeric id.
+    // VendLive exposes the same physical machine under two different numeric
+    // ids: the order-sales feed reports one (item.machineId / machine.id), while
+    // the /machines/ endpoint — which is what populates VendliveMachineMapping
+    // and what the stock/channels sync uses — reports another. Joining on the id
+    // therefore never matches, so sales fall back to the raw VendLive location
+    // string and stock never decrements. The friendly name (machineName) is
+    // stable across both API surfaces, so we key on that.
+    const machineNames = [...new Set(allItems.map(({ orderData }) => orderData.machineName).filter(Boolean))];
+    const existingMappings = machineNames.length > 0
       ? await prisma.vendliveMachineMapping.findMany({
-          where: { vendliveMachineId: { in: uniqueMachineIds } },
+          where: { machineName: { in: machineNames } },
           include: { location: { select: { id: true, name: true } } },
         })
       : [];
-    const mappingMap = new Map(existingMappings.map(m => [m.vendliveMachineId, m]));
+    const mappingByName = new Map(existingMappings.map(m => [m.machineName, m]));
 
     // Step 3: Auto-create missing products if enabled
     if (config.autoCreateProducts) {
@@ -480,7 +491,7 @@ export async function runPollSync() {
         const refundUpdates = [];
 
         for (const { orderData, item, product } of resolvable) {
-          const mapping = item.machineId ? mappingMap.get(item.machineId) : null;
+          const mapping = orderData.machineName ? mappingByName.get(orderData.machineName) : null;
           const locationName = mapping?.location?.name || orderData.locationName;
           const existing = existingByKey.get(`${orderData.orderSaleId}-${item.productSaleId}`);
 
