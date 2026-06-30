@@ -274,28 +274,53 @@ export async function syncAllMachines(config) {
  *
  * Products are normally created lazily — only when first SOLD (sales ingest) or
  * when a mapped machine's stock is synced. That leaves VendLive products that
- * have never sold absent from our DB. This pulls EVERY channel across ALL
- * machines (getChannels with no machineId returns the whole planogram) and
- * upserts each distinct product:
+ * have never sold absent from our DB. This walks EVERY machine's planogram
+ * (getChannels PER machineId — the same call the stock sync uses and which is
+ * known to work; a bare /channels/ with no machineId does not return reliably)
+ * and upserts each distinct product:
  *   - missing products are created (with a best-effort fresh-meal guess, exactly
  *     like the sales-ingest auto-create path);
  *   - existing products have their name / category / cost / sale price refreshed
  *     from VendLive, but their fresh-meal classification is left untouched so a
  *     human-confirmed (or pending-review) mealType is never clobbered.
  *
- * Prices are only written when VendLive reports a positive value, so a real
- * cost/price is never overwritten with 0.
+ * upsert (not create/update) is used so the every-minute stock/sales sync
+ * auto-creating the same product concurrently can't trip a unique-key error and
+ * fail the whole run. Prices are only written when VendLive reports a positive
+ * value, so a real cost/price is never overwritten with 0.
  *
- * Returns { created, updated, total, channelCount }.
+ * Returns { created, updated, total, channelCount, machineCount }.
  */
 export async function syncProductCatalog(config) {
-  console.log('Product catalog sync: fetching all channels from VendLive...');
-  const channels = await vendliveApi.getChannels(config, {}); // no machineId → all machines
-  const catalog = aggregateChannelStock(channels);
-  const allSkus = Object.keys(catalog);
+  console.log('Product catalog sync: fetching machine list from VendLive...');
+  const machines = await vendliveApi.getMachines(config);
+  const machineIds = [...new Set((machines || []).map(m => m?.id).filter(Boolean))];
+  console.log(`Product catalog sync: scanning ${machineIds.length} machines`);
 
-  // Bulk-check which products already exist so we can count created vs updated
-  // and apply create-only fields (fresh-meal guess) to new products only.
+  // Aggregate every machine's planogram into one product map (first-seen wins —
+  // identity/pricing fields are the same across a product's channels).
+  const catalog = {};
+  let channelCount = 0;
+  for (const machineId of machineIds) {
+    try {
+      const channels = await vendliveApi.getChannels(config, { machineId });
+      channelCount += channels.length;
+      const perMachine = aggregateChannelStock(channels);
+      for (const [sku, vl] of Object.entries(perMachine)) {
+        if (!catalog[sku]) catalog[sku] = vl;
+      }
+    } catch (err) {
+      // One bad machine must not sink the whole catalog sync.
+      console.error(`Product catalog sync: failed to fetch channels for machine ${machineId}: ${err.message}`);
+    }
+  }
+
+  const allSkus = Object.keys(catalog);
+  console.log(`Product catalog sync: ${allSkus.length} distinct products across ${channelCount} channels`);
+
+  // Classify created vs updated for the returned counts (best-effort: a product
+  // created concurrently between this read and the upsert just lands as an
+  // "updated" instead — the upsert itself stays correct either way).
   const existing = await prisma.product.findMany({
     where: { sku: { in: allSkus } },
     select: { sku: true },
@@ -307,32 +332,27 @@ export async function syncProductCatalog(config) {
   const ops = [];
 
   for (const [sku, vl] of Object.entries(catalog)) {
-    if (existingSet.has(sku)) {
-      ops.push(prisma.product.update({
-        where: { sku },
-        data: {
-          name: vl.productName,
-          ...(vl.category != null && { category: vl.category }),
-          ...(vl.costPrice > 0 && { unitCost: vl.costPrice }),
-          ...(vl.salePrice > 0 && { salePrice: vl.salePrice }),
-        },
-      }));
-      updated++;
-    } else {
-      const meal = guessFreshMeal(vl.productName);
-      ops.push(prisma.product.create({
-        data: {
-          sku,
-          name: vl.productName,
-          category: vl.category || null,
-          unitCost: vl.costPrice > 0 ? vl.costPrice : null,
-          salePrice: vl.salePrice > 0 ? vl.salePrice : null,
-          isFreshMeal: meal.isFreshMeal,
-          mealType: meal.mealType,
-        },
-      }));
-      created++;
-    }
+    const meal = guessFreshMeal(vl.productName);
+    ops.push(prisma.product.upsert({
+      where: { sku },
+      create: {
+        sku,
+        name: vl.productName,
+        category: vl.category || null,
+        unitCost: vl.costPrice > 0 ? vl.costPrice : null,
+        salePrice: vl.salePrice > 0 ? vl.salePrice : null,
+        isFreshMeal: meal.isFreshMeal,
+        mealType: meal.mealType,
+      },
+      update: {
+        name: vl.productName,
+        ...(vl.category != null && { category: vl.category }),
+        ...(vl.costPrice > 0 && { unitCost: vl.costPrice }),
+        ...(vl.salePrice > 0 && { salePrice: vl.salePrice }),
+        // fresh-meal classification intentionally left untouched on update
+      },
+    }));
+    if (existingSet.has(sku)) updated++; else created++;
   }
 
   // Run in batched transactions to avoid exhausting the connection pool
@@ -348,12 +368,12 @@ export async function syncProductCatalog(config) {
       status: 'success',
       salesCreated: created,   // generic counters reused: created products
       salesSkipped: updated,   //                          updated products
-      metadata: { created, updated, total: allSkus.length, channelCount: channels.length },
+      metadata: { created, updated, total: allSkus.length, channelCount, machineCount: machineIds.length },
     },
   }).catch(() => {}); // logging is best-effort, never fail the sync over it
 
-  console.log(`Product catalog sync: ${created} created, ${updated} updated (${allSkus.length} products across ${channels.length} channels)`);
-  return { created, updated, total: allSkus.length, channelCount: channels.length };
+  console.log(`Product catalog sync: complete — ${created} created, ${updated} updated (${allSkus.length} products across ${channelCount} channels, ${machineIds.length} machines)`);
+  return { created, updated, total: allSkus.length, channelCount, machineCount: machineIds.length };
 }
 
 /**

@@ -328,6 +328,7 @@ router.post('/sync/products', asyncHandler(async (req, res) => {
     const result = await syncProductCatalog(config);
     res.json({ success: true, ...result });
   } catch (err) {
+    console.error('Product catalog sync failed:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 }));

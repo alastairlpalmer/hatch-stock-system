@@ -64,8 +64,10 @@ export const vendliveService = {
 
   // Proactively pull the full VendLive product catalog into our DB so products
   // exist before they are ever sold. Returns { created, updated, total, channelCount }.
+  // Scans every machine's planogram, so it can take longer than the default 30s
+  // request timeout — allow up to 2 minutes.
   syncProducts: async () => {
-    const response = await api.post('/vendlive/sync/products');
+    const response = await api.post('/vendlive/sync/products', {}, { timeout: 120000 });
     return response.data;
   },
 
