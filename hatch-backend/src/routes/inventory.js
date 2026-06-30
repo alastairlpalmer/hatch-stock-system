@@ -4,6 +4,11 @@ import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { categorizeBatchesByExpiry } from '../utils/expiry.js';
 import { resolveOrderingConfig, DEFAULT_LEAD_TIME_DAYS, DEFAULT_COVER_DAYS } from '../config/ordering.js';
+import {
+  recomputeWarehouseStock,
+  consumeBatchesFEFO,
+  setWarehouseStockAbsolute,
+} from '../utils/inventory-stock.js';
 
 const router = express.Router();
 
@@ -12,34 +17,6 @@ const skuSchema = z.string().min(1);
 const quantitySchema = z.coerce.number().int();
 const nonNegativeQty = quantitySchema.refine(v => v >= 0, { message: 'quantity must be >= 0' });
 const positiveQty = quantitySchema.refine(v => v > 0, { message: 'quantity must be > 0' });
-
-/**
- * Atomically apply a delta to a stock row inside a transaction, clamping at 0.
- * Negative results are clamped (matching previous behaviour) — but unlike a
- * silent Math.max(0, …) we log them, since clamping hides shrinkage.
- */
-async function applyStockDelta(tx, model, where, createData, delta) {
-  await tx[model].upsert({
-    where,
-    create: { ...createData, quantity: Math.max(0, delta) },
-    update: { quantity: { increment: delta } },
-  });
-  if (delta < 0) {
-    const clamped = await tx[model].updateMany({
-      where: { ...whereToFlat(where), quantity: { lt: 0 } },
-      data: { quantity: 0 },
-    });
-    if (clamped.count > 0) {
-      console.warn(`Stock clamped to 0 (over-decrement) on ${model}:`, JSON.stringify(where));
-    }
-  }
-}
-
-// Prisma compound-unique `where` ({ warehouseId_sku: { … } }) → flat filter for updateMany
-function whereToFlat(where) {
-  const key = Object.keys(where)[0];
-  return where[key];
-}
 
 // ============ WAREHOUSE STOCK ============
 
@@ -80,22 +57,18 @@ const warehouseUpdateSchema = z.object({
 router.post('/warehouse/update', asyncHandler(async (req, res) => {
   const { warehouseId, sku, quantity, isDelta } = warehouseUpdateSchema.parse(req.body);
 
-  const where = { warehouseId_sku: { warehouseId, sku } };
-
-  const stock = await prisma.$transaction(async (tx) => {
+  // Batches are authoritative — a delta or absolute set is materialised as batch
+  // changes (see setWarehouseStockAbsolute), then the aggregate is recomputed.
+  const total = await prisma.$transaction(async (tx) => {
+    let target = quantity;
     if (isDelta) {
-      await applyStockDelta(tx, 'warehouseStock', where, { warehouseId, sku }, quantity);
-    } else {
-      await tx.warehouseStock.upsert({
-        where,
-        create: { warehouseId, sku, quantity: Math.max(0, quantity) },
-        update: { quantity: Math.max(0, quantity) },
-      });
+      const agg = await tx.stockBatch.aggregate({ where: { warehouseId, sku }, _sum: { remainingQty: true } });
+      target = (agg._sum.remainingQty || 0) + quantity;
     }
-    return tx.warehouseStock.findUnique({ where });
+    return setWarehouseStockAbsolute(tx, warehouseId, sku, target);
   });
 
-  res.json(stock);
+  res.json({ warehouseId, sku, quantity: total });
 }));
 
 // Bulk update warehouse stock (absolute quantities)
@@ -107,15 +80,17 @@ const warehouseBulkSchema = z.object({
 router.post('/warehouse/bulk', asyncHandler(async (req, res) => {
   const { warehouseId, items } = warehouseBulkSchema.parse(req.body);
 
-  await prisma.$transaction(
-    items.map(item =>
-      prisma.warehouseStock.upsert({
-        where: { warehouseId_sku: { warehouseId, sku: item.sku } },
-        create: { warehouseId, sku: item.sku, quantity: item.quantity },
-        update: { quantity: item.quantity },
-      })
-    )
-  );
+  // Each absolute set reconciles to batches. Chunk into separate transactions so
+  // a large CSV import doesn't hold one long-running transaction open.
+  const CHUNK = 25;
+  for (let i = 0; i < items.length; i += CHUNK) {
+    const chunk = items.slice(i, i + CHUNK);
+    await prisma.$transaction(async (tx) => {
+      for (const item of chunk) {
+        await setWarehouseStockAbsolute(tx, warehouseId, item.sku, item.quantity, 'CSV import adjustment');
+      }
+    });
+  }
 
   res.json({ updated: items.length, errors: [] });
 }));
@@ -140,8 +115,8 @@ router.post('/transfers', asyncHandler(async (req, res) => {
   }
 
   const transfer = await prisma.$transaction(async (tx) => {
-    // Pre-check source stock: applyStockDelta clamps at 0, so reject the whole
-    // transfer if any SKU is short rather than silently losing product.
+    // Pre-check source stock: reject the whole transfer if any SKU is short
+    // rather than silently losing product when batches are drained.
     for (const { sku, quantity } of items) {
       const source = await tx.warehouseStock.findUnique({
         where: { warehouseId_sku: { warehouseId: fromWarehouseId, sku } },
@@ -157,18 +132,27 @@ router.post('/transfers', asyncHandler(async (req, res) => {
     }
 
     for (const { sku, quantity } of items) {
-      await applyStockDelta(
-        tx, 'warehouseStock',
-        { warehouseId_sku: { warehouseId: fromWarehouseId, sku } },
-        { warehouseId: fromWarehouseId, sku },
-        -quantity,
-      );
-      await applyStockDelta(
-        tx, 'warehouseStock',
-        { warehouseId_sku: { warehouseId: toWarehouseId, sku } },
-        { warehouseId: toWarehouseId, sku },
-        quantity,
-      );
+      // Move actual batches FEFO from source to destination so expiry travels
+      // with the stock (the destination batches keep the original expiry, damage
+      // flags and received date). Both aggregates are then recomputed from
+      // batches.
+      const { consumed } = await consumeBatchesFEFO(tx, fromWarehouseId, sku, quantity);
+      for (const { batch, take } of consumed) {
+        await tx.stockBatch.create({
+          data: {
+            warehouseId: toWarehouseId,
+            sku,
+            quantity: take,
+            remainingQty: take,
+            expiryDate: batch.expiryDate,
+            hasDamage: batch.hasDamage,
+            damageNotes: batch.damageNotes,
+            receivedAt: batch.receivedAt,
+          },
+        });
+      }
+      await recomputeWarehouseStock(tx, fromWarehouseId, sku);
+      await recomputeWarehouseStock(tx, toWarehouseId, sku);
     }
 
     return tx.stockTransfer.create({
@@ -390,6 +374,41 @@ router.get('/batches/expiring', asyncHandler(async (req, res) => {
   res.json(categorizeBatchesByExpiry(batches));
 }));
 
+// Drift check: any (warehouse, sku) where warehouse_stock.quantity disagrees
+// with SUM(batch remaining_qty). Should be EMPTY once batches are authoritative
+// — used to verify the backfill and ongoing consistency.
+router.get('/batches/drift', asyncHandler(async (req, res) => {
+  const [stock, sums] = await Promise.all([
+    prisma.warehouseStock.findMany(),
+    prisma.stockBatch.groupBy({
+      by: ['warehouseId', 'sku'],
+      _sum: { remainingQty: true },
+    }),
+  ]);
+
+  const sumMap = new Map(sums.map(s => [`${s.warehouseId}|${s.sku}`, s._sum.remainingQty || 0]));
+  const seen = new Set();
+  const drift = [];
+
+  for (const s of stock) {
+    const key = `${s.warehouseId}|${s.sku}`;
+    seen.add(key);
+    const batchSum = sumMap.get(key) || 0;
+    if (s.quantity !== batchSum) {
+      drift.push({ warehouseId: s.warehouseId, sku: s.sku, aggregate: s.quantity, batchSum, diff: s.quantity - batchSum });
+    }
+  }
+  // Batches that sum > 0 but have no warehouse_stock row at all
+  for (const [key, batchSum] of sumMap) {
+    if (!seen.has(key) && batchSum !== 0) {
+      const [warehouseId, sku] = key.split('|');
+      drift.push({ warehouseId, sku, aggregate: 0, batchSum, diff: -batchSum });
+    }
+  }
+
+  res.json({ count: drift.length, drift });
+}));
+
 // Create batch
 const batchCreateSchema = z.object({
   warehouseId: z.string().min(1),
@@ -406,16 +425,22 @@ const batchCreateSchema = z.object({
 router.post('/batches', asyncHandler(async (req, res) => {
   const { warehouseId, sku, quantity, expiryDate, hasDamage, damageNotes } = batchCreateSchema.parse(req.body);
 
-  const batch = await prisma.stockBatch.create({
-    data: {
-      warehouseId,
-      sku,
-      quantity,
-      remainingQty: quantity,
-      expiryDate: expiryDate ? new Date(expiryDate) : null,
-      hasDamage: hasDamage || false,
-      damageNotes,
-    },
+  // Batches are authoritative for warehouse quantity, so creating one bumps the
+  // aggregate. This is the "Add Stock" path (and any direct batch add).
+  const batch = await prisma.$transaction(async (tx) => {
+    const created = await tx.stockBatch.create({
+      data: {
+        warehouseId,
+        sku,
+        quantity,
+        remainingQty: quantity,
+        expiryDate: expiryDate ? new Date(expiryDate) : null,
+        hasDamage: hasDamage || false,
+        damageNotes,
+      },
+    });
+    await recomputeWarehouseStock(tx, warehouseId, sku);
+    return created;
   });
 
   res.status(201).json(batch);
@@ -437,17 +462,40 @@ const batchUpdateSchema = z.object({
 router.put('/batches/:id', asyncHandler(async (req, res) => {
   const { remainingQty, hasDamage, damageNotes, expiryDate } = batchUpdateSchema.parse(req.body);
 
-  const batch = await prisma.stockBatch.update({
-    where: { id: req.params.id },
-    data: {
-      ...(remainingQty !== undefined && { remainingQty }),
-      ...(hasDamage !== undefined && { hasDamage }),
-      ...(damageNotes !== undefined && { damageNotes }),
-      ...(expiryDate !== undefined && { expiryDate: expiryDate ? new Date(expiryDate) : null }),
-    },
+  // Editing a batch's remaining quantity must keep the warehouse aggregate in
+  // lock-step (this was the drift bug — the old code updated the batch but not
+  // warehouse_stock). Recompute is cheap and correct for every field change.
+  const batch = await prisma.$transaction(async (tx) => {
+    const updated = await tx.stockBatch.update({
+      where: { id: req.params.id },
+      data: {
+        ...(remainingQty !== undefined && { remainingQty }),
+        ...(hasDamage !== undefined && { hasDamage }),
+        ...(damageNotes !== undefined && { damageNotes }),
+        ...(expiryDate !== undefined && { expiryDate: expiryDate ? new Date(expiryDate) : null }),
+      },
+    });
+    await recomputeWarehouseStock(tx, updated.warehouseId, updated.sku);
+    return updated;
   });
 
   res.json(batch);
+}));
+
+// Hard-delete a batch created in error. Distinct from write-off (which journals
+// the loss as wastage): delete is for genuine mistakes and leaves no
+// StockRemoval. The warehouse aggregate is recomputed from the surviving batches.
+router.delete('/batches/:id', asyncHandler(async (req, res) => {
+  const result = await prisma.$transaction(async (tx) => {
+    const batch = await tx.stockBatch.findUnique({ where: { id: req.params.id } });
+    if (!batch) return null;
+    await tx.stockBatch.delete({ where: { id: req.params.id } });
+    await recomputeWarehouseStock(tx, batch.warehouseId, batch.sku);
+    return batch;
+  });
+
+  if (!result) return res.status(404).json({ error: 'Batch not found' });
+  res.json({ success: true, deleted: result.id });
 }));
 
 // Write off a batch (expired / damaged stock).
@@ -490,13 +538,7 @@ router.post('/batches/:id/write-off', asyncHandler(async (req, res) => {
       throw conflict;
     }
 
-    await applyStockDelta(
-      tx,
-      'warehouseStock',
-      { warehouseId_sku: { warehouseId: batch.warehouseId, sku: batch.sku } },
-      { warehouseId: batch.warehouseId, sku: batch.sku },
-      -writeOffQty,
-    );
+    await recomputeWarehouseStock(tx, batch.warehouseId, batch.sku);
 
     const removal = await tx.stockRemoval.create({
       data: {
@@ -542,32 +584,11 @@ router.post('/removals', asyncHandler(async (req, res) => {
     });
 
     for (const item of items) {
-      await applyStockDelta(
-        tx,
-        'warehouseStock',
-        { warehouseId_sku: { warehouseId, sku: item.sku } },
-        { warehouseId, sku: item.sku },
-        -item.quantity,
-      );
-
       // Consume batches FEFO (first-expiry-first-out) so the expiry report
-      // reflects what actually left the warehouse. Best-effort: historical
-      // batches may not cover the quantity, in which case we drain what we
-      // can — warehouse totals remain the source of truth for quantity.
-      let toConsume = item.quantity;
-      const batches = await tx.stockBatch.findMany({
-        where: { warehouseId, sku: item.sku, remainingQty: { gt: 0 } },
-        orderBy: [{ expiryDate: { sort: 'asc', nulls: 'last' } }, { receivedAt: 'asc' }],
-      });
-      for (const batch of batches) {
-        if (toConsume <= 0) break;
-        const take = Math.min(batch.remainingQty, toConsume);
-        await tx.stockBatch.update({
-          where: { id: batch.id },
-          data: { remainingQty: { decrement: take } },
-        });
-        toConsume -= take;
-      }
+      // reflects what actually left the warehouse, then recompute the aggregate
+      // from the surviving batches (batches are the source of truth for qty).
+      await consumeBatchesFEFO(tx, warehouseId, item.sku, item.quantity);
+      await recomputeWarehouseStock(tx, warehouseId, item.sku);
     }
 
     return record;

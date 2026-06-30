@@ -62,6 +62,13 @@ export const vendliveService = {
     return response.data;
   },
 
+  // Proactively pull the full VendLive product catalog into our DB so products
+  // exist before they are ever sold. Returns { created, updated, total, channelCount }.
+  syncProducts: async () => {
+    const response = await api.post('/vendlive/sync/products');
+    return response.data;
+  },
+
   getSyncLogs: async () => {
     const response = await api.get('/vendlive/sync/logs');
     return response.data;

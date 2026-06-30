@@ -868,8 +868,13 @@ export function StockProvider({ children }) {
       return newBatch;
     }
     const result = await inventoryService.createBatch(batch);
-    const batches = await inventoryService.getBatches();
-    setData(prev => ({ ...prev, stockBatches: batches }));
+    // Batches are authoritative for warehouse quantity, so creating one changes
+    // the aggregate — refresh both batches and warehouse stock.
+    const [batches, stock] = await Promise.all([
+      inventoryService.getBatches(),
+      inventoryService.getWarehouseStock(),
+    ]);
+    setData(prev => ({ ...prev, stockBatches: batches, stock }));
     return result;
   }, [data, isOfflineMode, saveData]);
 
@@ -883,11 +888,30 @@ export function StockProvider({ children }) {
       return updated.stockBatches.find(b => b.id === id);
     }
     const result = await inventoryService.updateBatch(id, updates);
-    setData(prev => ({
-      ...prev,
-      stockBatches: prev.stockBatches.map(b => b.id === id ? result : b),
-    }));
+    // Editing a batch's quantity moves the warehouse total — refresh both.
+    const [batches, stock] = await Promise.all([
+      inventoryService.getBatches(),
+      inventoryService.getWarehouseStock(),
+    ]);
+    setData(prev => ({ ...prev, stockBatches: batches, stock }));
     return result;
+  }, [data, isOfflineMode, saveData]);
+
+  const deleteBatch = useCallback(async (id) => {
+    if (isOfflineMode) {
+      const updated = {
+        ...data,
+        stockBatches: data.stockBatches.filter(b => b.id !== id),
+      };
+      await saveData(updated);
+      return;
+    }
+    await inventoryService.deleteBatch(id);
+    const [batches, stock] = await Promise.all([
+      inventoryService.getBatches(),
+      inventoryService.getWarehouseStock(),
+    ]);
+    setData(prev => ({ ...prev, stockBatches: batches, stock }));
   }, [data, isOfflineMode, saveData]);
 
   const loadBatches = useCallback(async (filters = {}) => {
@@ -1119,6 +1143,7 @@ export function StockProvider({ children }) {
     // Batch operations
     createBatch,
     updateBatch,
+    deleteBatch,
     loadBatches,
     loadExpiryAlerts,
 
