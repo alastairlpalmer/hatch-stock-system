@@ -90,6 +90,11 @@ model Location {
   leadTimeDays Int? @map("lead_time_days")
   coverDays    Int? @map("cover_days")
 
+  // Retired locations: kept for historical reporting but hidden from the
+  // active locations list. Sales are tagged by name (not FK) so their history
+  // survives regardless. See manual-sql/010_archive_locations.sql.
+  archivedAt DateTime? @map("archived_at")
+
   // Relations
   stock              LocationStock[]
   configs            LocationConfig[]

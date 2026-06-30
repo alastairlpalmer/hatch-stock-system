@@ -6,9 +6,14 @@ const router = express.Router();
 
 // Get all locations
 router.get('/', asyncHandler(async (req, res) => {
-  const { type } = req.query;
+  const { type, includeArchived } = req.query;
 
-  const where = type ? { type } : {};
+  // Archived (retired) locations are hidden from the active list by default.
+  // Pass ?includeArchived=true to include them (e.g. admin management views).
+  const where = {
+    ...(type ? { type } : {}),
+    ...(includeArchived === 'true' ? {} : { archivedAt: null }),
+  };
 
   const locations = await prisma.location.findMany({
     where,
