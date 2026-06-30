@@ -3,6 +3,7 @@ import { z } from 'zod';
 import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { batchInputFromReceivedItem } from '../utils/receiving.js';
+import { recomputeWarehouseStock } from '../utils/inventory-stock.js';
 import { buildOrderSuggestions } from '../services/order-suggestions.js';
 
 const router = express.Router();
@@ -268,17 +269,13 @@ router.post('/:id/receive', asyncHandler(async (req, res) => {
 
     for (const item of items) {
       // Create batch for expiry tracking (expiryDate null when not provided —
-      // surfaced as "missing" by the expiry views, never blocks receiving)
+      // surfaced as "missing" by the expiry views, never blocks receiving).
+      // Batches are authoritative: the warehouse aggregate is then recomputed
+      // from them rather than incremented separately (which could drift).
       await tx.stockBatch.create({
         data: batchInputFromReceivedItem(item, warehouseId),
       });
-
-      // Atomic increment — no read-modify-write race
-      await tx.warehouseStock.upsert({
-        where: { warehouseId_sku: { warehouseId, sku: item.sku } },
-        create: { warehouseId, sku: item.sku, quantity: item.quantity },
-        update: { quantity: { increment: item.quantity } },
-      });
+      await recomputeWarehouseStock(tx, warehouseId, item.sku);
     }
 
     return tx.order.findUnique({ where: { id: order.id } });
