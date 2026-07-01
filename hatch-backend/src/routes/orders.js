@@ -4,7 +4,10 @@ import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { batchInputFromReceivedItem } from '../utils/receiving.js';
 import { recomputeWarehouseStock } from '../utils/inventory-stock.js';
-import { buildOrderSuggestions } from '../services/order-suggestions.js';
+import {
+  buildOrderSuggestions,
+  buildConsolidatedSuggestions,
+} from '../services/order-suggestions.js';
 
 const router = express.Router();
 
@@ -48,6 +51,34 @@ router.get('/suggestions', asyncHandler(async (req, res) => {
   const result = await buildOrderSuggestions(locationId);
   if (!result) {
     return res.status(404).json({ error: 'Location not found' });
+  }
+
+  res.json(result);
+}));
+
+// Consolidated suggestions across MANY locations — merged into one list per
+// product / fresh-meal group, tagged with each line's preferred supplier so the
+// UI can build one PO per supplier. `locationIds` is a comma-separated list;
+// when omitted, every location is included.
+// NOTE: must be declared BEFORE `/:id` (route-ordering gotcha).
+router.get('/suggestions/consolidated', asyncHandler(async (req, res) => {
+  const { locationIds } = req.query;
+
+  let ids;
+  if (locationIds && locationIds.trim()) {
+    ids = locationIds.split(',').map((s) => s.trim()).filter(Boolean);
+  } else {
+    const all = await prisma.location.findMany({ select: { id: true } });
+    ids = all.map((l) => l.id);
+  }
+
+  if (ids.length === 0) {
+    return res.json({ locationIds: [], locations: [], suggestions: [] });
+  }
+
+  const result = await buildConsolidatedSuggestions(ids);
+  if (!result) {
+    return res.status(404).json({ error: 'No matching locations found' });
   }
 
   res.json(result);
