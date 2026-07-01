@@ -165,6 +165,7 @@ export async function buildOrderSuggestions(locationId, now = new Date()) {
       sku: p.sku,
       name: p.name,
       category: p.category,
+      preferredSupplierId: p.preferredSupplierId ?? null,
       currentStock,
       minStock: cfg.minStock ?? null,
       maxStock: cfg.maxStock ?? null,
@@ -207,10 +208,15 @@ export async function buildOrderSuggestions(locationId, now = new Date()) {
     });
     if (!sug) continue;
 
+    // Frive is normally a single supplier; take the first member that has one.
+    const groupSupplierId =
+      members.find((p) => p.preferredSupplierId)?.preferredSupplierId ?? null;
+
     suggestions.push({
       type: 'freshMealGroup',
       mealType,
       name: `Frive ${mealType}`,
+      preferredSupplierId: groupSupplierId,
       currentStock,
       minStock: cfg.minStock ?? null,
       maxStock: cfg.maxStock ?? null,
@@ -224,6 +230,7 @@ export async function buildOrderSuggestions(locationId, now = new Date()) {
       members: members.map((p) => ({
         sku: p.sku,
         name: p.name,
+        preferredSupplierId: p.preferredSupplierId ?? null,
         currentStock: stockMap[p.sku] || 0,
         velocityLong: round(velOf(p.sku).vLong),
       })),
@@ -240,6 +247,130 @@ export async function buildOrderSuggestions(locationId, now = new Date()) {
     locationId,
     leadTimeDays,
     coverDays,
+    velocityWindows: VELOCITY_WINDOW_DAYS,
+    suggestions,
+  };
+}
+
+/**
+ * Build ONE consolidated purchase-order suggestion list across many locations.
+ *
+ * Runs the per-location engine for each location, then merges lines by product
+ * (SKU) or fresh-meal group (mealType): order quantities are SUMMED across
+ * locations, and every location that contributed keeps a breakdown row so the UI
+ * can expand a line into "which locations drove this". Each line is tagged with
+ * its preferred supplier so the frontend can group lines into per-supplier POs.
+ *
+ * Consolidation is additive: each location computes its own days-of-cover target
+ * independently, and we sum the resulting gaps — a location fully stocked simply
+ * contributes nothing. Returns null if none of the ids resolve to a location.
+ */
+export async function buildConsolidatedSuggestions(locationIds, now = new Date()) {
+  const locations = await prisma.location.findMany({
+    where: { id: { in: locationIds } },
+    select: { id: true, name: true },
+  });
+  if (locations.length === 0) return null;
+
+  const nameOf = Object.fromEntries(locations.map((l) => [l.id, l.name]));
+
+  const [perLocation, suppliers] = await Promise.all([
+    Promise.all(locations.map((l) => buildOrderSuggestions(l.id, now))),
+    prisma.supplier.findMany({ select: { id: true, name: true } }),
+  ]);
+  const supplierNameOf = Object.fromEntries(suppliers.map((s) => [s.id, s.name]));
+
+  // key -> merged line (with a private _memberVel accumulator for Frive splits)
+  const merged = new Map();
+
+  for (const result of perLocation) {
+    if (!result) continue;
+    const locId = result.locationId;
+
+    for (const s of result.suggestions) {
+      const key = s.type === 'freshMealGroup' ? `frive:${s.mealType}` : `sku:${s.sku}`;
+      let line = merged.get(key);
+
+      if (!line) {
+        const supplierId = s.preferredSupplierId ?? null;
+        line = {
+          id: key,
+          type: s.type,
+          sku: s.sku,           // undefined for a Frive group
+          mealType: s.mealType, // undefined for a plain product
+          name: s.name,
+          category: s.category ?? (s.type === 'freshMealGroup' ? 'Fresh Meal' : 'Other'),
+          supplierId,
+          supplierName: supplierId ? supplierNameOf[supplierId] || 'Unknown supplier' : null,
+          unitsPerBox: s.unitsPerBox || 1,
+          unitCost: s.unitCost || 0,
+          priority: 'warning',
+          currentStock: 0,
+          maxStock: 0,
+          maxStockKnown: true, // false as soon as any contributing location has no cap
+          orderQty: 0,
+          boxesNeeded: 0,
+          blendedVelocity: 0,
+          targetStock: 0,
+          perLocation: [],
+          _memberVel: {},
+        };
+        merged.set(key, line);
+      }
+
+      line.orderQty += s.orderQty;
+      line.boxesNeeded += s.boxesNeeded;
+      line.currentStock += s.currentStock;
+      line.blendedVelocity = round(line.blendedVelocity + (s.blendedVelocity || 0));
+      line.targetStock += s.targetStock;
+      if (s.maxStock == null) line.maxStockKnown = false;
+      else line.maxStock += s.maxStock;
+      if (s.priority === 'critical') line.priority = 'critical';
+
+      if (s.type === 'freshMealGroup') {
+        for (const m of s.members || []) {
+          const mv = (line._memberVel[m.sku] ||= {
+            sku: m.sku,
+            name: m.name,
+            preferredSupplierId: m.preferredSupplierId ?? null,
+            velocityLong: 0,
+          });
+          mv.velocityLong = round(mv.velocityLong + (m.velocityLong || 0));
+        }
+      }
+
+      line.perLocation.push({
+        locationId: locId,
+        locationName: nameOf[locId],
+        currentStock: s.currentStock,
+        orderQty: s.orderQty,
+        boxesNeeded: s.boxesNeeded,
+        daysOfCover: s.daysOfCover,
+        priority: s.priority,
+        blendedVelocity: s.blendedVelocity,
+        targetStock: s.targetStock,
+      });
+    }
+  }
+
+  const suggestions = [...merged.values()].map((line) => {
+    const { _memberVel, maxStockKnown, ...rest } = line;
+    return {
+      ...rest,
+      maxStock: maxStockKnown ? rest.maxStock : null,
+      members: line.type === 'freshMealGroup' ? Object.values(_memberVel) : undefined,
+    };
+  });
+
+  // Critical first, then heaviest order first (rough proxy for urgency).
+  suggestions.sort((a, b) => {
+    if (a.priority !== b.priority) return a.priority === 'critical' ? -1 : 1;
+    return b.orderQty - a.orderQty;
+  });
+
+  return {
+    locationIds: locations.map((l) => l.id),
+    locations,
     velocityWindows: VELOCITY_WINDOW_DAYS,
     suggestions,
   };

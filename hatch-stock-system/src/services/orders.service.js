@@ -76,6 +76,19 @@ export const ordersService = {
     });
     return response.data;
   },
+
+  /**
+   * Generate ONE consolidated suggestion list across many locations. Lines are
+   * merged per product / fresh-meal group and tagged with their preferred
+   * supplier so the caller can split them into one PO per supplier.
+   * @param {string[]} [locationIds] - omit/empty = all locations
+   */
+  generateConsolidatedSuggestions: async (locationIds = []) => {
+    const response = await api.get('/orders/suggestions/consolidated', {
+      params: locationIds.length ? { locationIds: locationIds.join(',') } : {},
+    });
+    return response.data;
+  },
 };
 
 export default ordersService;
