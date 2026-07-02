@@ -24,6 +24,7 @@ import SharedBuyingList from './components/pages/SharedBuyingList';
 import PickLists from './components/pages/restock/PickLists';
 import PickListDetail from './components/pages/restock/PickListDetail';
 import StockCheck from './components/pages/restock/StockCheck';
+import RestockRun from './components/pages/restock/RestockRun';
 
 // Parent layouts
 import OrdersLayout from './components/pages/orders/OrdersLayout';
@@ -164,6 +165,7 @@ function AppLayout() {
                 <Route path="picklists" element={<PickLists />} />
                 <Route path="picklists/:id" element={<PickListDetail />} />
                 <Route path="check" element={<StockCheck />} />
+                <Route path="run" element={<RestockRun />} />
                 <Route path="remove" element={<RemoveStock />} />
                 <Route path="machine" element={<RestockMachine />} />
                 <Route path="shrinkage" element={<Shrinkage />} />

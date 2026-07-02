@@ -139,10 +139,10 @@ export default function RestockWorkflow() {
         />
         <StepCard
           number={3}
-          title="Restock Machine"
-          description="On-site: count current stock at the location and load the new units."
-          ctaLabel={completedSteps.remove ? 'Restock machine' : 'Remove stock first'}
-          to="/restock/machine"
+          title="Run the route"
+          description="Run the route — check and restock each machine, then reconcile the van."
+          ctaLabel={completedSteps.remove ? 'Open today’s run' : 'Pack first'}
+          to="/restock/run"
           status={step3Status}
           disabled={!completedSteps.remove}
         />

@@ -256,6 +256,262 @@ export async function generatePickList({
 }
 
 /**
+ * Van reconciliation math for a pick list: per SKU, what was packed into the
+ * van, what has been loaded into machines (across ALL linked restocks), what
+ * has been returned to the warehouse, and what should still be on the van.
+ * Pure; exported for tests.
+ *
+ * @param {Array<{ sku, name, totalQty, packedQty? }>} pickListItems
+ * @param {Array<{ items: Array<{ sku, quantity }> }>} restockRecords all RestockRecords linked to the list
+ * @param {Array<{ sku, quantity }>} returnedItems the list's returnedItems journal
+ * @returns {{ perSku: Array<{ sku, name, packed, loaded, returned, remaining }>,
+ *             packedUnits: number, loadedUnits: number, returnedUnits: number, remainingUnits: number }}
+ */
+export function buildReconciliation(pickListItems, restockRecords, returnedItems) {
+  const loadedBySku = new Map();
+  for (const record of restockRecords || []) {
+    for (const item of Array.isArray(record.items) ? record.items : []) {
+      loadedBySku.set(item.sku, (loadedBySku.get(item.sku) || 0) + (item.quantity || 0));
+    }
+  }
+  const returnedBySku = new Map();
+  for (const item of Array.isArray(returnedItems) ? returnedItems : []) {
+    returnedBySku.set(item.sku, (returnedBySku.get(item.sku) || 0) + (item.quantity || 0));
+  }
+
+  const perSku = (Array.isArray(pickListItems) ? pickListItems : []).map((item) => {
+    const packed = item.packedQty ?? item.totalQty ?? 0;
+    const loaded = loadedBySku.get(item.sku) || 0;
+    const returned = returnedBySku.get(item.sku) || 0;
+    return {
+      sku: item.sku,
+      name: item.name,
+      packed,
+      loaded,
+      returned,
+      remaining: Math.max(0, packed - loaded - returned),
+    };
+  });
+
+  const sumOf = (key) => perSku.reduce((sum, row) => sum + row[key], 0);
+  return {
+    perSku,
+    packedUnits: sumOf('packed'),
+    loadedUnits: sumOf('loaded'),
+    returnedUnits: sumOf('returned'),
+    remainingUnits: sumOf('remaining'),
+  };
+}
+
+/**
+ * Validate a leftovers-return request against the reconciliation: every SKU
+ * must be on the pick list and no return may exceed what should still be on
+ * the van. Duplicate request lines for a SKU are summed before checking.
+ * Returns the offending rows ([] when the request is valid). Pure; exported
+ * for tests.
+ *
+ * @param {Array<{ sku, remaining }>} perSku from buildReconciliation
+ * @param {Array<{ sku, quantity }>} requestItems
+ * @returns {Array<{ sku, requested: number, remaining: number }>}
+ */
+export function findReturnViolations(perSku, requestItems) {
+  const remainingBySku = new Map(perSku.map((row) => [row.sku, row.remaining]));
+  const requestedBySku = new Map();
+  for (const { sku, quantity } of requestItems) {
+    requestedBySku.set(sku, (requestedBySku.get(sku) || 0) + quantity);
+  }
+
+  const violations = [];
+  for (const [sku, requested] of requestedBySku) {
+    const remaining = remainingBySku.get(sku);
+    if (remaining === undefined || requested > remaining) {
+      violations.push({ sku, requested, remaining: remaining ?? 0 });
+    }
+  }
+  return violations;
+}
+
+/**
+ * Everything the route-run screen needs for one pick list in a single call:
+ * the list itself, the per-location plan with the latest stock check and
+ * linked restock for each stop, the van reconciliation, and whether every
+ * stop has been restocked.
+ *
+ * Location order follows the route (RestockRoute.locationIds) when the list
+ * was generated from one, falling back to first appearance in the items'
+ * perLocation entries (which is route order at generation time anyway).
+ */
+export async function getPickListRun(id) {
+  const pickList = await prisma.pickList.findUnique({ where: { id } });
+  if (!pickList) throw httpError(404, 'Pick list not found');
+
+  const items = Array.isArray(pickList.items) ? pickList.items : [];
+
+  // Collect the locations on the list (name + first-appearance order).
+  const locationNameById = new Map();
+  const appearanceOrder = [];
+  for (const item of items) {
+    for (const p of Array.isArray(item.perLocation) ? item.perLocation : []) {
+      if (!locationNameById.has(p.locationId)) {
+        locationNameById.set(p.locationId, p.locationName);
+        appearanceOrder.push(p.locationId);
+      }
+    }
+  }
+
+  // Prefer the route's stop order; locations no longer on the route (or when
+  // the route is gone) keep their appearance order at the end.
+  let orderedIds = appearanceOrder;
+  if (pickList.routeId) {
+    const route = await prisma.restockRoute.findUnique({ where: { id: pickList.routeId } });
+    const routeOrder = Array.isArray(route?.locationIds) ? route.locationIds : [];
+    const onList = routeOrder.filter((locId) => locationNameById.has(locId));
+    const rest = appearanceOrder.filter((locId) => !onList.includes(locId));
+    orderedIds = [...onList, ...rest];
+  }
+
+  const [stockChecks, restocks] = await Promise.all([
+    // Only checks performed since the list was created count as "this run".
+    prisma.stockCheck.findMany({
+      where: { locationId: { in: orderedIds }, createdAt: { gte: pickList.createdAt } },
+      orderBy: { createdAt: 'desc' },
+    }),
+    prisma.restockRecord.findMany({
+      where: { pickListId: id },
+      orderBy: { createdAt: 'desc' },
+    }),
+  ]);
+
+  // Newest-first, so the first row seen per location is the latest.
+  const latestCheckByLocation = new Map();
+  for (const check of stockChecks) {
+    if (!latestCheckByLocation.has(check.locationId)) latestCheckByLocation.set(check.locationId, check);
+  }
+  const latestRestockByLocation = new Map();
+  for (const restock of restocks) {
+    if (!latestRestockByLocation.has(restock.locationId)) latestRestockByLocation.set(restock.locationId, restock);
+  }
+
+  const locations = orderedIds.map((locationId) => {
+    const planned = [];
+    for (const item of items) {
+      for (const p of Array.isArray(item.perLocation) ? item.perLocation : []) {
+        if (p.locationId === locationId) planned.push({ sku: item.sku, name: item.name, qty: p.qty });
+      }
+    }
+
+    const check = latestCheckByLocation.get(locationId);
+    const restock = latestRestockByLocation.get(locationId);
+    return {
+      locationId,
+      locationName: locationNameById.get(locationId),
+      planned,
+      plannedUnits: planned.reduce((sum, p) => sum + p.qty, 0),
+      stockCheck: check
+        ? {
+            id: check.id,
+            createdAt: check.createdAt,
+            performedBy: check.performedBy,
+            discrepancies: (Array.isArray(check.items) ? check.items : [])
+              .filter((i) => (i.variance || 0) !== 0).length,
+          }
+        : null,
+      restock: restock
+        ? {
+            id: restock.id,
+            createdAt: restock.createdAt,
+            performedBy: restock.performedBy,
+            units: (Array.isArray(restock.items) ? restock.items : [])
+              .reduce((sum, i) => sum + (i.quantity || 0), 0),
+          }
+        : null,
+    };
+  });
+
+  return {
+    pickList,
+    locations,
+    reconciliation: buildReconciliation(items, restocks, pickList.returnedItems),
+    allDone: locations.length > 0 && locations.every((l) => l.restock !== null),
+  };
+}
+
+/**
+ * Book leftovers from the van back into the warehouse after a run: each
+ * returned SKU becomes a new StockBatch at the list's warehouse, dated with
+ * the earliest expiry of that SKU's original allocation (conservative for
+ * FEFO — we can't know which date-lot actually came back), and the return is
+ * journalled on the list's returnedItems so reconciliation stays honest.
+ *
+ * Rejects returns exceeding what should still be on the van
+ * (packed − loaded − already returned) with a 400 carrying `violations`.
+ */
+export async function returnPickListLeftovers(id, { items, performedBy = null }) {
+  const list = await prisma.pickList.findUnique({ where: { id } });
+  if (!list) throw httpError(404, 'Pick list not found');
+  if (list.status !== 'packed') {
+    throw httpError(409, `Only a packed pick list can take returns (status is ${list.status})`);
+  }
+
+  const listItems = Array.isArray(list.items) ? list.items : [];
+  const restocks = await prisma.restockRecord.findMany({ where: { pickListId: id } });
+
+  const { perSku } = buildReconciliation(listItems, restocks, list.returnedItems);
+  const violations = findReturnViolations(perSku, items);
+  if (violations.length > 0) {
+    const err = httpError(
+      400,
+      `Return exceeds what is left on the van for: ${violations.map((v) => v.sku).join(', ')}`,
+    );
+    err.violations = violations;
+    throw err;
+  }
+
+  const itemBySku = new Map(listItems.map((item) => [item.sku, item]));
+  const earliestExpiryOf = (item) => {
+    const dates = (Array.isArray(item?.batches) ? item.batches : [])
+      .map((b) => b.expiryDate)
+      .filter(Boolean)
+      .map((d) => new Date(d));
+    if (dates.length === 0) return null;
+    return new Date(Math.min(...dates.map((d) => d.getTime())));
+  };
+
+  const returnedAt = new Date().toISOString();
+  const pickList = await prisma.$transaction(async (tx) => {
+    for (const { sku, quantity } of items) {
+      await tx.stockBatch.create({
+        data: {
+          warehouseId: list.warehouseId,
+          sku,
+          quantity,
+          remainingQty: quantity,
+          expiryDate: earliestExpiryOf(itemBySku.get(sku)),
+          damageNotes: `Returned from pick list ${list.id}${performedBy ? ` by ${performedBy}` : ''}`,
+        },
+      });
+      await recomputeWarehouseStock(tx, list.warehouseId, sku);
+    }
+
+    const existing = Array.isArray(list.returnedItems) ? list.returnedItems : [];
+    return tx.pickList.update({
+      where: { id: list.id },
+      data: {
+        returnedItems: [
+          ...existing,
+          ...items.map(({ sku, quantity }) => ({ sku, quantity, returnedAt })),
+        ],
+      },
+    });
+  });
+
+  return {
+    pickList,
+    reconciliation: buildReconciliation(listItems, restocks, pickList.returnedItems),
+  };
+}
+
+/**
  * Complete a draft pick list: consume the packed quantities from the warehouse
  * (FEFO, allocated FRESH at completion time — stock may have moved since
  * generation), journal a StockRemoval, and flip the list to `packed`.

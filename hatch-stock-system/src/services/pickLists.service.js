@@ -64,6 +64,32 @@ export const pickListsService = {
     const response = await api.post(`/pick-lists/${id}/complete`, opts);
     return response.data;
   },
+
+  /**
+   * Route-run view of a packed pick list: per-location plan + stock-check /
+   * restock status and the van reconciliation.
+   * Returns { pickList, locations: [{ locationId, locationName, planned,
+   *   plannedUnits, stockCheck|null, restock|null }],
+   *   reconciliation: { perSku, packedUnits, loadedUnits, returnedUnits,
+   *   remainingUnits }, allDone }
+   */
+  getRun: async (id) => {
+    const response = await api.get(`/pick-lists/${id}/run`);
+    return response.data;
+  },
+
+  /**
+   * Return unloaded leftovers from the van back to the warehouse.
+   * @param {Array} items - [{ sku, quantity }]
+   * @param {string} [performedBy]
+   * Returns { pickList, reconciliation }. 400 on over-return; 409 unless packed.
+   */
+  returnLeftovers: async (id, items, performedBy) => {
+    const body = { items };
+    if (performedBy) body.performedBy = performedBy;
+    const response = await api.post(`/pick-lists/${id}/return-leftovers`, body);
+    return response.data;
+  },
 };
 
 export default pickListsService;

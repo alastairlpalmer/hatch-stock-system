@@ -624,7 +624,13 @@ export default function PickListDetail() {
           <p className="text-zinc-400 text-xs mt-1">
             {packedCount} of {totalCount} products packed for {formatTargetDate(list.targetDate)}.
           </p>
-          <div className="mt-3 flex items-center gap-4">
+          <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2">
+            <button
+              onClick={() => navigate(`/restock/run?pickListId=${id}`)}
+              className="inline-flex items-center px-4 py-2.5 rounded-lg bg-emerald-500 text-zinc-900 text-sm font-semibold hover:bg-emerald-400"
+            >
+              Start the run →
+            </button>
             <Link to="/restock/picklists" className="text-sm text-emerald-400 hover:text-emerald-300">
               ← Back to pick lists
             </Link>
