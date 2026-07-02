@@ -18,6 +18,64 @@ function httpError(status, message) {
   return err;
 }
 
+const DAY_MS = 86_400_000;
+
+// UTC date-part as an epoch (expiry dates are stored as UTC-midnight dates, so
+// calendar comparisons must be done on UTC date parts — same convention as
+// utils/expiry.js).
+function utcDatePart(d) {
+  const x = new Date(d);
+  return Date.UTC(x.getUTCFullYear(), x.getUTCMonth(), x.getUTCDate());
+}
+
+/**
+ * True when a batch expiry falls STRICTLY BEFORE the next restock after the
+ * pick list's target date. Machines are restocked weekly (Mondays), so the
+ * next restock is targetDate + 7 calendar days: stock expiring on the next
+ * restock day itself can still be swapped out and is NOT flagged. Batches
+ * without an expiry date are never flagged. Pure; exported for tests.
+ *
+ * @param {Date|string|null} expiryDate
+ * @param {Date|string} targetDate
+ * @returns {boolean}
+ */
+export function expiresBeforeNextRestock(expiryDate, targetDate) {
+  if (!expiryDate) return false;
+  return utcDatePart(expiryDate) < utcDatePart(targetDate) + 7 * DAY_MS;
+}
+
+/**
+ * Summarise a pick list's flagged batch allocations into one warning per SKU:
+ * qty = total units allocated from batches flagged `expiresBeforeNextRestock`,
+ * expiryDate = the earliest flagged expiry. Computed on the fly from the
+ * stored items JSON (the PickList model has no expiryWarnings column — the
+ * flags on the batch entries are the persisted source of truth). Pure;
+ * exported for tests.
+ *
+ * @param {Array<{ sku, name, batches?: Array<{ qty, expiryDate, expiresBeforeNextRestock? }> }>} items
+ * @returns {Array<{ sku: string, name: string, qty: number, expiryDate: Date|string }>}
+ */
+export function buildExpiryWarnings(items) {
+  const warnings = [];
+  for (const item of Array.isArray(items) ? items : []) {
+    const flagged = (Array.isArray(item.batches) ? item.batches : [])
+      .filter((b) => b.expiresBeforeNextRestock === true);
+    if (flagged.length === 0) continue;
+
+    let earliest = flagged[0].expiryDate;
+    for (const b of flagged) {
+      if (utcDatePart(b.expiryDate) < utcDatePart(earliest)) earliest = b.expiryDate;
+    }
+    warnings.push({
+      sku: item.sku,
+      name: item.name,
+      qty: flagged.reduce((sum, b) => sum + (b.qty || 0), 0),
+      expiryDate: earliest,
+    });
+  }
+  return warnings;
+}
+
 /**
  * Split a fresh-meal group's need across its member SKUs proportionally to
  * warehouse availability, preferring soonest-expiring members: shares are
@@ -219,13 +277,17 @@ export async function generatePickList({
     }
     if (totalQty <= 0) continue;
 
-    // FEFO allocation plan — which date-lots to pull from the shelf.
+    // FEFO allocation plan — which date-lots to pull from the shelf. Batches
+    // that won't survive to the NEXT restock (targetDate + 7 days) are flagged
+    // so the packer knows that lot will expire in the machine.
     const allocation = [];
     let remaining = totalQty;
     for (const b of batchesBySku[sku] || []) {
       if (remaining <= 0) break;
       const take = Math.min(b.remainingQty, remaining);
-      allocation.push({ batchId: b.id, qty: take, expiryDate: b.expiryDate, receivedAt: b.receivedAt });
+      const entry = { batchId: b.id, qty: take, expiryDate: b.expiryDate, receivedAt: b.receivedAt };
+      if (expiresBeforeNextRestock(b.expiryDate, targetDate)) entry.expiresBeforeNextRestock = true;
+      allocation.push(entry);
       remaining -= take;
     }
 
@@ -241,7 +303,7 @@ export async function generatePickList({
 
   items.sort((a, b) => a.name.localeCompare(b.name));
 
-  return prisma.pickList.create({
+  const pickList = await prisma.pickList.create({
     data: {
       warehouseId,
       routeId,
@@ -253,6 +315,10 @@ export async function generatePickList({
       createdBy,
     },
   });
+
+  // Summary of the flagged allocations — derived from the items JSON, never
+  // stored (getPickListRun recomputes it the same way).
+  return { ...pickList, expiryWarnings: buildExpiryWarnings(items) };
 }
 
 /**
@@ -432,6 +498,7 @@ export async function getPickListRun(id) {
     pickList,
     locations,
     reconciliation: buildReconciliation(items, restocks, pickList.returnedItems),
+    expiryWarnings: buildExpiryWarnings(items),
     allDone: locations.length > 0 && locations.every((l) => l.restock !== null),
   };
 }

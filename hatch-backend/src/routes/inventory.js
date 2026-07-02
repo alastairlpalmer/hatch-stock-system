@@ -341,6 +341,60 @@ router.put('/locations/:id/ordering', asyncHandler(async (req, res) => {
   });
 }));
 
+// ============ MACHINE EXPIRY ============
+
+// Stock sitting IN MACHINES that expires within `days` (default 14, max 90).
+// LocationStock.earliestExpiry is captured from VendLive channel data on each
+// stock sync; rows with no reported expiry have nothing to alert on and are
+// excluded, as are archived locations. daysUntil is a CALENDAR-day difference
+// on UTC date parts (same convention as utils/expiry.js categorisation) —
+// negative means the stock has already expired in the machine.
+router.get('/machine-expiry', asyncHandler(async (req, res) => {
+  // Explicit parse, not `parseInt(...) || 14`: days=0 must be rejected as out
+  // of range, not silently coerced to the default.
+  const days = req.query.days === undefined ? 14 : Number(req.query.days);
+  if (!Number.isInteger(days) || days < 1 || days > 90) {
+    return res.status(400).json({ error: 'days must be an integer between 1 and 90' });
+  }
+
+  const now = new Date();
+  const threshold = new Date(now);
+  threshold.setDate(threshold.getDate() + days);
+
+  const stock = await prisma.locationStock.findMany({
+    where: {
+      quantity: { gt: 0 },
+      earliestExpiry: { not: null, lte: threshold },
+      location: { archivedAt: null },
+    },
+    include: {
+      product: { select: { name: true } },
+      location: { select: { name: true } },
+    },
+    orderBy: { earliestExpiry: 'asc' },
+  });
+
+  const MS_PER_DAY = 86_400_000;
+  const utcDatePart = (d) => Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  const today = utcDatePart(now);
+
+  res.json({
+    days,
+    rows: stock.map((s) => {
+      const expiry = new Date(s.earliestExpiry);
+      return {
+        locationId: s.locationId,
+        locationName: s.location.name,
+        sku: s.sku,
+        name: s.product.name,
+        quantity: s.quantity,
+        earliestExpiry: s.earliestExpiry,
+        daysUntil: Math.round((utcDatePart(expiry) - today) / MS_PER_DAY),
+      };
+    }),
+  });
+}));
+
 // ============ BATCHES ============
 
 // Get batches

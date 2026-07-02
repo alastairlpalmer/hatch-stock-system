@@ -54,6 +54,21 @@ function sortedBatches(batches) {
   });
 }
 
+// A batch needs flagging when the server marked it `expiresBeforeNextRestock`
+// or (fallback) its expiry lands before the list's target date. Red when the
+// expiry is already here or within 7 days, amber otherwise.
+function batchExpiryFlag(batch, target) {
+  const expiry = parseDay(batch.expiryDate);
+  const flagged =
+    !!batch.expiresBeforeNextRestock || (expiry && target && expiry < target);
+  if (!flagged) return null;
+  if (!expiry) return { severe: true };
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const daysUntil = Math.round((expiry - today) / 86400000);
+  return { severe: daysUntil <= 7 };
+}
+
 function BatchLine({ batches, targetDate, muted }) {
   const target = parseDay(targetDate);
   const sorted = sortedBatches(batches);
@@ -62,15 +77,21 @@ function BatchLine({ batches, targetDate, muted }) {
     <div className={`text-xs mt-1 ${muted ? 'text-zinc-600' : 'text-zinc-400'}`}>
       <span className={muted ? 'text-zinc-600' : 'text-zinc-500'}>Pull: </span>
       {sorted.map((b, i) => {
-        const expiry = parseDay(b.expiryDate);
-        const expiresBeforeTarget = expiry && target && expiry < target;
+        const flag = batchExpiryFlag(b, target);
         return (
           <span key={b.batchId || i}>
             {i > 0 && <span className="text-zinc-600"> · </span>}
-            <span className={expiresBeforeTarget && !muted ? 'text-red-400 font-medium' : ''}>
+            <span
+              className={
+                flag && !muted
+                  ? `font-medium ${flag.severe ? 'text-red-400' : 'text-amber-400'}`
+                  : ''
+              }
+              title={flag ? 'expires before next restock' : undefined}
+            >
               {b.qty} ×{' '}
               {b.expiryDate ? `exp ${formatDayMonth(b.expiryDate)}` : 'no expiry recorded'}
-              {expiresBeforeTarget && !muted && (
+              {flag && !muted && (
                 <AlertTriangle size={11} className="inline ml-1 -mt-0.5" />
               )}
             </span>
@@ -254,11 +275,14 @@ function PrintSheet({ list, warehouseName, items }) {
               </td>
               <td className="pl-small">
                 {sortedBatches(item.batches)
-                  .map((b) =>
-                    b.expiryDate
+                  .map((b) => {
+                    const base = b.expiryDate
                       ? `${b.qty} × exp ${formatDayMonth(b.expiryDate)}`
-                      : `${b.qty} × no expiry recorded`
-                  )
+                      : `${b.qty} × no expiry recorded`;
+                    return batchExpiryFlag(b, parseDay(list.targetDate))
+                      ? `${base} (EXPIRES SOON)`
+                      : base;
+                  })
                   .join(' · ')}
               </td>
             </tr>
@@ -293,6 +317,7 @@ export default function PickListDetail() {
 
   const [saveState, setSaveState] = useState('idle'); // idle | saving | saved | error
   const [shortfallsOpen, setShortfallsOpen] = useState(false);
+  const [expiryWarningsOpen, setExpiryWarningsOpen] = useState(false);
 
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [takenBy, setTakenBy] = useState('');
@@ -613,6 +638,44 @@ export default function PickListDetail() {
           </div>
         </div>
       </div>
+
+      {/* Expiry warnings — stock on this list that expires before the next restock */}
+      {(list.expiryWarnings?.length || 0) > 0 && (() => {
+        const warnings = list.expiryWarnings;
+        const totalUnits = warnings.reduce((sum, w) => sum + (w.qty || 0), 0);
+        return (
+          <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg">
+            <button
+              onClick={() => setExpiryWarningsOpen((v) => !v)}
+              className="w-full flex items-center justify-between gap-2 p-4 text-left"
+            >
+              <span className="flex items-center gap-2 text-amber-400 text-sm font-medium">
+                <AlertTriangle size={16} className="shrink-0" />
+                {totalUnits} unit{totalUnits === 1 ? '' : 's'} will expire before the next
+                restock — sell first or pull
+              </span>
+              {expiryWarningsOpen ? (
+                <ChevronUp size={16} className="text-amber-400 shrink-0" />
+              ) : (
+                <ChevronDown size={16} className="text-amber-400 shrink-0" />
+              )}
+            </button>
+            {expiryWarningsOpen && (
+              <div className="px-4 pb-4 space-y-1">
+                {warnings.map((w, i) => (
+                  <div key={`${w.sku}-${i}`} className="flex items-center justify-between text-xs">
+                    <span className="text-zinc-300">{w.name || w.sku}</span>
+                    <span className="text-zinc-400 tabular-nums">
+                      <span className="text-amber-400 font-medium">{w.qty}</span> ×{' '}
+                      {w.expiryDate ? `exp ${formatDayMonth(w.expiryDate)}` : 'no expiry recorded'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Success panel */}
       {(justCompleted || (list.status === 'packed' && list.removalId)) && (

@@ -4,7 +4,13 @@ import { describe, it, expect, vi } from 'vitest';
 // exercise the pure helpers.
 vi.mock('../utils/db.js', () => ({ default: {} }));
 
-import { buildReconciliation, findReturnViolations, splitGroupNeed } from './pick-list.js';
+import {
+  buildReconciliation,
+  findReturnViolations,
+  splitGroupNeed,
+  expiresBeforeNextRestock,
+  buildExpiryWarnings,
+} from './pick-list.js';
 
 describe('buildReconciliation', () => {
   const items = [
@@ -107,6 +113,82 @@ describe('findReturnViolations', () => {
       { sku: 'COKE', quantity: 3 },
       { sku: 'COKE', quantity: 3 },
     ])).toEqual([{ sku: 'COKE', requested: 6, remaining: 5 }]);
+  });
+});
+
+describe('expiresBeforeNextRestock', () => {
+  const targetDate = '2026-07-06'; // restock Monday
+
+  it('flags a batch expiring during the week (before target + 7 days)', () => {
+    expect(expiresBeforeNextRestock('2026-07-08', targetDate)).toBe(true);
+    expect(expiresBeforeNextRestock('2026-07-12', targetDate)).toBe(true); // day before next restock
+  });
+
+  it('does not flag a batch surviving to the next restock day or beyond', () => {
+    expect(expiresBeforeNextRestock('2026-07-13', targetDate)).toBe(false); // next Monday itself
+    expect(expiresBeforeNextRestock('2026-08-01', targetDate)).toBe(false);
+  });
+
+  it('flags a batch already expired on the target date', () => {
+    expect(expiresBeforeNextRestock('2026-07-01', targetDate)).toBe(true);
+  });
+
+  it('compares UTC calendar date parts, ignoring time of day', () => {
+    expect(expiresBeforeNextRestock('2026-07-13T02:00:00Z', '2026-07-06T23:59:00Z')).toBe(false);
+    expect(expiresBeforeNextRestock('2026-07-12T23:00:00Z', targetDate)).toBe(true);
+  });
+
+  it('never flags a batch without an expiry date', () => {
+    expect(expiresBeforeNextRestock(null, targetDate)).toBe(false);
+    expect(expiresBeforeNextRestock(undefined, targetDate)).toBe(false);
+  });
+
+  it('accepts Date objects for both arguments', () => {
+    expect(expiresBeforeNextRestock(new Date('2026-07-10'), new Date(targetDate))).toBe(true);
+  });
+});
+
+describe('buildExpiryWarnings', () => {
+  it('summarises flagged units per SKU with the earliest flagged expiry', () => {
+    const items = [
+      {
+        sku: 'MEAL-1',
+        name: 'Chicken Katsu',
+        totalQty: 10,
+        batches: [
+          { batchId: 'b1', qty: 4, expiryDate: '2026-07-10T00:00:00.000Z', expiresBeforeNextRestock: true },
+          { batchId: 'b2', qty: 3, expiryDate: '2026-07-08T00:00:00.000Z', expiresBeforeNextRestock: true },
+          { batchId: 'b3', qty: 3, expiryDate: '2026-07-20T00:00:00.000Z' }, // unflagged — excluded
+        ],
+      },
+      {
+        sku: 'COKE',
+        name: 'Coca-Cola',
+        totalQty: 24,
+        batches: [{ batchId: 'b4', qty: 24, expiryDate: '2027-01-01T00:00:00.000Z' }],
+      },
+    ];
+    expect(buildExpiryWarnings(items)).toEqual([
+      { sku: 'MEAL-1', name: 'Chicken Katsu', qty: 7, expiryDate: '2026-07-08T00:00:00.000Z' },
+    ]);
+  });
+
+  it('produces one warning per SKU with flagged batches', () => {
+    const items = [
+      { sku: 'A', name: 'A', batches: [{ qty: 2, expiryDate: '2026-07-09', expiresBeforeNextRestock: true }] },
+      { sku: 'B', name: 'B', batches: [{ qty: 5, expiryDate: '2026-07-10', expiresBeforeNextRestock: true }] },
+    ];
+    expect(buildExpiryWarnings(items)).toEqual([
+      { sku: 'A', name: 'A', qty: 2, expiryDate: '2026-07-09' },
+      { sku: 'B', name: 'B', qty: 5, expiryDate: '2026-07-10' },
+    ]);
+  });
+
+  it('returns [] for items without flags, missing batches, or non-array input', () => {
+    expect(buildExpiryWarnings([{ sku: 'A', name: 'A', batches: [] }])).toEqual([]);
+    expect(buildExpiryWarnings([{ sku: 'A', name: 'A' }])).toEqual([]);
+    expect(buildExpiryWarnings([])).toEqual([]);
+    expect(buildExpiryWarnings(null)).toEqual([]);
   });
 });
 

@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { useStock } from '../../context/StockContext';
 import { vendliveService } from '../../services/vendlive.service';
+import { inventoryService } from '../../services/inventory.service';
 
 function StatCard({ label, value, accent, to }) {
   const colors = {
@@ -181,6 +182,80 @@ function VendliveSyncHealth() {
   );
 }
 
+// Stock already out in the machines that will expire before the next restock
+// (7-day window). Hidden entirely when empty or when the fetch fails — this
+// panel only earns space when there is something to act on.
+function MachineExpiryPanel() {
+  const [rows, setRows] = useState(null); // null until loaded
+
+  useEffect(() => {
+    let cancelled = false;
+    inventoryService.getMachineExpiry(7)
+      .then(result => {
+        if (!cancelled) setRows(Array.isArray(result?.rows) ? result.rows : []);
+      })
+      .catch(err => {
+        // Hide the panel on failure — the dashboard shouldn't nag about a
+        // secondary fetch. Log for diagnosis only.
+        console.error('Machine expiry fetch failed:', err);
+        if (!cancelled) setRows([]);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  if (!rows || rows.length === 0) return null;
+
+  const formatExpiry = (iso) => {
+    if (!iso) return 'unknown';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return 'unknown';
+    return d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
+  };
+
+  const anyCritical = rows.some(r => (r.daysUntil ?? 99) <= 2);
+  const palette = anyCritical
+    ? { card: 'bg-red-900/20 border-red-900/50', title: 'text-red-400', divider: 'border-red-900/30' }
+    : { card: 'bg-amber-900/20 border-amber-900/50', title: 'text-amber-400', divider: 'border-amber-900/30' };
+
+  const visible = rows.slice(0, 8);
+  const overflow = rows.length - visible.length;
+
+  return (
+    <div className={`${palette.card} border rounded-lg p-6`}>
+      <div className="flex items-center justify-between mb-4">
+        <h3 className={`text-sm font-medium ${palette.title}`}>Expiring in machines</h3>
+        <Link to="/locations" className={`text-xs opacity-70 hover:opacity-100 ${palette.title}`}>
+          Location stock →
+        </Link>
+      </div>
+      <div className="space-y-1">
+        {visible.map((r, i) => {
+          const critical = (r.daysUntil ?? 99) <= 2;
+          return (
+            <div
+              key={`${r.locationId}-${r.sku}-${i}`}
+              className={`flex items-center justify-between gap-3 py-2 border-b ${palette.divider} last:border-0`}
+            >
+              <div className="min-w-0">
+                <span className="text-zinc-300 text-sm">{r.name || r.sku} × {r.quantity}</span>
+                <span className="text-zinc-600 text-xs ml-2">{r.locationName}</span>
+              </div>
+              <span className={`shrink-0 text-xs px-2 py-0.5 rounded whitespace-nowrap ${
+                critical ? 'bg-red-500/20 text-red-400' : 'bg-amber-500/20 text-amber-400'
+              }`}>
+                expires {formatExpiry(r.earliestExpiry)} ({r.daysUntil}d)
+              </span>
+            </div>
+          );
+        })}
+        {overflow > 0 && (
+          <div className={`text-xs pt-2 ${palette.title}`}>+{overflow} more</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function SectionHeading({ children, to }) {
   if (!to) return <h3 className="text-sm font-medium text-zinc-400 mb-4">{children}</h3>;
   return (
@@ -272,6 +347,9 @@ export default function Dashboard() {
       </div>
 
       <VendliveSyncHealth />
+
+      {/* Stock in machines expiring before the next restock */}
+      <MachineExpiryPanel />
 
       {/* Expiry Alerts */}
       {(expiredBatches.length > 0 || criticalBatches.length > 0) && (

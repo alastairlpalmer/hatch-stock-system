@@ -22,6 +22,19 @@ export const reportsService = {
   },
 
   /**
+   * Waste report: monthly write-off / shrinkage-expiry figures plus what is
+   * currently expired on the shelf. Returns
+   * { months: [{ month, writeOffUnits, writeOffCost, shrinkageExpiredUnits,
+   *   shrinkageDamagedUnits }],
+   *   currentExpiredOnShelf: { units, cost, batches: [...] } }.
+   * @param {number} months - How many months back to include
+   */
+  getWasteReport: async (months = 6) => {
+    const response = await api.get('/reports/waste', { params: { months } });
+    return response.data;
+  },
+
+  /**
    * Download a stored report PDF via the authenticated client, then save it.
    * Goes through axios (not a bare link) so the auth token is sent when enabled.
    */

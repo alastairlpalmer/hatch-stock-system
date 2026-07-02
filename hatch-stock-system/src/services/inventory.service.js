@@ -171,6 +171,17 @@ export const inventoryService = {
     return response.data;
   },
 
+  /**
+   * Get stock expiring in machines (location stock), soonest first.
+   * Returns { days, rows: [{ locationId, locationName, sku, name, quantity,
+   * earliestExpiry, daysUntil }] }.
+   * @param {number} days - Window in days until expiry
+   */
+  getMachineExpiry: async (days = 14) => {
+    const response = await api.get('/inventory/machine-expiry', { params: { days } });
+    return response.data;
+  },
+
   // ========== STOCK MOVEMENTS ==========
 
   /**

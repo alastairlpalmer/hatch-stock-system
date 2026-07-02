@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useStock } from '../../context/StockContext';
 import vendliveService from '../../services/vendlive.service';
+import { inventoryService } from '../../services/inventory.service';
 
 export default function LocationStock() {
   const { data, updateLocationStock, updateLocationConfig, updateLocationAssignedItems, updateMealTypeConfig } = useStock();
@@ -20,6 +21,24 @@ export default function LocationStock() {
     vendliveService.getMachineMappings()
       .then(setMachineMappings)
       .catch(() => setMachineMappings([]));
+  }, []);
+
+  // Earliest known expiry per SKU in machines (60-day window) — one cheap
+  // fetch, filtered to the selected location for the per-row chips. Purely
+  // informational, so failures just mean no chips. Works alongside live
+  // VendLive stock too (expiry comes from our batch records, not VendLive).
+  const [machineExpiryRows, setMachineExpiryRows] = useState([]);
+  useEffect(() => {
+    let cancelled = false;
+    inventoryService.getMachineExpiry(60)
+      .then(result => {
+        if (!cancelled) setMachineExpiryRows(Array.isArray(result?.rows) ? result.rows : []);
+      })
+      .catch(err => {
+        console.error('Machine expiry fetch failed:', err);
+        if (!cancelled) setMachineExpiryRows([]);
+      });
+    return () => { cancelled = true; };
   }, []);
 
   // Machines mapped to the currently selected location.
@@ -73,6 +92,37 @@ export default function LocationStock() {
   const location = data.locations.find(l => l.id === selectedLocation);
   const locStock = data.locationStock[selectedLocation] || {};
   const locConfig = data.locationConfig[selectedLocation] || {};
+
+  // Earliest expiry per SKU at the selected location (soonest row wins)
+  const expiryBySku = {};
+  machineExpiryRows.forEach(r => {
+    if (r.locationId !== selectedLocation || !r.earliestExpiry) return;
+    const current = expiryBySku[r.sku];
+    if (!current || (r.daysUntil ?? 999) < (current.daysUntil ?? 999)) {
+      expiryBySku[r.sku] = r;
+    }
+  });
+
+  // Small expiry chip for a per-SKU row: expired/≤7d red, 8–30d amber, >30d zinc
+  const renderExpiryChip = (sku) => {
+    const row = expiryBySku[sku];
+    if (!row) return null;
+    const days = row.daysUntil ?? 999;
+    const color = days <= 7
+      ? 'bg-red-500/20 text-red-400'
+      : days <= 30
+        ? 'bg-amber-500/20 text-amber-400'
+        : 'bg-zinc-700 text-zinc-400';
+    const label = days < 0 ? 'expired' : `exp ${days}d`;
+    return (
+      <span
+        className={`inline-block px-1.5 py-0.5 rounded text-[10px] whitespace-nowrap ml-2 align-middle ${color}`}
+        title={`Earliest expiry at this location: ${new Date(row.earliestExpiry).toLocaleDateString('en-GB')}`}
+      >
+        {label}
+      </span>
+    );
+  };
 
   // The displayed quantity for a SKU. When VendLive truth is available we show
   // its live channel level; otherwise we fall back to the stored DB estimate
@@ -231,7 +281,10 @@ export default function LocationStock() {
 
     return (
       <tr key={product.sku} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
-        <td className={`px-4 py-3 text-zinc-200 ${indent ? 'pl-10' : ''}`}>{product.name}</td>
+        <td className={`px-4 py-3 text-zinc-200 ${indent ? 'pl-10' : ''}`}>
+          {product.name}
+          {renderExpiryChip(product.sku)}
+        </td>
         <td className="px-4 py-3 text-zinc-500 text-xs font-mono">{product.sku}</td>
         {showConfig && (
           <>

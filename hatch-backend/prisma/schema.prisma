@@ -140,12 +140,19 @@ model LocationStock {
   locationId String   @map("location_id")
   sku        String
   quantity   Int      @default(0)
+  // Earliest expiry date among this SKU's channels in the machine, captured
+  // from VendLive channel data on each stock sync (null when VendLive doesn't
+  // report one). Refreshed wholesale per sync — sale decrements don't touch
+  // it. Drives "expires in machine before next restock" alerts. See
+  // manual-sql/014_expiry_intel.sql.
+  earliestExpiry DateTime? @map("earliest_expiry")
   updatedAt  DateTime @updatedAt @map("updated_at")
 
   location Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
   product  Product  @relation(fields: [sku], references: [sku], onDelete: Cascade)
 
   @@id([locationId, sku])
+  @@index([earliestExpiry])
   @@map("location_stock")
 }
 
