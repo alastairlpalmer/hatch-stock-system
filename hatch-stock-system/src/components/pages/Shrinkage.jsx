@@ -1,13 +1,61 @@
 import React, { useState, useMemo } from 'react';
 import { useStock } from '../../context/StockContext';
+import { inventoryService } from '../../services';
+
+// One-tap categorisation chips for discrepancy lines (API vocabulary)
+const CHIP_REASONS = [
+  { value: 'theft', label: 'Theft' },
+  { value: 'expired', label: 'Expired' },
+  { value: 'damaged', label: 'Damaged' },
+  { value: 'miscount', label: 'Miscount' },
+  { value: 'unknown', label: 'Unknown' },
+];
 
 export default function Shrinkage() {
   const { data } = useStock();
   const [dateFilter, setDateFilter] = useState({ start: '', end: '' });
   const [locationFilter, setLocationFilter] = useState('');
   const [activeSubTab, setActiveSubTab] = useState('overview');
+  // Optimistic reason edits keyed `${checkId}:${sku}` — layered over the
+  // stock-check items so the by-reason breakdown updates without a refetch.
+  const [reasonOverrides, setReasonOverrides] = useState({});
+  const [reasonSaving, setReasonSaving] = useState({});
+  const [reasonError, setReasonError] = useState(null);
 
   const stockChecks = data.stockCheckHistory || [];
+
+  // Reason for a line, with any optimistic local edit applied
+  const effectiveReason = (check, item) =>
+    (check.id && reasonOverrides[`${check.id}:${item.sku}`]) || item.reason || 'unknown';
+
+  // Tag a discrepancy line with a reason — optimistic UI, revert on error
+  const setLineReason = async (line, reason) => {
+    if (!line.checkId || reason === line.reason) return;
+    const key = `${line.checkId}:${line.sku}`;
+    if (reasonSaving[key]) return;
+    const previous = reasonOverrides[key];
+    setReasonError(null);
+    setReasonSaving(prev => ({ ...prev, [key]: true }));
+    setReasonOverrides(prev => ({ ...prev, [key]: reason }));
+    try {
+      await inventoryService.setStockCheckItemReason(line.checkId, line.sku, reason);
+    } catch (err) {
+      // Revert the optimistic update
+      setReasonOverrides(prev => {
+        const next = { ...prev };
+        if (previous === undefined) delete next[key];
+        else next[key] = previous;
+        return next;
+      });
+      setReasonError(err.message || 'Failed to save the reason — please try again.');
+    } finally {
+      setReasonSaving(prev => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+    }
+  };
 
   // Filter stock checks by date and location
   const filteredChecks = useMemo(() => {
@@ -48,8 +96,10 @@ export default function Shrinkage() {
     const byProduct = {};
     const byReason = {
       theft: { count: 0, units: 0, cost: 0 },
-      swap: { count: 0, units: 0, cost: 0 },
+      expired: { count: 0, units: 0, cost: 0 },
       damaged: { count: 0, units: 0, cost: 0 },
+      miscount: { count: 0, units: 0, cost: 0 },
+      swap: { count: 0, units: 0, cost: 0 },
       malfunction: { count: 0, units: 0, cost: 0 },
       unknown: { count: 0, units: 0, cost: 0 },
     };
@@ -89,7 +139,7 @@ export default function Shrinkage() {
         // Loss is valued at COST only — using sale price would overstate it
         const unitCost = product?.unitCost || 0;
         const shrinkageCost = shrinkageUnits * unitCost;
-        const reason = item.reason || 'unknown';
+        const reason = effectiveReason(check, item);
 
         // Total
         totalShrinkage += shrinkageUnits;
@@ -135,7 +185,33 @@ export default function Shrinkage() {
       byProduct: Object.values(byProduct).sort((a, b) => b.shrinkageCost - a.shrinkageCost),
       byReason,
     };
-  }, [filteredChecks, data.products, data.locations]);
+  }, [filteredChecks, data.products, data.locations, reasonOverrides]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Individual discrepancy (loss) lines across the filtered checks —
+  // these are what get tagged with a reason on the Discrepancies tab.
+  const lossLines = useMemo(() => {
+    const lines = [];
+    filteredChecks.forEach(check => {
+      const locationName = check.locationName || data.locations.find(l => l.id === check.locationId)?.name || 'Unknown';
+      (check.items || []).forEach(item => {
+        const units = lossOrientedVariance(check, item);
+        if (units <= 0) return;
+        const product = data.products.find(p => p.sku === item.sku);
+        lines.push({
+          key: `${check.id || 'nocheck'}:${item.sku}:${check.timestamp || check.createdAt || ''}`,
+          checkId: check.id || null,
+          sku: item.sku,
+          name: product?.name || item.sku,
+          units,
+          cost: units * (product?.unitCost || 0),
+          date: check.timestamp || check.createdAt,
+          locationName,
+          reason: effectiveReason(check, item),
+        });
+      });
+    });
+    return lines.sort((a, b) => new Date(b.date) - new Date(a.date));
+  }, [filteredChecks, data.products, data.locations, reasonOverrides]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Calculate shrinkage trend over time
   const trendData = useMemo(() => {
@@ -166,19 +242,24 @@ export default function Shrinkage() {
     return Object.values(byMonth).sort((a, b) => a.month.localeCompare(b.month));
   }, [filteredChecks, data.products]);
 
-  // Reason labels for display
+  // Reason labels for display ('swap'/'malfunction' are legacy values kept
+  // so historical checks still group correctly)
   const reasonLabels = {
     theft: 'Suspected Theft',
+    expired: 'Expired',
+    damaged: 'Damaged',
+    miscount: 'Miscount',
     swap: 'Wrong Item Taken',
-    damaged: 'Damaged/Expired',
     malfunction: 'Machine Malfunction',
     unknown: 'Unknown',
   };
 
   const reasonColors = {
     theft: 'text-red-400 bg-red-500/10',
-    swap: 'text-yellow-400 bg-yellow-500/10',
+    expired: 'text-amber-400 bg-amber-500/10',
     damaged: 'text-orange-400 bg-orange-500/10',
+    miscount: 'text-purple-400 bg-purple-500/10',
+    swap: 'text-yellow-400 bg-yellow-500/10',
     malfunction: 'text-blue-400 bg-blue-500/10',
     unknown: 'text-zinc-400 bg-zinc-500/10',
   };
@@ -239,6 +320,7 @@ export default function Shrinkage() {
       <div className="flex gap-2 border-b border-zinc-800 pb-4">
         {[
           { id: 'overview', label: 'Overview' },
+          { id: 'items', label: 'Discrepancies' },
           { id: 'byLocation', label: 'By Location' },
           { id: 'byProduct', label: 'By Product' },
           { id: 'byReason', label: 'By Reason' },
@@ -286,7 +368,7 @@ export default function Shrinkage() {
           {/* Reason Breakdown */}
           <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-6">
             <h3 className="text-sm font-medium text-zinc-400 mb-4">Shrinkage by Reason</h3>
-            <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               {Object.entries(shrinkageData.byReason).map(([reason, stats]) => (
                 <div key={reason} className={`rounded-lg p-4 ${reasonColors[reason]}`}>
                   <div className="text-lg font-bold">{stats.units}</div>
@@ -341,6 +423,78 @@ export default function Shrinkage() {
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {/* Discrepancies Tab — individual loss lines with one-tap reason chips */}
+      {activeSubTab === 'items' && (
+        <div className="space-y-3">
+          {reasonError && (
+            <div className="flex items-start justify-between gap-3 bg-red-500/10 border border-red-500/30 rounded-lg px-4 py-3 text-sm text-red-400">
+              <p className="min-w-0">{reasonError}</p>
+              <button
+                onClick={() => setReasonError(null)}
+                className="flex-shrink-0 text-red-300 hover:text-red-100"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
+
+          {lossLines.length === 0 ? (
+            <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-8 text-center text-zinc-600 text-sm">
+              No discrepancies in the selected period
+            </div>
+          ) : (
+            lossLines.map(line => {
+              const saving = line.checkId ? reasonSaving[`${line.checkId}:${line.sku}`] : false;
+              return (
+                <div key={line.key} className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4 space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-zinc-200 truncate">{line.name}</div>
+                      <div className="text-xs text-zinc-500 mt-0.5">
+                        {line.locationName}
+                        {line.date && (
+                          <> · {new Date(line.date).toLocaleDateString('en-GB')}</>
+                        )}
+                      </div>
+                    </div>
+                    <div className="text-right flex-shrink-0">
+                      <div className="text-red-400 font-medium">−{line.units} unit{line.units === 1 ? '' : 's'}</div>
+                      <div className="text-xs text-red-400/70">£{line.cost.toFixed(2)}</div>
+                    </div>
+                  </div>
+
+                  {line.checkId ? (
+                    <div className="flex flex-wrap gap-2">
+                      {CHIP_REASONS.map(chip => {
+                        const active = line.reason === chip.value;
+                        return (
+                          <button
+                            key={chip.value}
+                            onClick={() => setLineReason(line, chip.value)}
+                            disabled={saving}
+                            className={`min-h-[44px] px-4 rounded-full text-xs font-medium border transition-colors disabled:opacity-50 ${
+                              active
+                                ? `${reasonColors[chip.value]} border-current`
+                                : 'border-zinc-700 bg-zinc-800 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600'
+                            }`}
+                          >
+                            {chip.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-zinc-600">
+                      Reason tagging isn&rsquo;t available for this record
+                    </p>
+                  )}
+                </div>
+              );
+            })
+          )}
         </div>
       )}
 
@@ -472,8 +626,10 @@ export default function Shrinkage() {
                         <div
                           className={`h-full rounded-full ${
                             reason === 'theft' ? 'bg-red-500' :
+                            reason === 'expired' ? 'bg-amber-500' :
                             reason === 'swap' ? 'bg-yellow-500' :
                             reason === 'damaged' ? 'bg-orange-500' :
+                            reason === 'miscount' ? 'bg-purple-500' :
                             reason === 'malfunction' ? 'bg-blue-500' :
                             'bg-zinc-500'
                           }`}

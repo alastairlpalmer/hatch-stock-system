@@ -1,24 +1,24 @@
 import React, { useState } from 'react';
 import { useStock } from '../../context/StockContext';
 import { useRestockRun } from '../../context/RestockRunContext';
+import StockCheckForm from './restock/StockCheckForm';
 
 export default function RestockMachine() {
-  const { data, submitStockCheck, recordRestock } = useStock();
+  const { data, recordRestock } = useStock();
   const { markStepComplete } = useRestockRun();
   const [activeSubTab, setActiveSubTab] = useState('restock');
   const [step, setStep] = useState('select');
   const [selectedLocation, setSelectedLocation] = useState('');
   const [restockerName, setRestockerName] = useState('');
-  const [stockCheckCounts, setStockCheckCounts] = useState({});
   const [stockCheckComplete, setStockCheckComplete] = useState(false);
   const [stockCheckId, setStockCheckId] = useState(null);
+  const [lastCheck, setLastCheck] = useState(null);
   const [restockItems, setRestockItems] = useState([{ sku: '', quantity: '' }]);
   const [uploadedImage, setUploadedImage] = useState(null);
   const [imagePreview, setImagePreview] = useState(null);
   const [viewingRestock, setViewingRestock] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [countError, setCountError] = useState(null);
 
   const location = data.locations.find(l => l.id === selectedLocation);
   const locationStock = data.locationStock[selectedLocation] || {};
@@ -48,92 +48,27 @@ export default function RestockMachine() {
     return hoursSince < 24;
   };
 
-  // Variance reason options
-  const varianceReasons = [
-    { value: 'theft', label: 'Suspected Theft' },
-    { value: 'swap', label: 'Wrong Item Taken (Swap)' },
-    { value: 'damaged', label: 'Damaged/Expired' },
-    { value: 'malfunction', label: 'Machine Malfunction' },
-    { value: 'unknown', label: 'Unknown' },
-  ];
-
-  // Initialize stock check with expected values
+  // Start the stock check (the shared StockCheckForm owns the counting UI)
   const startStockCheck = () => {
-    const counts = {};
-    getLocationProducts().forEach(p => {
-      counts[p.sku] = { counted: '', expected: locationStock[p.sku] || 0, reason: '' };
-    });
-    setStockCheckCounts(counts);
     setStep('stockcheck');
     setError(null);
-    setCountError(null);
   };
 
-  // Returns true when a counted value is a non-empty, valid number
-  const isCountedValue = (counted) =>
-    String(counted).trim() !== '' && !Number.isNaN(parseInt(counted, 10));
-
-  // SKUs left blank in the current stock check (these will NOT be updated)
-  const getBlankCountSkus = () =>
-    Object.entries(stockCheckCounts)
-      .filter(([, itemData]) => !isCountedValue(itemData.counted))
-      .map(([sku]) => sku);
-
-  // Complete stock check
-  const completeStockCheck = async () => {
-    // Only submit items with a non-empty, valid count — blanks are skipped
-    // entirely so they can't silently zero a machine's stock.
-    const countedEntries = Object.entries(stockCheckCounts).filter(
-      ([, itemData]) => isCountedValue(itemData.counted)
-    );
-
-    if (countedEntries.length === 0) {
-      setCountError('Enter at least one count');
-      return;
-    }
-
-    setCountError(null);
-    setLoading(true);
-    setError(null);
-
-    try {
-      const checkId = `sc-${Date.now()}`;
-      const items = countedEntries.map(([sku, itemData]) => {
-        const counted = parseInt(itemData.counted, 10);
-        const variance = counted - itemData.expected;
-        return {
-          sku,
-          expected: itemData.expected,
-          counted,
-          variance,
-          // Include reason for negative variances (shrinkage)
-          reason: variance < 0 ? (itemData.reason || 'unknown') : null,
-        };
-      });
-
-      await submitStockCheck({
-        id: checkId,
-        locationId: selectedLocation,
-        locationName: location?.name,
-        performedBy: restockerName,
-        items
-      });
-
-      setStockCheckId(checkId);
-      setStockCheckComplete(true);
-      setStep('addstock');
-    } catch (err) {
-      setError(err.message || 'Failed to complete stock check');
-    } finally {
-      setLoading(false);
-    }
+  // Stock check submitted via the shared form — the server returned the
+  // created check with computed variances.
+  const handleStockCheckComplete = (check) => {
+    setStockCheckId(check?.id || null);
+    setLastCheck(check || null);
+    setStockCheckComplete(true);
+    setStep('addstock');
   };
 
-  // Skip stock check (use existing valid one)
+  // Skip stock check (use existing valid one). API records carry createdAt,
+  // offline/legacy ones carry timestamp — sort on whichever exists.
   const skipStockCheck = () => {
     const recentCheck = stockChecks
       .filter(sc => sc.locationId === selectedLocation)
-      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))[0];
+      .sort((a, b) => new Date(b.createdAt || b.timestamp) - new Date(a.createdAt || a.timestamp))[0];
 
     setStockCheckId(recentCheck?.id);
     setStockCheckComplete(true);
@@ -208,14 +143,13 @@ export default function RestockMachine() {
     setStep('select');
     setSelectedLocation('');
     setRestockerName('');
-    setStockCheckCounts({});
     setStockCheckComplete(false);
     setStockCheckId(null);
+    setLastCheck(null);
     setRestockItems([{ sku: '', quantity: '' }]);
     setUploadedImage(null);
     setImagePreview(null);
     setError(null);
-    setCountError(null);
   };
 
   return (
@@ -344,112 +278,25 @@ export default function RestockMachine() {
             </div>
           )}
 
-          {/* Step 2: Stock Check */}
+          {/* Step 2: Stock Check (shared mobile-first form) */}
           {step === 'stockcheck' && (
-            <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-6 space-y-4">
+            <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4 sm:p-6 space-y-4">
               <div className="flex items-center justify-between">
                 <h3 className="font-medium text-zinc-200">Stock Check: {location?.name}</h3>
-                <button onClick={() => setStep('select')} className="text-zinc-500 hover:text-zinc-300 text-sm">
+                <button onClick={() => setStep('select')} className="text-zinc-500 hover:text-zinc-300 text-sm min-h-[44px] px-2">
                   Back
                 </button>
               </div>
 
               <p className="text-zinc-500 text-sm">
-                Count each product in the machine and enter the actual quantity found.
+                For each product, tap the tick if the count is correct or enter the quantity you actually found.
               </p>
 
-              <div className="space-y-2">
-                <div className="grid grid-cols-12 gap-2 text-xs text-zinc-500 font-medium px-2">
-                  <div className="col-span-4">Product</div>
-                  <div className="col-span-2 text-center">Expected</div>
-                  <div className="col-span-2 text-center">Counted</div>
-                  <div className="col-span-2 text-center">Variance</div>
-                  <div className="col-span-2 text-center">Reason</div>
-                </div>
-
-                {getLocationProducts().map(product => {
-                  const counts = stockCheckCounts[product.sku] || { counted: '', expected: 0, reason: '' };
-                  const counted = parseInt(counts.counted) || 0;
-                  const variance = counts.counted !== '' ? counted - counts.expected : null;
-                  const hasNegativeVariance = variance !== null && variance < 0;
-                  return (
-                    <div key={product.sku} className={`grid grid-cols-12 gap-2 items-center py-2 border-b border-zinc-800 last:border-0 ${hasNegativeVariance ? 'bg-red-500/5' : ''}`}>
-                      <div className="col-span-4">
-                        <span className="text-zinc-200">{product.name}</span>
-                        <div className="text-zinc-600 text-xs">{product.sku}</div>
-                      </div>
-                      <div className="col-span-2 text-center text-zinc-400">
-                        {counts.expected}
-                      </div>
-                      <div className="col-span-2">
-                        <input
-                          type="number"
-                          value={counts.counted}
-                          onChange={e => setStockCheckCounts({
-                            ...stockCheckCounts,
-                            [product.sku]: { ...counts, counted: e.target.value }
-                          })}
-                          placeholder="0"
-                          className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-sm text-center focus:outline-none focus:border-emerald-500"
-                        />
-                      </div>
-                      <div className="col-span-2 text-center">
-                        {variance !== null && (
-                          <span className={`text-sm font-medium ${
-                            variance === 0 ? 'text-emerald-400' : variance > 0 ? 'text-blue-400' : 'text-red-400'
-                          }`}>
-                            {variance > 0 ? '+' : ''}{variance}
-                          </span>
-                        )}
-                      </div>
-                      <div className="col-span-2">
-                        {hasNegativeVariance ? (
-                          <select
-                            value={counts.reason || ''}
-                            onChange={e => setStockCheckCounts({
-                              ...stockCheckCounts,
-                              [product.sku]: { ...counts, reason: e.target.value }
-                            })}
-                            className="w-full bg-zinc-800 border border-red-700/50 rounded px-1 py-1.5 text-xs focus:outline-none focus:border-red-500"
-                          >
-                            <option value="">Select...</option>
-                            {varianceReasons.map(r => (
-                              <option key={r.value} value={r.value}>{r.label}</option>
-                            ))}
-                          </select>
-                        ) : (
-                          <span className="text-zinc-600 text-xs">-</span>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-
-              {getBlankCountSkus().length > 0 && (
-                <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-3 text-sm">
-                  <p className="text-emerald-400 font-medium">
-                    {getBlankCountSkus().length} item(s) left blank will NOT be updated:
-                  </p>
-                  <p className="text-zinc-400 text-xs mt-1">
-                    {getBlankCountSkus().join(', ')}
-                  </p>
-                </div>
-              )}
-
-              {countError && (
-                <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 text-red-400 text-sm">
-                  {countError}
-                </div>
-              )}
-
-              <button
-                onClick={completeStockCheck}
-                disabled={loading}
-                className="px-4 py-2 bg-emerald-600 text-white rounded text-sm font-medium hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {loading ? 'Processing...' : 'Complete Stock Check'}
-              </button>
+              <StockCheckForm
+                locationId={selectedLocation}
+                performedBy={restockerName}
+                onComplete={handleStockCheckComplete}
+              />
             </div>
           )}
 
@@ -462,6 +309,23 @@ export default function RestockMachine() {
                   Stock check complete
                 </span>
               </div>
+
+              {/* Variance summary from the check just submitted */}
+              {(() => {
+                const checkItems = lastCheck?.items || [];
+                const discrepancies = checkItems.filter(i => (i.variance ?? 0) !== 0);
+                if (discrepancies.length === 0) return null;
+                const shortfall = discrepancies.reduce((s, i) => s + ((i.variance ?? 0) < 0 ? -i.variance : 0), 0);
+                const overage = discrepancies.reduce((s, i) => s + ((i.variance ?? 0) > 0 ? i.variance : 0), 0);
+                return (
+                  <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3 text-sm text-amber-300">
+                    Stock check found {discrepancies.length} discrepanc{discrepancies.length === 1 ? 'y' : 'ies'}
+                    {shortfall > 0 && <> — {shortfall} unit{shortfall === 1 ? '' : 's'} short</>}
+                    {overage > 0 && <>{shortfall > 0 ? ',' : ' —'} {overage} unit{overage === 1 ? '' : 's'} over</>}
+                    . Stock levels were set to the found quantities.
+                  </div>
+                );
+              })()}
 
               <p className="text-zinc-500 text-sm">
                 Enter the items and quantities you're placing into the machine.

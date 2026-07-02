@@ -657,33 +657,63 @@ router.get('/removals', asyncHandler(async (req, res) => {
 
 // ============ STOCK CHECKS ============
 
-// Submit stock check
+// Submit stock check. `expected` and `variance` are computed SERVER-SIDE from
+// live LocationStock inside the transaction — client-supplied values are
+// ignored, so shrinkage figures can't be forged or go stale between the phone
+// loading the form and submitting it. Each line is either an explicit count
+// (`counted`) or a one-tap confirmation (`confirmed: true`, meaning "found
+// exactly what was expected"). Manual-check variance convention: counted −
+// expected (negative = loss); the Shrinkage page normalises per source.
 const stockCheckSchema = z.object({
   locationId: z.string().min(1),
   performedBy: z.string().nullish(),
-  items: z.array(z.object({
-    sku: skuSchema,
-    counted: nonNegativeQty,
-    expected: z.coerce.number().int().optional(),
-    variance: z.coerce.number().int().optional(),
-    reason: z.string().nullish(),
-  })).min(1),
+  items: z.array(
+    z.object({
+      sku: skuSchema,
+      counted: nonNegativeQty.optional(),
+      confirmed: z.coerce.boolean().optional(),
+    }).refine((i) => i.confirmed === true || i.counted != null, {
+      message: 'Each item needs either counted or confirmed:true',
+    })
+  ).min(1),
 });
 
 router.post('/stock-checks', asyncHandler(async (req, res) => {
   const { locationId, items, performedBy } = stockCheckSchema.parse(req.body);
 
   const stockCheck = await prisma.$transaction(async (tx) => {
+    const skus = items.map((i) => i.sku);
+    const stockRows = await tx.locationStock.findMany({
+      where: { locationId, sku: { in: skus } },
+      select: { sku: true, quantity: true },
+    });
+    const expectedBySku = new Map(stockRows.map((r) => [r.sku, r.quantity]));
+
+    const resolvedItems = items.map((item) => {
+      const expected = expectedBySku.get(item.sku) ?? 0;
+      const counted = item.confirmed === true && item.counted == null
+        ? expected
+        : item.counted;
+      return {
+        sku: item.sku,
+        expected,
+        counted,
+        variance: counted - expected,
+        confirmed: item.confirmed === true,
+      };
+    });
+
     const record = await tx.stockCheck.create({
       data: {
         locationId,
-        items,
+        items: resolvedItems,
         performedBy,
+        source: 'manual',
       },
     });
 
     // Update location stock to counted values
-    for (const item of items) {
+    for (const item of resolvedItems) {
       await tx.locationStock.upsert({
         where: { locationId_sku: { locationId, sku: item.sku } },
         create: { locationId, sku: item.sku, quantity: item.counted },
@@ -695,6 +725,33 @@ router.post('/stock-checks', asyncHandler(async (req, res) => {
   });
 
   res.status(201).json(stockCheck);
+}));
+
+// Categorise a discrepancy after the fact (from the Shrinkage page). Reasons
+// are deliberately NOT captured at the machine — the restocker just records
+// numbers; the operator attributes them later.
+const STOCK_CHECK_REASONS = ['theft', 'expired', 'damaged', 'miscount', 'unknown'];
+const stockCheckReasonSchema = z.object({
+  reason: z.enum(STOCK_CHECK_REASONS),
+});
+
+router.patch('/stock-checks/:id/items/:sku', asyncHandler(async (req, res) => {
+  const { reason } = stockCheckReasonSchema.parse(req.body);
+  const { id, sku } = req.params;
+
+  const updated = await prisma.$transaction(async (tx) => {
+    const check = await tx.stockCheck.findUnique({ where: { id } });
+    if (!check) return null;
+    const items = Array.isArray(check.items) ? check.items : [];
+    if (!items.some((i) => i.sku === sku)) return undefined;
+
+    const nextItems = items.map((i) => (i.sku === sku ? { ...i, reason } : i));
+    return tx.stockCheck.update({ where: { id }, data: { items: nextItems } });
+  });
+
+  if (updated === null) return res.status(404).json({ error: 'Stock check not found' });
+  if (updated === undefined) return res.status(404).json({ error: 'SKU not on this stock check' });
+  res.json(updated);
 }));
 
 // Get stock check history

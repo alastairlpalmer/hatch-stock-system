@@ -848,18 +848,37 @@ export function StockProvider({ children }) {
     return history;
   }, [data, isOfflineMode]);
 
+  // Submit a stock check. Items arrive in the API shape: either
+  // { sku, counted } (explicit count) or { sku, confirmed: true } ("found
+  // exactly what was expected"). The server computes expected/variance; in
+  // offline mode we derive them from local location stock so history and
+  // shrinkage reporting keep working.
   const submitStockCheck = useCallback(async (stockCheck) => {
     if (isOfflineMode) {
+      const currentStock = data.locationStock[stockCheck.locationId] || {};
+      const items = stockCheck.items.map(item => {
+        const expected = item.expected ?? currentStock[item.sku] ?? 0;
+        const counted = item.confirmed ? expected : (Number(item.counted) || 0);
+        return {
+          ...item,
+          sku: item.sku,
+          expected,
+          counted,
+          variance: counted - expected,
+          confirmed: !!item.confirmed,
+        };
+      });
       const newStockCheck = {
         ...stockCheck,
+        items,
         id: `sc-${Date.now()}`,
         timestamp: new Date().toISOString(),
-        totalVariance: stockCheck.items.reduce((sum, item) => sum + Math.abs(item.counted - item.expected), 0),
+        totalVariance: items.reduce((sum, item) => sum + Math.abs(item.variance), 0),
       };
-      // Update location stock based on counted values
+      // Update location stock based on found values
       const locationStock = { ...data.locationStock };
-      if (!locationStock[stockCheck.locationId]) locationStock[stockCheck.locationId] = {};
-      stockCheck.items.forEach(item => {
+      locationStock[stockCheck.locationId] = { ...(locationStock[stockCheck.locationId] || {}) };
+      items.forEach(item => {
         locationStock[stockCheck.locationId][item.sku] = item.counted;
       });
       const updated = {
@@ -873,18 +892,23 @@ export function StockProvider({ children }) {
     const result = await inventoryService.submitStockCheck(stockCheck);
     // Refresh location stock - this is the key update that sets stock to counted values
     const stockData = await inventoryService.getLocationStock(stockCheck.locationId);
-    // Also add the stock check to local history for immediate display
+    // Also add the stock check to local history for immediate display. The
+    // returned check's items carry server-computed expected/counted/variance.
+    const locationName = data.locations.find(l => l.id === stockCheck.locationId)?.name;
     const newStockCheck = {
       ...result,
+      locationId: result.locationId || stockCheck.locationId,
+      locationName: result.locationName || locationName,
       timestamp: result.createdAt || new Date().toISOString(),
-      totalVariance: stockCheck.items.reduce((sum, item) => sum + Math.abs(item.counted - item.expected), 0),
+      totalVariance: result.totalVariance
+        ?? (result.items || []).reduce((sum, item) => sum + Math.abs(item.variance ?? 0), 0),
     };
     setData(prev => ({
       ...prev,
       locationStock: { ...prev.locationStock, [stockCheck.locationId]: stockData },
       stockCheckHistory: [...prev.stockCheckHistory, newStockCheck],
     }));
-    return result;
+    return newStockCheck;
   }, [data, isOfflineMode, saveData]);
 
   const loadStockCheckHistory = useCallback(async (locationId) => {

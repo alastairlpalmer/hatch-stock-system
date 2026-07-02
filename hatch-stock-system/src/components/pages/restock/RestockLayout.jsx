@@ -6,6 +6,7 @@ const tabs = [
   { to: '/restock/route', label: 'Select Route' },
   { to: '/restock/picklists', label: 'Pick Lists' },
   { to: '/restock/remove', label: 'Remove Stock' },
+  { to: '/restock/check', label: 'Stock Check' },
   { to: '/restock/machine', label: 'Restock Machine' },
   { to: '/restock/shrinkage', label: 'Shrinkage' },
 ];
