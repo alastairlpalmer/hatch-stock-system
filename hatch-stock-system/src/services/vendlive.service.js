@@ -80,6 +80,38 @@ export const vendliveService = {
     const response = await api.get('/vendlive/sync/status');
     return response.data;
   },
+
+  // Aggregated sync health for the dashboard: sales/stock sync freshness,
+  // quarantine size, unmapped machines and recent error count.
+  getHealth: async () => {
+    const response = await api.get('/vendlive/health');
+    return response.data;
+  },
+
+  // Quarantined sales (unknown products at ingest time).
+  // Returns { count, items: [...] }.
+  getQuarantine: async (limit = 100) => {
+    const response = await api.get('/vendlive/quarantine', { params: { limit } });
+    return response.data;
+  },
+
+  // Re-attempt ingestion of every unresolved quarantined sale.
+  // Returns { replayed, stillUnknown, alreadyExisted }.
+  replayQuarantine: async () => {
+    const response = await api.post('/vendlive/quarantine/replay');
+    return response.data;
+  },
+
+  deleteQuarantineItem: async (id) => {
+    const response = await api.delete(`/vendlive/quarantine/${id}`);
+    return response.data;
+  },
+
+  // Recent stock sync rows. Returns { syncs: [...], total, limit, offset }.
+  getStockSyncs: async (limit = 20) => {
+    const response = await api.get('/vendlive/stock/syncs', { params: { limit } });
+    return response.data;
+  },
 };
 
 export default vendliveService;
