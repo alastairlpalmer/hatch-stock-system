@@ -1,33 +1,30 @@
-# Weekly ordering cycle rebuild + critical bug fixes
+# Mobile-first stock checks
 
-Rebuilds the platform around the actual weekly rhythm (Mon–Fri sales, Wed/Thu ordering for weekend delivery, Monday restock) and fixes the critical data-integrity bugs found in the full-system review.
+Rebuilds the machine stock check for one-handed phone use, and hardens how shrinkage numbers are recorded.
 
-## ⚠️ Deploy steps (order matters)
+**No database migration needed** — deploy backend then frontend as usual.
 
-1. **Run `hatch-backend/manual-sql/011_weekly_cycle.sql` in the Supabase SQL editor first** (idempotent; adds receiving/buying-list/pick-list tables + columns and backfills history).
-2. Deploy backend (Railway), then frontend (Vercel).
+## The flow at the machine
 
-## The weekly cycle
+- One row per product the machine should contain (stock > 0 ∪ assigned items — no more whole-catalogue lists): product name, expected count, a big **✓** for "count is correct", or tap **Found** to type the real number (numeric keypad). Delta chips (−2 red / +1 blue) on discrepancies.
+- Progress bar, search (also adds unexpected items found in the machine), **"Confirm remaining as correct"** one-tap, and submit is blocked until every line is addressed — every check is a complete audit.
+- Review screen before submit: discrepancies only, with unit + £ impact, then a timestamped check is stored and machine stock is set to the found numbers.
+- Lives in two places: **step 2 of the Restock Machine wizard** (replaces the desktop-grid count) and a new standalone **Restock → Stock Check** tab for spot-checks (remembers the checker's name).
 
-- **Trading-day ordering engine** — velocity per Mon–Fri trading day; machine stock projected to the next restock Monday; targets Monday-to-Monday cover; nets off warehouse stock **and** pending POs; `weekly` and `topup` modes; box-rounding capped at machine capacity; archived locations excluded.
-- **Buying Lists** (new) — supplier-grouped list saved from the planner: editable draft, copy-as-text (WhatsApp), public share link (token URL, no login), server-rendered PDF, one-click "create one PO per supplier" with expected delivery date.
-- **Partial receiving** — POs stay open with per-line received progress; multiple expiry lots per SKU; "apply expiry to all"; explicit close-short; OrderReceipt audit rows power the Receipt History tab; over-receive blocked at the DB level.
-- **Pick Lists** (new) — per route + date: fill-to-max quantities per machine, aggregated per SKU, with FEFO batch instructions ("Pull: 12 × exp 05 Jul"); phone tick-off + print stylesheet; "Mark packed" creates the linked warehouse removal.
-- **Friday 20:00 Europe/London full VendLive stock sync** — accurate weekend-frozen baseline for Monday planning.
+## Integrity hardening
 
-## Critical fixes
+- `POST /inventory/stock-checks` now computes `expected` and `variance` **server-side from live location stock inside the transaction** — client-sent values are ignored, so theft/shrinkage figures can't be forged or go stale between loading and submitting. Ticked items are stored explicitly as `confirmed`.
+- Manual checks are tagged `source: 'manual'` (VendLive auto-checks already tag `vendlive`), keeping the Shrinkage page's per-source variance normalisation sound.
+- New `PATCH /inventory/stock-checks/:id/items/:sku` lets the operator categorise a discrepancy after the fact.
 
-- Shrinkage sign inversion (VendLive losses were discarded; overages shown as theft)
-- Silent offline fallback → visible banner; warehouse-stock state nesting bug after receive/removal
-- Guarded FEFO batch decrements (no negative stock under concurrency); removals/transfers reject shortfalls instead of swallowing them
-- Received orders immutable (no reopen → double-receive; no delete); order create/update zod-validated; `expectedDate` persisted
-- Expired-today batches no longer classified as sellable; CSV stock imports materialise batches
-- Removed the two broken browser-side Anthropic API features (invoice upload, screenshot analysis)
-- Inventory add-product flow, Admin refresh button, real health-check panel, delete confirmations, refund-aware Dashboard profit, amber (not green) expiry warnings, restock-run state survives refresh
+## Shrinkage page
+
+- New **Discrepancies** tab: each loss line with one-tap reason chips (Theft / Expired / Damaged / Miscount / Unknown) — reasons are deliberately not asked at the machine; attribution happens here.
+- Fixed the Restock Machine "Skip (use recent check)" sort bug (undefined `timestamp` on API records).
 
 ## Verification
 
-- Backend: 170/170 vitest tests green (incl. new trading-days, ordering-engine, receiving, FEFO suites)
-- Frontend: production build clean; all routes/pages manually verified in browser preview
+- Backend: 170/170 vitest tests green
+- Frontend: production build clean; full flow verified in mobile-width preview (tick → deltas → confirm-remaining → review → submit → wizard variance summary → Shrinkage reason chips incl. optimistic revert on error)
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)

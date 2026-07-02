@@ -218,11 +218,28 @@ export const inventoryService = {
   // ========== STOCK CHECK / RESTOCK ==========
 
   /**
-   * Submit stock check results
-   * @param {Object} stockCheck - { locationId, items: [{ sku, expected, counted }], performedBy }
+   * Submit stock check results. Each item is either an explicit count
+   * ({ sku, counted }) or a one-tap confirmation ({ sku, confirmed: true },
+   * meaning "found exactly what was expected"). The SERVER computes expected
+   * and variance from live location stock — do not send them.
+   * @param {Object} stockCheck - { locationId, items, performedBy }
    */
   submitStockCheck: async (stockCheck) => {
     const response = await api.post('/inventory/stock-checks', stockCheck);
+    return response.data;
+  },
+
+  /**
+   * Categorise a stock-check discrepancy after the fact (Shrinkage page).
+   * @param {string} checkId
+   * @param {string} sku
+   * @param {'theft'|'expired'|'damaged'|'miscount'|'unknown'} reason
+   */
+  setStockCheckItemReason: async (checkId, sku, reason) => {
+    const response = await api.patch(
+      `/inventory/stock-checks/${checkId}/items/${encodeURIComponent(sku)}`,
+      { reason },
+    );
     return response.data;
   },
 
