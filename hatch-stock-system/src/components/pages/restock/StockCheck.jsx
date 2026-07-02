@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { ArrowLeft, CheckCircle2, ChevronRight, MapPin, Search } from 'lucide-react';
 import { useStock } from '../../../context/StockContext';
 import StockCheckForm from './StockCheckForm';
@@ -11,15 +11,30 @@ const NAME_STORAGE_KEY = 'hatch_checker_name';
  * Step 1: who's checking + pick a machine. Step 2: StockCheckForm.
  * On complete: variance summary with options to check another machine or
  * continue to the restock wizard.
+ *
+ * Deep-link support: ?locationId= preselects the machine (skipping the
+ * picker), ?return= sends the primary completion button back to the caller
+ * (e.g. /restock/run).
  */
 export default function StockCheck() {
   const { data } = useStock();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+
+  const qpLocationParam = searchParams.get('locationId') || '';
+  const qpLocationId = data.locations.some(
+    l => l.id === qpLocationParam && !l.archived && l.status !== 'archived'
+  )
+    ? qpLocationParam
+    : null;
+  // Only accept in-app paths — anything else could be an open redirect.
+  const rawReturn = searchParams.get('return') || '';
+  const returnTo = rawReturn.startsWith('/') && !rawReturn.startsWith('//') ? rawReturn : null;
 
   const [checkerName, setCheckerName] = useState(
     () => localStorage.getItem(NAME_STORAGE_KEY) || ''
   );
-  const [locationId, setLocationId] = useState(null);
+  const [locationId, setLocationId] = useState(qpLocationId);
   const [machineSearch, setMachineSearch] = useState('');
   const [result, setResult] = useState(null);
 
@@ -114,12 +129,21 @@ export default function StockCheck() {
           )}
         </div>
 
-        <button
-          onClick={() => navigate('/restock/machine')}
-          className="h-14 w-full rounded-xl bg-emerald-500 text-base font-semibold text-zinc-900 hover:bg-emerald-400"
-        >
-          Continue to restock this machine
-        </button>
+        {returnTo ? (
+          <button
+            onClick={() => navigate(returnTo)}
+            className="h-14 w-full rounded-xl bg-emerald-500 text-base font-semibold text-zinc-900 hover:bg-emerald-400"
+          >
+            Continue
+          </button>
+        ) : (
+          <button
+            onClick={() => navigate('/restock/machine')}
+            className="h-14 w-full rounded-xl bg-emerald-500 text-base font-semibold text-zinc-900 hover:bg-emerald-400"
+          >
+            Continue to restock this machine
+          </button>
+        )}
         <button
           onClick={reset}
           className="h-12 w-full rounded-xl border border-zinc-700 bg-zinc-800 text-sm font-medium text-zinc-300 hover:bg-zinc-700"

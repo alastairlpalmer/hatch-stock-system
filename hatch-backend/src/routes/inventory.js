@@ -767,9 +767,12 @@ router.get('/locations/:id/stock-check-history', asyncHandler(async (req, res) =
 
 // ============ RESTOCKS ============
 
-// Record restock
+// Record restock. `pickListId` links the restock back to the pick list it was
+// loaded from (route-run loop) so van reconciliation can compare packed vs
+// loaded per SKU.
 const restockSchema = z.object({
   locationId: z.string().min(1),
+  pickListId: z.string().nullish(),
   performedBy: z.string().nullish(),
   photoUrl: z.string().nullish(),
   notes: z.string().nullish(),
@@ -777,12 +780,13 @@ const restockSchema = z.object({
 });
 
 router.post('/restocks', asyncHandler(async (req, res) => {
-  const { locationId, items, performedBy, photoUrl, notes } = restockSchema.parse(req.body);
+  const { locationId, pickListId, items, performedBy, photoUrl, notes } = restockSchema.parse(req.body);
 
   const restock = await prisma.$transaction(async (tx) => {
     const record = await tx.restockRecord.create({
       data: {
         locationId,
+        pickListId,
         items,
         performedBy,
         photoUrl,

@@ -1,39 +1,33 @@
-# VendLive trust: mapping fix, sale quarantine, refund restore, sync-health dashboard
+# Route-run: prefilled restocks, run progress, van reconciliation
 
-Phase A of the robustness plan — makes the VendLive data every other number depends on trustworthy, and surfaces sync problems on the dashboard instead of failing silently.
+Phase B — closes the loop between pick list → van → machines. The restocker packs from the pick list, runs the route from one screen, restocks each machine with quantities already filled in, and reconciles what's left in the van at the end.
 
 ## ⚠️ Deploy steps (order matters)
 
-1. **Run `hatch-backend/manual-sql/012_vendlive_trust.sql` in the Supabase SQL editor first** (idempotent). It merges the duplicate machine-mapping rows created by VendLive's two id namespaces and adds the quarantine table.
+1. **Run `hatch-backend/manual-sql/013_route_run.sql` in the Supabase SQL editor first** (idempotent; two small columns).
 2. Deploy backend (Railway), then frontend (Vercel).
 
-## Machine-ID namespace fix
+## Today's Run (new page, Restock → Today's Run)
 
-VendLive uses two machine-id namespaces (/machines/ API vs order-sales feed). One mapping row per physical machine now holds **both ids** (`vendliveMachineId` + new `salesMachineId`); the friendly name is the cross-namespace key. Sales location resolution joins on the sales-namespace id first (name fallback now deterministic); ingest backfills `salesMachineId` on first sight and never creates duplicate rows; machine auto-detect adopts sales-created rows instead of duplicating them. Fixes wrong/nondeterministic sales attribution, missed stock decrements, and indistinguishable mapping rows.
+- Starts from the most recent packed pick list (or "Start the run" straight from a just-packed list). Machines listed in route order with planned units and two status chips — Check ✓ and Restock ✓ with times — plus progress ("2 of 5 machines done") and a done banner when the route is complete (which also completes the workflow hub's step 3).
+- **Check** deep-links into the mobile stock check with the machine preselected and returns to the run afterwards.
+- **Restock** deep-links into the wizard: machine preselected, restocker name remembered, and step 3's quantities **prefilled from that machine's share of the pick list** (editable). The restock record is linked to the pick list.
 
-## Unknown-SKU sale quarantine
+## Van reconciliation
 
-Sales for products not yet in the system were silently dropped forever (poll checkpoint advanced past them). They now land in a `vendlive_quarantined_sales` table with the full normalized payload, and Admin → VendLive gains a **Quarantined Sales** panel with one-click **Replay** (books them once the product exists; deliberately no retro stock decrement — the next full machine sync reflects reality) and per-row discard.
+- Bottom panel: "Packed 120 · Loaded 108 · Returned 0 · In van 12" with a per-SKU breakdown (packed / loaded / returned / remaining).
+- **Return leftovers to warehouse**: prefilled with the remaining quantities, editable, then booked back as warehouse batches carrying the earliest expiry of the SKU's original allocation (conservative for FEFO) — over-returns rejected server-side.
 
-## Refunds restore machine stock
+## Backend
 
-A refund flip now increments the mapped location's stock back, so DB fill levels stop drifting low between full syncs. Poll stock movements are also buffered per chunk and applied only after the transaction commits (failed chunks no longer leak decrements into a re-poll double-apply).
-
-## Sync health on the dashboard
-
-New `GET /api/vendlive/health` + a dashboard panel (replaces the old thin "VendLive Connected" line):
-
-- Healthy → one emerald line: "VendLive healthy · sales synced 12m ago · stock synced Fri 20:00"
-- Problems → amber/red card with plain sentences: stale sales sync (> 3× poll interval), stale stock sync (> 4 days), quarantined sales count, unmapped machines, sync errors in last 24 h — each linking to Settings. Counts `partial` syncs with created sales as successes (they are).
-- Auto-refreshes every 5 minutes; failure to reach the API shows its own warning without breaking the dashboard.
-
-## Admin → VendLive completions
-
-Settings the backend always supported but the UI never exposed: **stock sync** (enable, interval, movement types, auto-shrinkage), **product catalog sync** (enable, interval in hours, last run), **webhook secret** (write-only — the webhook fails closed without one, so it was previously unconfigurable). Plus a stock-sync history panel and both ids shown in the mapping table. Silent save-error swallowing replaced with inline errors.
+- `RestockRecord.pickListId` links machine loads to the pick list they came from.
+- `GET /api/pick-lists/:id/run` — one response with per-location plan, latest stock check + restock status, reconciliation, and `allDone`.
+- `POST /api/pick-lists/:id/return-leftovers` — validated returns (409 unless packed; 400 with per-SKU violations on over-return), batch-materialised with expiry provenance.
+- Reconciliation math extracted as pure helpers with 13 new tests.
 
 ## Verification
 
-- Backend: 180/180 vitest tests green (9 new DB-mocked suites: mapping preference/backfill, quarantine, refund restore)
-- Frontend: production build clean; dashboard card states verified in preview
+- Backend: 193/193 vitest tests green (16 files)
+- Frontend: production build clean; run page, deep links, empty/error states verified in preview
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)

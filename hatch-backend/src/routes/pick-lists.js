@@ -2,7 +2,12 @@ import express from 'express';
 import { z } from 'zod';
 import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
-import { generatePickList, completePickList } from '../services/pick-list.js';
+import {
+  generatePickList,
+  completePickList,
+  getPickListRun,
+  returnPickListLeftovers,
+} from '../services/pick-list.js';
 
 const router = express.Router();
 
@@ -51,6 +56,14 @@ router.get('/', asyncHandler(async (req, res) => {
   });
 
   res.json(lists);
+}));
+
+// Route-run view: the pick list plus, per stop in route order, the plan, the
+// latest stock check since the list was created and the linked restock —
+// everything the run screen needs in one response. Logic lives in
+// services/pick-list.js.
+router.get('/:id/run', asyncHandler(async (req, res) => {
+  res.json(await getPickListRun(req.params.id));
 }));
 
 // Get single pick list
@@ -132,6 +145,34 @@ router.post('/:id/complete', asyncHandler(async (req, res) => {
   } catch (err) {
     if (err.shortfalls) {
       return res.status(409).json({ error: err.message, shortfalls: err.shortfalls });
+    }
+    throw err;
+  }
+}));
+
+// Return leftovers from the van to the warehouse after a run. 409 unless the
+// list is packed; 400 with { error, violations } when a return exceeds what
+// should still be on the van (packed − loaded − already returned).
+const returnLeftoversSchema = z.object({
+  items: z.array(z.object({
+    sku: z.string().min(1),
+    quantity: z.coerce.number().int().min(1),
+  })).min(1),
+  performedBy: z.string().nullish(),
+});
+
+router.post('/:id/return-leftovers', asyncHandler(async (req, res) => {
+  const { items, performedBy } = returnLeftoversSchema.parse(req.body);
+
+  try {
+    const result = await returnPickListLeftovers(req.params.id, {
+      items,
+      performedBy: performedBy ?? null,
+    });
+    res.json(result);
+  } catch (err) {
+    if (err.violations) {
+      return res.status(400).json({ error: err.message, violations: err.violations });
     }
     throw err;
   }

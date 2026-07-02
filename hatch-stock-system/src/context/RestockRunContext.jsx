@@ -15,29 +15,34 @@ function loadStoredRun() {
       const parsed = JSON.parse(raw);
       return {
         selectedRouteId: typeof parsed.selectedRouteId === 'string' ? parsed.selectedRouteId : '',
+        activePickListId: typeof parsed.activePickListId === 'string' ? parsed.activePickListId : '',
         completedSteps: { ...DEFAULT_STEPS, ...(parsed.completedSteps || {}) },
       };
     }
   } catch (e) {
     // Corrupt storage — fall through to a fresh run.
   }
-  return { selectedRouteId: '', completedSteps: { ...DEFAULT_STEPS } };
+  return { selectedRouteId: '', activePickListId: '', completedSteps: { ...DEFAULT_STEPS } };
 }
 
 export function RestockRunProvider({ children }) {
   // Hydrate from localStorage once (lazy initializer avoids re-reading on render).
   const [initial] = useState(loadStoredRun);
   const [selectedRouteId, setSelectedRouteId] = useState(initial.selectedRouteId);
+  const [activePickListId, setActivePickListId] = useState(initial.activePickListId);
   const [completedSteps, setCompletedSteps] = useState(initial.completedSteps);
 
   // Write-through persistence on every change.
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ selectedRouteId, completedSteps }));
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ selectedRouteId, activePickListId, completedSteps })
+      );
     } catch (e) {
       // Storage full/unavailable — run continues in-memory only.
     }
-  }, [selectedRouteId, completedSteps]);
+  }, [selectedRouteId, activePickListId, completedSteps]);
 
   const markStepComplete = (step) => {
     setCompletedSteps((prev) => ({ ...prev, [step]: true }));
@@ -45,6 +50,7 @@ export function RestockRunProvider({ children }) {
 
   const resetRun = () => {
     setSelectedRouteId('');
+    setActivePickListId('');
     setCompletedSteps({ ...DEFAULT_STEPS });
     try {
       localStorage.removeItem(STORAGE_KEY);
@@ -55,7 +61,15 @@ export function RestockRunProvider({ children }) {
 
   return (
     <RestockRunContext.Provider
-      value={{ selectedRouteId, setSelectedRouteId, completedSteps, markStepComplete, resetRun }}
+      value={{
+        selectedRouteId,
+        setSelectedRouteId,
+        activePickListId,
+        setActivePickListId,
+        completedSteps,
+        markStepComplete,
+        resetRun,
+      }}
     >
       {children}
     </RestockRunContext.Provider>

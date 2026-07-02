@@ -323,6 +323,10 @@ model PickList {
   items       Json
   shortfalls  Json? // [{ sku, name, requested, available }]
   removalId   String?   @map("removal_id")
+  // Leftovers returned to the warehouse after the run (van reconciliation):
+  // [{ sku, quantity, returnedAt }]. Booked back as batches with the earliest
+  // expiry of that SKU's original allocation (conservative for FEFO).
+  returnedItems Json?   @map("returned_items")
   createdBy   String?   @map("created_by")
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @updatedAt @map("updated_at")
@@ -370,6 +374,10 @@ model StockTransfer {
 model RestockRecord {
   id          String   @id @default(uuid())
   locationId  String   @map("location_id")
+  // Set when this restock loaded stock packed on a pick list — links the
+  // route-run loop (pick → van → machine) so van reconciliation can compare
+  // packed vs loaded per SKU. See manual-sql/013_route_run.sql.
+  pickListId  String?  @map("pick_list_id")
   performedBy String?  @map("performed_by")
   items       Json // [{ sku, quantity }]
   photoUrl    String?  @map("photo_url")
@@ -379,6 +387,7 @@ model RestockRecord {
   location Location @relation(fields: [locationId], references: [id])
 
   @@index([locationId, createdAt])
+  @@index([pickListId])
   @@map("restock_records")
 }
 

@@ -1,15 +1,47 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useStock } from '../../context/StockContext';
 import { useRestockRun } from '../../context/RestockRunContext';
+import { pickListsService } from '../../services/pickLists.service';
 import StockCheckForm from './restock/StockCheckForm';
+
+// Shared with the standalone stock-check page — "who is doing the run".
+const NAME_STORAGE_KEY = 'hatch_checker_name';
 
 export default function RestockMachine() {
   const { data, recordRestock } = useStock();
   const { markStepComplete } = useRestockRun();
+  const navigate = useNavigate();
+
+  // Deep-link support from Today's Run: preselect the machine and carry the
+  // pick list so planned quantities prefill the add-stock step.
+  const [searchParams] = useSearchParams();
+  const qpLocationParam = searchParams.get('locationId') || '';
+  const qpLocationId = data.locations.some(l => l.id === qpLocationParam) ? qpLocationParam : '';
+  const qpPickListId = searchParams.get('pickListId') || '';
+
   const [activeSubTab, setActiveSubTab] = useState('restock');
-  const [step, setStep] = useState('select');
-  const [selectedLocation, setSelectedLocation] = useState('');
-  const [restockerName, setRestockerName] = useState('');
+  const [restockerName, setRestockerNameState] = useState(
+    () => localStorage.getItem(NAME_STORAGE_KEY) || ''
+  );
+  // When arriving from the run with a machine + pick list and a known name,
+  // skip straight to the stock check; if the name is missing, stay on step 1
+  // with the location preselected.
+  const [step, setStep] = useState(() =>
+    qpLocationId && qpPickListId && (localStorage.getItem(NAME_STORAGE_KEY) || '').trim()
+      ? 'stockcheck'
+      : 'select'
+  );
+  const [selectedLocation, setSelectedLocation] = useState(qpLocationId);
+
+  const setRestockerName = (value) => {
+    setRestockerNameState(value);
+    try {
+      localStorage.setItem(NAME_STORAGE_KEY, value);
+    } catch {
+      // storage unavailable (private mode) — the name just won't persist
+    }
+  };
   const [stockCheckComplete, setStockCheckComplete] = useState(false);
   const [stockCheckId, setStockCheckId] = useState(null);
   const [lastCheck, setLastCheck] = useState(null);
@@ -19,6 +51,55 @@ export default function RestockMachine() {
   const [viewingRestock, setViewingRestock] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+
+  // This machine's planned skus/quantities from the pick list (deep-link only)
+  const [plannedItems, setPlannedItems] = useState(null);
+
+  // Fetch the pick list's plan for this location. Prefer the run endpoint;
+  // fall back to getById + items[].perLocation for older backends.
+  useEffect(() => {
+    if (!qpPickListId || !qpLocationId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        let planned = null;
+        try {
+          const run = await pickListsService.getRun(qpPickListId);
+          const loc = (run.locations || []).find(l => l.locationId === qpLocationId);
+          planned = (loc?.planned || []).map(p => ({ sku: p.sku, qty: p.qty }));
+        } catch {
+          const list = await pickListsService.getById(qpPickListId);
+          planned = (list.items || [])
+            .map(it => {
+              const pl = (it.perLocation || []).find(p => p.locationId === qpLocationId);
+              return pl ? { sku: it.sku, qty: pl.qty } : null;
+            })
+            .filter(Boolean);
+        }
+        if (!cancelled && planned) {
+          setPlannedItems(planned.filter(p => p.qty > 0));
+        }
+      } catch {
+        // Plan unavailable — the add-stock step just starts empty.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [qpPickListId, qpLocationId]);
+
+  // Prefill the add-stock rows with the plan once, and only while the rows are
+  // still untouched (the restocker can edit, remove, or add more afterwards).
+  const prefilledRef = useRef(false);
+  useEffect(() => {
+    if (step !== 'addstock' || prefilledRef.current) return;
+    if (!plannedItems || plannedItems.length === 0) return;
+    if (selectedLocation !== qpLocationId) return;
+    prefilledRef.current = true;
+    setRestockItems(prev =>
+      prev.length === 1 && !prev[0].sku && !prev[0].quantity
+        ? plannedItems.map(p => ({ sku: p.sku, quantity: String(p.qty) }))
+        : prev
+    );
+  }, [step, plannedItems, selectedLocation, qpLocationId]);
 
   const location = data.locations.find(l => l.id === selectedLocation);
   const locationStock = data.locationStock[selectedLocation] || {};
@@ -126,7 +207,8 @@ export default function RestockMachine() {
         stockCheckId,
         items: validItems,
         photoUrl: uploadedImage,
-        imageOverride: override && !uploadedImage
+        imageOverride: override && !uploadedImage,
+        ...(qpPickListId ? { pickListId: qpPickListId } : {})
       });
 
       markStepComplete('machine');
@@ -447,12 +529,26 @@ export default function RestockMachine() {
               <p className="text-zinc-400">
                 {location?.name} has been restocked by {restockerName}
               </p>
-              <button
-                onClick={resetForm}
-                className="px-4 py-2 bg-emerald-600 text-white rounded text-sm font-medium hover:bg-emerald-500"
-              >
-                Start Another Restock
-              </button>
+              <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+                {qpPickListId && (
+                  <button
+                    onClick={() => navigate('/restock/run')}
+                    className="w-full sm:w-auto px-5 py-3 bg-emerald-500 text-zinc-900 rounded-lg text-sm font-semibold hover:bg-emerald-400"
+                  >
+                    Back to today&rsquo;s run
+                  </button>
+                )}
+                <button
+                  onClick={resetForm}
+                  className={`w-full sm:w-auto px-4 py-2 rounded text-sm font-medium ${
+                    qpPickListId
+                      ? 'bg-zinc-800 text-zinc-300 border border-zinc-700 hover:bg-zinc-700'
+                      : 'bg-emerald-600 text-white hover:bg-emerald-500'
+                  }`}
+                >
+                  Start Another Restock
+                </button>
+              </div>
             </div>
           )}
         </>
