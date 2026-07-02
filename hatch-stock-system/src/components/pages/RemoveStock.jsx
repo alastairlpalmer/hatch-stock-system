@@ -1,4 +1,5 @@
 import React, { useRef, useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { useStock } from '../../context/StockContext';
 import { useRestockRun } from '../../context/RestockRunContext';
 import BarcodeScanner from '../scanner/BarcodeScanner';
@@ -30,6 +31,9 @@ export default function RemoveStock() {
   const [warnings, setWarnings] = useState({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  // Populated after a successful removal so the silent form reset is
+  // accompanied by visible confirmation of what was recorded.
+  const [success, setSuccess] = useState(null);
 
   const availableStock = form.fromWarehouse ? (data.stock[form.fromWarehouse] || {}) : {};
   const routes = data.restockRoutes || [];
@@ -231,30 +235,40 @@ export default function RemoveStock() {
   const removeItem = (idx) => {
     if (form.items.length > 1) {
       setForm({ ...form, items: form.items.filter((_, i) => i !== idx) });
+      // Warnings are keyed by row index, so deleting a row must drop that
+      // row's warning AND shift every warning below it up by one — otherwise
+      // warnings end up attached to the wrong rows.
       setWarnings(prev => {
-        const newWarnings = { ...prev };
-        delete newWarnings[idx];
+        const newWarnings = {};
+        Object.entries(prev).forEach(([key, value]) => {
+          const i = Number(key);
+          if (i < idx) newWarnings[i] = value;
+          else if (i > idx) newWarnings[i - 1] = value;
+        });
         return newWarnings;
       });
     }
   };
 
   const submit = async () => {
-    if (!form.fromWarehouse || !form.routeId || !form.takenBy || !form.items[0].sku) return;
+    // Require at least one complete line (sku AND qty > 0) after filtering —
+    // checking only items[0].sku let empty/qty-less rows slip through.
+    const itemsToRemove = form.items
+      .filter(i => i.sku && parseInt(i.quantity) > 0)
+      .map(item => ({
+        sku: item.sku,
+        quantity: parseInt(item.quantity)
+      }));
+
+    if (!form.fromWarehouse || !form.routeId || !form.takenBy || itemsToRemove.length === 0) return;
 
     setLoading(true);
     setError(null);
+    setSuccess(null);
 
     try {
       const routeLocations = getRouteLocations();
       const targetLocation = routeLocations[0]?.id || form.routeId;
-
-      const itemsToRemove = form.items
-        .filter(i => i.sku && parseInt(i.quantity) > 0)
-        .map(item => ({
-          sku: item.sku,
-          quantity: parseInt(item.quantity)
-        }));
 
       await recordStockRemoval({
         warehouseId: form.fromWarehouse,
@@ -268,6 +282,14 @@ export default function RemoveStock() {
       });
 
       markStepComplete('remove');
+      setSuccess({
+        routeName: selectedRoute?.name || form.routeId,
+        totalUnits: itemsToRemove.reduce((sum, i) => sum + i.quantity, 0),
+        items: itemsToRemove.map(i => ({
+          name: data.products.find(p => p.sku === i.sku)?.name || i.sku,
+          quantity: i.quantity,
+        })),
+      });
       setForm({ fromWarehouse: '', routeId: selectedRouteId || '', takenBy: '', notes: '', items: [{ sku: '', quantity: '' }] });
       setWarnings({});
     } catch (err) {
@@ -285,14 +307,53 @@ export default function RemoveStock() {
   };
 
   const hasWarnings = Object.keys(warnings).length > 0;
+  const hasValidItem = form.items.some(i => i.sku && parseInt(i.quantity) > 0);
 
   return (
     <div className="space-y-6">
       <h2 className="text-xl font-semibold">Remove Stock</h2>
 
+      <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-lg p-4 flex items-center justify-between gap-3">
+        <p className="text-sm text-zinc-300">
+          Packing for a route?{' '}
+          <span className="text-zinc-500">
+            A pick list works out quantities and which batch to pull for you.
+          </span>
+        </p>
+        <Link
+          to="/restock/picklists"
+          className="shrink-0 text-sm text-emerald-400 hover:text-emerald-300 font-medium"
+        >
+          Generate a pick list instead →
+        </Link>
+      </div>
+
       {error && (
         <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 text-red-400 text-sm">
           {error}
+        </div>
+      )}
+
+      {success && (
+        <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="text-emerald-400 text-sm font-medium">
+                Removal recorded — {success.totalUnits} unit{success.totalUnits === 1 ? '' : 's'} taken
+                for {success.routeName}
+              </div>
+              <div className="text-zinc-400 text-xs mt-1">
+                {success.items.map(i => `${i.name} ×${i.quantity}`).join(' · ')}
+              </div>
+            </div>
+            <button
+              onClick={() => setSuccess(null)}
+              aria-label="Dismiss"
+              className="text-zinc-500 hover:text-zinc-300 text-sm shrink-0"
+            >
+              ✕
+            </button>
+          </div>
         </div>
       )}
 
@@ -435,7 +496,7 @@ export default function RemoveStock() {
 
         <button
           onClick={submit}
-          disabled={!form.fromWarehouse || !form.routeId || !form.takenBy || loading}
+          disabled={!form.fromWarehouse || !form.routeId || !form.takenBy || !hasValidItem || loading}
           className="px-4 py-2 bg-red-600 text-white rounded text-sm font-medium hover:bg-red-500 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {loading ? 'Processing...' : 'Confirm Removal'}

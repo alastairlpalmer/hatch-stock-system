@@ -29,6 +29,19 @@ export default function Shrinkage() {
     return checks;
   }, [stockChecks, dateFilter, locationFilter]);
 
+  // Normalise variance orientation per check source. VendLive-generated checks
+  // store variance = expected − confirmed (POSITIVE = loss), while manual
+  // restock checks store variance = counted − expected (NEGATIVE = loss).
+  // Returns units oriented so positive = loss, negative = overage.
+  const lossOrientedVariance = (check, item) => {
+    const isVendlive = check.source === 'vendlive';
+    if (item.variance != null) {
+      return isVendlive ? item.variance : -item.variance;
+    }
+    // Fallback when variance is missing: expected − counted (positive = loss)
+    return (item.expected ?? 0) - (item.counted ?? item.confirmed ?? 0);
+  };
+
   // Calculate shrinkage metrics from stock checks
   const shrinkageData = useMemo(() => {
     const byLocation = {};
@@ -43,6 +56,8 @@ export default function Shrinkage() {
     let totalShrinkage = 0;
     let totalShrinkageCost = 0;
     let totalVarianceEvents = 0;
+    let totalOverage = 0;
+    let totalOverageEvents = 0;
 
     filteredChecks.forEach(check => {
       const locationName = check.locationName || data.locations.find(l => l.id === check.locationId)?.name || 'Unknown';
@@ -60,12 +75,19 @@ export default function Shrinkage() {
       byLocation[check.locationId].checkCount++;
 
       (check.items || []).forEach(item => {
-        const variance = item.variance ?? (item.counted - item.expected);
-        if (variance >= 0) return; // Only count negative variance (shrinkage)
+        const oriented = lossOrientedVariance(check, item);
+        if (oriented === 0) return;
+        if (oriented < 0) {
+          // Overage — extra units found (restock noise), tracked separately
+          totalOverage += -oriented;
+          totalOverageEvents++;
+          return;
+        }
 
-        const shrinkageUnits = Math.abs(variance);
+        const shrinkageUnits = oriented;
         const product = data.products.find(p => p.sku === item.sku);
-        const unitCost = product?.unitCost || product?.salePrice || 0;
+        // Loss is valued at COST only — using sale price would overstate it
+        const unitCost = product?.unitCost || 0;
         const shrinkageCost = shrinkageUnits * unitCost;
         const reason = item.reason || 'unknown';
 
@@ -107,6 +129,8 @@ export default function Shrinkage() {
       totalShrinkage,
       totalShrinkageCost,
       totalVarianceEvents,
+      totalOverage,
+      totalOverageEvents,
       byLocation: Object.values(byLocation).sort((a, b) => b.shrinkageCost - a.shrinkageCost),
       byProduct: Object.values(byProduct).sort((a, b) => b.shrinkageCost - a.shrinkageCost),
       byReason,
@@ -127,12 +151,12 @@ export default function Shrinkage() {
       byMonth[monthKey].checks++;
 
       (check.items || []).forEach(item => {
-        const variance = item.variance ?? (item.counted - item.expected);
-        if (variance >= 0) return;
+        const oriented = lossOrientedVariance(check, item);
+        if (oriented <= 0) return; // only losses feed the trend
 
-        const shrinkageUnits = Math.abs(variance);
+        const shrinkageUnits = oriented;
         const product = data.products.find(p => p.sku === item.sku);
-        const unitCost = product?.unitCost || product?.salePrice || 0;
+        const unitCost = product?.unitCost || 0;
 
         byMonth[monthKey].units += shrinkageUnits;
         byMonth[monthKey].cost += shrinkageUnits * unitCost;
@@ -236,7 +260,7 @@ export default function Shrinkage() {
       {activeSubTab === 'overview' && (
         <div className="space-y-6">
           {/* Summary Cards */}
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4">
               <div className="text-2xl font-bold text-red-400">{shrinkageData.totalShrinkage}</div>
               <div className="text-xs text-zinc-500 mt-1">Total Units Lost</div>
@@ -244,6 +268,10 @@ export default function Shrinkage() {
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4">
               <div className="text-2xl font-bold text-red-400">£{shrinkageData.totalShrinkageCost.toFixed(2)}</div>
               <div className="text-xs text-zinc-500 mt-1">Total Loss Value</div>
+            </div>
+            <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4">
+              <div className="text-2xl font-bold text-emerald-400">{shrinkageData.totalOverage}</div>
+              <div className="text-xs text-zinc-500 mt-1">Overage Units ({shrinkageData.totalOverageEvents} events)</div>
             </div>
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4">
               <div className="text-2xl font-bold text-zinc-300">{shrinkageData.totalVarianceEvents}</div>

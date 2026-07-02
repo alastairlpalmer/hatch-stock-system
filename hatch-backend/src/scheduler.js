@@ -1,11 +1,12 @@
 import cron from 'node-cron';
 import prisma from './utils/db.js';
 import { runPollSync } from './services/vendlive-sync.js';
-import { runStockPollJob, syncProductCatalog } from './services/vendlive-stock.js';
+import { runStockPollJob, syncProductCatalog, syncAllMachines } from './services/vendlive-stock.js';
 
 let salesJobRunning = false;
 let stockJobRunning = false;
 let productJobRunning = false;
+let fridayBaselineRunning = false;
 // The config table has no lastStockPollAt column, so the stock job tracks its
 // own last run in memory (fine for a single Railway instance; worst case after
 // a restart is one early run).
@@ -95,5 +96,28 @@ export function startScheduler() {
     }
   });
 
-  console.log('VendLive schedulers started (sales + stock + products, checked every minute)');
+  // Friday-baseline full stock sync — machines sell Mon–Fri only, so the level
+  // captured on Friday evening is frozen until the Monday-morning restock. A
+  // guaranteed full sync here gives the weekly ordering engine (and Monday's
+  // pick lists) an accurate weekend baseline even when no restock-triggered
+  // sync has fired all week.
+  cron.schedule('0 20 * * 5', async () => {
+    if (fridayBaselineRunning) return;
+
+    try {
+      const config = await prisma.vendliveConfig.findUnique({ where: { id: 'default' } });
+      if (!config?.stockSyncEnabled || !config?.apiToken) return;
+
+      fridayBaselineRunning = true;
+      console.log('[scheduler] friday-baseline: full machine stock sync starting...');
+      const result = await syncAllMachines(config);
+      console.log(`[scheduler] friday-baseline: complete — ${result?.machinesSynced ?? 0} machines synced, ${result?.machinesErrored ?? 0} errors`);
+    } catch (err) {
+      console.error('[scheduler] friday-baseline error:', err.message);
+    } finally {
+      fridayBaselineRunning = false;
+    }
+  }, { timezone: 'Europe/London' });
+
+  console.log('VendLive schedulers started (sales + stock + products + Friday baseline)');
 }

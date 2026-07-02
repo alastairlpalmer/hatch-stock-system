@@ -3,7 +3,8 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useStock } from '../../../context/StockContext';
 import { useRestockRun } from '../../../context/RestockRunContext';
 
-function StepCard({ number, title, description, ctaLabel, to, status, disabled, onClick }) {
+function StepCard({ number, title, description, ctaLabel, to, status, disabled, onClick, secondaryAction }) {
+  const navigate = useNavigate();
   const statusStyles = {
     active: 'border-emerald-500/40 bg-emerald-500/5',
     done: 'border-emerald-700/40 bg-emerald-700/5',
@@ -39,6 +40,20 @@ function StepCard({ number, title, description, ctaLabel, to, status, disabled, 
       >
         {status === 'done' ? 'Open again' : ctaLabel}
       </div>
+      {secondaryAction && !disabled && (
+        <button
+          onClick={(e) => {
+            // The whole card is a Link — keep this inner action from
+            // triggering the card navigation.
+            e.preventDefault();
+            e.stopPropagation();
+            navigate(secondaryAction.to);
+          }}
+          className="mt-2 text-xs text-zinc-500 hover:text-zinc-300 underline underline-offset-2 text-center w-full"
+        >
+          {secondaryAction.label}
+        </button>
+      )}
     </div>
   );
 
@@ -68,7 +83,9 @@ export default function RestockWorkflow() {
     : [];
 
   const step1Status = completedSteps.route ? 'done' : 'active';
-  const step2Status = !selectedRouteId ? 'pending' : completedSteps.remove ? 'done' : 'active';
+  // Step 2 is completed either by marking a pick list as packed or by a
+  // manual stock removal — both fire markStepComplete('remove').
+  const step2Status = completedSteps.remove ? 'done' : 'active';
   const step3Status = !completedSteps.remove ? 'pending' : completedSteps.machine ? 'done' : 'active';
 
   return (
@@ -80,12 +97,12 @@ export default function RestockWorkflow() {
             Complete a full restock run in three steps. Pick up where you left off at any time.
           </p>
         </div>
-        {(selectedRouteId || completedSteps.remove || completedSteps.machine) && (
+        {(selectedRouteId || completedSteps.route || completedSteps.remove || completedSteps.machine) && (
           <button
             onClick={() => { resetRun(); navigate('/restock'); }}
             className="text-sm text-zinc-400 hover:text-zinc-200 px-3 py-2 rounded bg-zinc-900 border border-zinc-800 hover:border-zinc-700 self-start sm:self-auto"
           >
-            Start a new run
+            Reset run
           </button>
         )}
       </div>
@@ -113,12 +130,12 @@ export default function RestockWorkflow() {
         />
         <StepCard
           number={2}
-          title="Remove Stock"
-          description="Take stock from the warehouse onto your van for the selected route."
-          ctaLabel={selectedRouteId ? 'Remove stock' : 'Select a route first'}
-          to="/restock/remove"
+          title="Pack (pick list)"
+          description="Generate the pick list for your route, pack the bags from the listed batches, and mark it packed."
+          ctaLabel="Open pick lists"
+          to="/restock/picklists"
           status={step2Status}
-          disabled={!selectedRouteId}
+          secondaryAction={{ label: 'or remove stock manually', to: '/restock/remove' }}
         />
         <StepCard
           number={3}

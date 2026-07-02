@@ -2,9 +2,10 @@ import React from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 
 const tabs = [
-  { to: 'warehouse', label: 'Warehouse' },
   { to: 'purchase', label: 'Purchase Orders' },
+  { to: 'buying-lists', label: 'Buying Lists' },
   { to: 'receive', label: 'Receive' },
+  { to: 'warehouse', label: 'Warehouse' },
 ];
 
 export default function OrdersLayout() {

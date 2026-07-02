@@ -61,6 +61,8 @@ function AdminProducts() {
   const [importPreview, setImportPreview] = useState([]);
   const [importStats, setImportStats] = useState({ total: 0, new: 0, existing: 0 });
   const [scannerOpen, setScannerOpen] = useState(false);
+  // Two-click delete: first click arms the confirmation for this SKU
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
 
   const resetForm = () => {
     setForm({ sku: '', name: '', description: '', unitCost: '', unitsPerBox: '', preferredSupplierId: '', category: '', barcode: '' });
@@ -121,6 +123,7 @@ function AdminProducts() {
   };
 
   const handleDelete = async (sku) => {
+    setConfirmDeleteId(null);
     setLoading(true);
     try {
       await deleteProduct(sku);
@@ -432,9 +435,18 @@ function AdminProducts() {
                   <td className="text-right px-4 py-3 text-zinc-300">{p.unitCost?.toFixed(2) || '0.00'}</td>
                   <td className="text-right px-4 py-3 text-zinc-400">{p.unitsPerBox || 1}</td>
                   <td className="px-4 py-3 text-zinc-500">{getSupplierName(p.preferredSupplierId)}</td>
-                  <td className="text-right px-4 py-3">
-                    <button onClick={() => editProduct(p)} className="text-zinc-400 hover:text-white mr-3">Edit</button>
-                    <button onClick={() => handleDelete(p.sku)} className="text-zinc-500 hover:text-red-400">Delete</button>
+                  <td className="text-right px-4 py-3 whitespace-nowrap">
+                    {confirmDeleteId === p.sku ? (
+                      <>
+                        <button onClick={() => handleDelete(p.sku)} className="text-red-400 hover:text-red-300 font-medium mr-3">Confirm delete?</button>
+                        <button onClick={() => setConfirmDeleteId(null)} className="text-zinc-500 hover:text-white">Cancel</button>
+                      </>
+                    ) : (
+                      <>
+                        <button onClick={() => editProduct(p)} className="text-zinc-400 hover:text-white mr-3">Edit</button>
+                        <button onClick={() => setConfirmDeleteId(p.sku)} className="text-zinc-500 hover:text-red-400">Delete</button>
+                      </>
+                    )}
                   </td>
                 </tr>
               ))
@@ -453,6 +465,8 @@ function AdminWarehouses() {
   const [form, setForm] = useState({ name: '', address: '', notes: '' });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  // Two-click delete: first click arms the confirmation for this warehouse
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
 
   const resetForm = () => {
     setForm({ name: '', address: '', notes: '' });
@@ -494,6 +508,7 @@ function AdminWarehouses() {
   };
 
   const handleDelete = async (id) => {
+    setConfirmDeleteId(null);
     setLoading(true);
     try {
       await deleteWarehouse(id);
@@ -556,8 +571,17 @@ function AdminWarehouses() {
                     {wh.address && <p className="text-zinc-500 text-sm mt-1">{wh.address}</p>}
                   </div>
                   <div className="flex gap-2">
-                    <button onClick={() => editWarehouse(wh)} className="text-zinc-400 hover:text-white text-sm">Edit</button>
-                    <button onClick={() => handleDelete(wh.id)} className="text-zinc-500 hover:text-red-400 text-sm">Delete</button>
+                    {confirmDeleteId === wh.id ? (
+                      <>
+                        <button onClick={() => handleDelete(wh.id)} className="text-red-400 hover:text-red-300 text-sm font-medium">Confirm delete?</button>
+                        <button onClick={() => setConfirmDeleteId(null)} className="text-zinc-500 hover:text-white text-sm">Cancel</button>
+                      </>
+                    ) : (
+                      <>
+                        <button onClick={() => editWarehouse(wh)} className="text-zinc-400 hover:text-white text-sm">Edit</button>
+                        <button onClick={() => setConfirmDeleteId(wh.id)} className="text-zinc-500 hover:text-red-400 text-sm">Delete</button>
+                      </>
+                    )}
                   </div>
                 </div>
                 <div className="mt-3 pt-3 border-t border-zinc-800 flex gap-4 text-sm">
@@ -580,6 +604,8 @@ function AdminLocations() {
   const [form, setForm] = useState({ name: '', type: 'retail', assignedItems: [] });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  // Two-click delete: first click arms the confirmation for this location
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
 
   const resetForm = () => {
     setForm({ name: '', type: 'retail', assignedItems: [] });
@@ -629,6 +655,7 @@ function AdminLocations() {
   };
 
   const handleDelete = async (id) => {
+    setConfirmDeleteId(null);
     setLoading(true);
     try {
       await deleteLocation(id);
@@ -706,8 +733,17 @@ function AdminLocations() {
                   <span className="text-xs bg-zinc-800 px-2 py-0.5 rounded text-zinc-400">{loc.type}</span>
                 </div>
                 <div className="flex gap-2">
-                  <button onClick={() => editLocation(loc)} className="text-zinc-400 hover:text-white text-sm">Edit</button>
-                  <button onClick={() => handleDelete(loc.id)} className="text-zinc-500 hover:text-red-400 text-sm">Delete</button>
+                  {confirmDeleteId === loc.id ? (
+                    <>
+                      <button onClick={() => handleDelete(loc.id)} className="text-red-400 hover:text-red-300 text-sm font-medium">Confirm delete?</button>
+                      <button onClick={() => setConfirmDeleteId(null)} className="text-zinc-500 hover:text-white text-sm">Cancel</button>
+                    </>
+                  ) : (
+                    <>
+                      <button onClick={() => editLocation(loc)} className="text-zinc-400 hover:text-white text-sm">Edit</button>
+                      <button onClick={() => setConfirmDeleteId(loc.id)} className="text-zinc-500 hover:text-red-400 text-sm">Delete</button>
+                    </>
+                  )}
                 </div>
               </div>
               <div className="mt-3 pt-3 border-t border-zinc-800">
@@ -742,6 +778,8 @@ function AdminRoutes() {
   const [form, setForm] = useState({ name: '', type: 'route', locations: [] });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  // Two-click delete: first click arms the confirmation for this route
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
 
   const routes = data.restockRoutes || [];
 
@@ -807,6 +845,7 @@ function AdminRoutes() {
   };
 
   const handleDelete = async (id) => {
+    setConfirmDeleteId(null);
     const route = routes.find(r => r.id === id);
     if (route?.type === 'adhoc' && ['tasting', 'other'].includes(route.id)) {
       return;
@@ -965,8 +1004,17 @@ function AdminRoutes() {
                         </div>
                       </div>
                       <div className="flex gap-2">
-                        <button onClick={() => editRouteItem(route)} className="text-zinc-400 hover:text-white text-sm">Edit</button>
-                        <button onClick={() => handleDelete(route.id)} className="text-zinc-500 hover:text-red-400 text-sm">Delete</button>
+                        {confirmDeleteId === route.id ? (
+                          <>
+                            <button onClick={() => handleDelete(route.id)} className="text-red-400 hover:text-red-300 text-sm font-medium">Confirm delete?</button>
+                            <button onClick={() => setConfirmDeleteId(null)} className="text-zinc-500 hover:text-white text-sm">Cancel</button>
+                          </>
+                        ) : (
+                          <>
+                            <button onClick={() => editRouteItem(route)} className="text-zinc-400 hover:text-white text-sm">Edit</button>
+                            <button onClick={() => setConfirmDeleteId(route.id)} className="text-zinc-500 hover:text-red-400 text-sm">Delete</button>
+                          </>
+                        )}
                       </div>
                     </div>
                     <div className="border-t border-zinc-800 pt-3">
@@ -1002,8 +1050,17 @@ function AdminRoutes() {
                   </div>
                   {!['tasting', 'other'].includes(route.id) && (
                     <div className="flex gap-2">
-                      <button onClick={() => editRouteItem(route)} className="text-zinc-400 hover:text-white text-sm">Edit</button>
-                      <button onClick={() => handleDelete(route.id)} className="text-zinc-500 hover:text-red-400 text-sm">Delete</button>
+                      {confirmDeleteId === route.id ? (
+                        <>
+                          <button onClick={() => handleDelete(route.id)} className="text-red-400 hover:text-red-300 text-sm font-medium">Confirm delete?</button>
+                          <button onClick={() => setConfirmDeleteId(null)} className="text-zinc-500 hover:text-white text-sm">Cancel</button>
+                        </>
+                      ) : (
+                        <>
+                          <button onClick={() => editRouteItem(route)} className="text-zinc-400 hover:text-white text-sm">Edit</button>
+                          <button onClick={() => setConfirmDeleteId(route.id)} className="text-zinc-500 hover:text-red-400 text-sm">Delete</button>
+                        </>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1024,6 +1081,8 @@ function AdminSuppliers() {
   const [form, setForm] = useState({ name: '', contact: '', email: '', phone: '' });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  // Two-click delete: first click arms the confirmation for this supplier
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
 
   const resetForm = () => {
     setForm({ name: '', contact: '', email: '', phone: '' });
@@ -1066,6 +1125,7 @@ function AdminSuppliers() {
   };
 
   const handleDelete = async (id) => {
+    setConfirmDeleteId(null);
     setLoading(true);
     try {
       await deleteSupplier(id);
@@ -1138,9 +1198,18 @@ function AdminSuppliers() {
                   <td className="px-4 py-3 text-zinc-400">{s.contact || '-'}</td>
                   <td className="px-4 py-3 text-zinc-400">{s.email || '-'}</td>
                   <td className="px-4 py-3 text-zinc-400">{s.phone || '-'}</td>
-                  <td className="text-right px-4 py-3">
-                    <button onClick={() => editSupplierItem(s)} className="text-zinc-400 hover:text-white mr-3">Edit</button>
-                    <button onClick={() => handleDelete(s.id)} className="text-zinc-500 hover:text-red-400">Delete</button>
+                  <td className="text-right px-4 py-3 whitespace-nowrap">
+                    {confirmDeleteId === s.id ? (
+                      <>
+                        <button onClick={() => handleDelete(s.id)} className="text-red-400 hover:text-red-300 font-medium mr-3">Confirm delete?</button>
+                        <button onClick={() => setConfirmDeleteId(null)} className="text-zinc-500 hover:text-white">Cancel</button>
+                      </>
+                    ) : (
+                      <>
+                        <button onClick={() => editSupplierItem(s)} className="text-zinc-400 hover:text-white mr-3">Edit</button>
+                        <button onClick={() => setConfirmDeleteId(s.id)} className="text-zinc-500 hover:text-red-400">Delete</button>
+                      </>
+                    )}
                   </td>
                 </tr>
               ))
@@ -1153,31 +1222,27 @@ function AdminSuppliers() {
 }
 
 function AdminData() {
-  const { data, refreshData } = useStock();
-  const [storageInfo, setStorageInfo] = useState({ size: 0, status: 'checking' });
+  const { data, refresh } = useStock();
+  // Real backend health check — the API serves GET /health at the server root
+  // (VITE_API_URL points at .../api, so strip the /api suffix).
+  const [health, setHealth] = useState({ status: 'checking', latency: null });
 
-  useEffect(() => {
-    checkStorage();
-  }, [data]);
-
-  const checkStorage = async () => {
+  const checkHealth = async () => {
+    setHealth({ status: 'checking', latency: null });
+    const base = (import.meta.env.VITE_API_URL || '').replace(/\/api$/, '');
+    const started = performance.now();
     try {
-      // Estimate data size
-      const dataString = JSON.stringify(data);
-      const size = new Blob([dataString]).size;
-      setStorageInfo({ size, status: 'connected' });
+      const res = await fetch(`${base}/health`);
+      const latency = Math.round(performance.now() - started);
+      setHealth({ status: res.ok ? 'ok' : 'unreachable', latency });
     } catch (e) {
-      setStorageInfo({ size: 0, status: 'unavailable' });
+      setHealth({ status: 'unreachable', latency: null });
     }
   };
 
-  const formatBytes = (bytes) => {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-  };
+  useEffect(() => {
+    checkHealth();
+  }, []);
 
   const exportData = () => {
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -1190,34 +1255,31 @@ function AdminData() {
   };
 
   const forceSync = () => {
-    if (refreshData) {
-      refreshData();
+    if (refresh) {
+      refresh();
     }
   };
 
   return (
     <div className="space-y-6">
-      <div className="bg-emerald-900/20 border border-emerald-900/50 rounded-lg p-6">
-        <h3 className="text-sm font-medium text-emerald-400 mb-4">API Storage Status</h3>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-          <div>
-            <div className="text-xs text-zinc-500">Status</div>
-            <div className={`text-sm font-medium ${storageInfo.status === 'connected' ? 'text-emerald-400' : 'text-red-400'}`}>
-              {storageInfo.status === 'connected' ? 'Connected' : 'Unavailable'}
-            </div>
-          </div>
-          <div>
-            <div className="text-xs text-zinc-500">Data Size</div>
-            <div className="text-sm font-medium text-zinc-300">{formatBytes(storageInfo.size)}</div>
-          </div>
-          <div>
-            <div className="text-xs text-zinc-500">Products</div>
-            <div className="text-sm font-medium text-zinc-300">{data.products.length}</div>
-          </div>
-          <div>
-            <div className="text-xs text-zinc-500">Orders</div>
-            <div className="text-sm font-medium text-zinc-300">{data.orders.length}</div>
-          </div>
+      <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-6">
+        <h3 className="text-sm font-medium text-zinc-400 mb-4">API Health</h3>
+        <div className="flex items-center gap-3 mb-4">
+          <span className={`w-2 h-2 rounded-full ${
+            health.status === 'ok' ? 'bg-emerald-400' :
+            health.status === 'checking' ? 'bg-zinc-500 animate-pulse' :
+            'bg-red-400'
+          }`} />
+          <span className={`text-sm font-medium ${
+            health.status === 'ok' ? 'text-emerald-400' :
+            health.status === 'checking' ? 'text-zinc-400' :
+            'text-red-400'
+          }`}>
+            {health.status === 'ok'
+              ? `OK${health.latency != null ? ` · ${health.latency}ms` : ''}`
+              : health.status === 'checking' ? 'Checking…' : 'Unreachable'}
+          </span>
+          <button onClick={checkHealth} className="text-xs text-zinc-500 hover:text-white">Re-check</button>
         </div>
         <p className="text-zinc-500 text-xs mb-3">Data automatically persists via the backend API.</p>
         <button onClick={forceSync} className="px-4 py-2 bg-emerald-600 text-white rounded text-sm hover:bg-emerald-500">Refresh Data</button>

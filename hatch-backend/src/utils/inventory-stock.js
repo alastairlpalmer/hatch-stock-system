@@ -48,11 +48,27 @@ export async function consumeBatchesFEFO(tx, warehouseId, sku, quantity) {
   const consumed = [];
   for (const batch of batches) {
     if (toConsume <= 0) break;
-    const take = Math.min(batch.remainingQty, toConsume);
-    await tx.stockBatch.update({
-      where: { id: batch.id },
+    let take = Math.min(batch.remainingQty, toConsume);
+
+    // Guarded decrement: only decrement if the batch still holds `take`, so a
+    // concurrent consumer can never drive remainingQty negative. If the guard
+    // misses, re-read the batch and take what is actually there (one retry);
+    // anything still uncovered falls through to the shortfall.
+    const updated = await tx.stockBatch.updateMany({
+      where: { id: batch.id, remainingQty: { gte: take } },
       data: { remainingQty: { decrement: take } },
     });
+    if (updated.count === 0) {
+      const fresh = await tx.stockBatch.findUnique({ where: { id: batch.id } });
+      take = Math.min(Math.max(0, fresh?.remainingQty ?? 0), toConsume);
+      if (take <= 0) continue;
+      const retried = await tx.stockBatch.updateMany({
+        where: { id: batch.id, remainingQty: { gte: take } },
+        data: { remainingQty: { decrement: take } },
+      });
+      if (retried.count === 0) continue; // lost the race again — count as shortfall
+    }
+
     consumed.push({ batch, take });
     toConsume -= take;
   }

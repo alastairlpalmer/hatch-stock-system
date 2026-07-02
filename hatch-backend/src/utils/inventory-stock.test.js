@@ -7,8 +7,10 @@ import {
 
 // ---- Minimal in-memory Prisma transaction stub -----------------------------
 // Implements just the surface these helpers use: stockBatch.aggregate/findMany/
-// update/create and warehouseStock.upsert, honouring the orderBy specs the
-// helpers pass (so FEFO / newest-first ordering is actually exercised).
+// findUnique/update/updateMany/create and warehouseStock.upsert, honouring the
+// orderBy specs the helpers pass (so FEFO / newest-first ordering is actually
+// exercised) and the remainingQty gte guard on updateMany (so the guarded
+// decrement path is too).
 
 function sortBatches(batches, orderBy) {
   const specs = orderBy.map((o) => {
@@ -64,11 +66,20 @@ function makeTx(initial = []) {
         if (where.remainingQty?.gt != null) res = res.filter((b) => b.remainingQty > where.remainingQty.gt);
         return orderBy ? sortBatches(res, orderBy) : res;
       },
+      findUnique: async ({ where }) => batches.find((x) => x.id === where.id) || null,
       update: async ({ where, data }) => {
         const b = batches.find((x) => x.id === where.id);
         if (data.remainingQty?.decrement != null) b.remainingQty -= data.remainingQty.decrement;
         else if (typeof data.remainingQty === 'number') b.remainingQty = data.remainingQty;
         return b;
+      },
+      updateMany: async ({ where, data }) => {
+        const b = batches.find((x) => x.id === where.id);
+        if (!b) return { count: 0 };
+        if (where.remainingQty?.gte != null && b.remainingQty < where.remainingQty.gte) return { count: 0 };
+        if (data.remainingQty?.decrement != null) b.remainingQty -= data.remainingQty.decrement;
+        else if (typeof data.remainingQty === 'number') b.remainingQty = data.remainingQty;
+        return { count: 1 };
       },
       create: async ({ data }) => {
         const b = { id: `new${seq++}`, ...data };
@@ -125,6 +136,36 @@ describe('consumeBatchesFEFO', () => {
     const tx = makeTx([{ warehouseId: WH, sku: SKU, remainingQty: 10, expiryDate: new Date('2026-02-01') }]);
     const { shortfall } = await consumeBatchesFEFO(tx, WH, SKU, 25);
     expect(shortfall).toBe(15);
+  });
+
+  it('never drives remainingQty negative when the snapshot is stale', async () => {
+    // Simulate a concurrent consumer: findMany hands back a STALE view claiming
+    // more stock than the batch actually holds, so the first guarded decrement
+    // must miss and the retry take only what is really there.
+    const tx = makeTx([{ id: 'b1', warehouseId: WH, sku: SKU, remainingQty: 5, expiryDate: new Date('2026-02-01') }]);
+    const origFindMany = tx.stockBatch.findMany;
+    tx.stockBatch.findMany = async (args) => {
+      const res = await origFindMany(args);
+      return res.map((b) => ({ ...b, remainingQty: b.remainingQty + 15 }));
+    };
+
+    const { consumed, shortfall } = await consumeBatchesFEFO(tx, WH, SKU, 10);
+    expect(tx._batches.find((b) => b.id === 'b1').remainingQty).toBe(0);
+    expect(consumed).toEqual([expect.objectContaining({ take: 5 })]);
+    expect(shortfall).toBe(5);
+  });
+
+  it('counts a batch fully drained by a concurrent consumer as shortfall, untouched', async () => {
+    const tx = makeTx([{ id: 'b1', warehouseId: WH, sku: SKU, remainingQty: 0, expiryDate: new Date('2026-02-01') }]);
+    // Stale view says 8 remaining; the live batch is already empty.
+    tx.stockBatch.findMany = async () => [
+      { id: 'b1', warehouseId: WH, sku: SKU, remainingQty: 8, expiryDate: new Date('2026-02-01') },
+    ];
+
+    const { consumed, shortfall } = await consumeBatchesFEFO(tx, WH, SKU, 8);
+    expect(consumed).toEqual([]);
+    expect(shortfall).toBe(8);
+    expect(tx._batches.find((b) => b.id === 'b1').remainingQty).toBe(0);
   });
 });
 

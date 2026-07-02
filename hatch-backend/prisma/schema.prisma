@@ -223,11 +223,16 @@ model Order {
   notes          String?
   invoiceRef     String?   @map("invoice_ref")
   totalAmount    Float?    @map("total_amount")
+  // Expected delivery date (weekend delivery for the Monday restock cycle).
+  expectedDate   DateTime? @map("expected_date")
+  // Set when this PO was created from a BuyingList (one PO per supplier).
+  buyingListId   String?   @map("buying_list_id")
   createdAt      DateTime  @default(now()) @map("created_at")
   receivedAt     DateTime? @map("received_at")
 
-  supplier Supplier?   @relation(fields: [supplierId], references: [id])
+  supplier Supplier?      @relation(fields: [supplierId], references: [id])
   items    OrderItem[]
+  receipts OrderReceipt[]
 
   @@map("orders")
 }
@@ -237,6 +242,10 @@ model OrderItem {
   orderId   String @map("order_id")
   sku       String
   quantity  Int
+  // Units booked in so far across all receipts — supports partial receiving.
+  // The order flips to `received` only when every line is fully received or
+  // the operator explicitly closes it short.
+  receivedQty Int   @default(0) @map("received_qty")
   unitPrice Float? @map("unit_price")
 
   order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
@@ -244,6 +253,83 @@ model OrderItem {
 
   @@index([orderId])
   @@map("order_items")
+}
+
+// One row per receiving event against a PO. A short weekend delivery stays
+// `pending` with receivedQty tracking the shortfall until a later receipt (or
+// an explicit close-short) completes it. items allows MULTIPLE lines per SKU
+// so two date-lots of the same product can be recorded truthfully:
+// [{ sku, quantity, expiryDate?, hasDamage?, damageNotes? }]
+model OrderReceipt {
+  id          String   @id @default(uuid())
+  orderId     String   @map("order_id")
+  warehouseId String   @map("warehouse_id")
+  items       Json
+  closedShort Boolean  @default(false) @map("closed_short")
+  receivedBy  String?  @map("received_by")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([createdAt])
+  @@map("order_receipts")
+}
+
+// ============ BUYING LISTS ============
+
+// The weekly consolidated buying list: one shareable, supplier-grouped list
+// generated from order suggestions (netted against warehouse stock + pending
+// POs). Lives in the platform; share via public token link, PDF, or
+// copy-as-text. Creating orders from it produces one PO per supplier.
+// items: [{ sku, name, mealType?, isFreshMeal?, supplierId, supplierName,
+//           quantity, boxes, unitsPerBox, unitCost,
+//           machineStock, projectedStock, warehouseStock, pendingPOQty,
+//           grossNeed, netNeed, priority, perLocation: [...] }]
+model BuyingList {
+  id         String    @id @default(uuid())
+  name       String
+  status     String    @default("draft") // draft, ordered, archived
+  targetDate DateTime? @map("target_date") // the restock Monday this buy covers
+  shareToken String    @unique @default(uuid()) @map("share_token")
+  items      Json
+  notes      String?
+  orderIds   Json?     @map("order_ids") // POs created from this list
+  createdBy  String?   @map("created_by")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  @@index([createdAt])
+  @@map("buying_lists")
+}
+
+// ============ PICK LISTS ============
+
+// "What to pack into bags tonight for tomorrow's restock run." Generated per
+// route + target date: per-location fill-to-max quantities aggregated per SKU,
+// with warehouse batches allocated FEFO so the packer knows exactly which
+// date-lot to pull. Completing a pick list creates the StockRemoval (linked
+// via removalId) so warehouse decrements reconcile with the run.
+// items: [{ sku, name, totalQty, packedQty?, packed?,
+//           perLocation: [{ locationId, locationName, qty }],
+//           batches: [{ batchId, qty, expiryDate, receivedAt }] }]
+model PickList {
+  id          String    @id @default(uuid())
+  routeId     String?   @map("route_id")
+  routeName   String?   @map("route_name")
+  warehouseId String    @map("warehouse_id")
+  targetDate  DateTime  @map("target_date")
+  status      String    @default("draft") // draft, packed, cancelled
+  items       Json
+  shortfalls  Json? // [{ sku, name, requested, available }]
+  removalId   String?   @map("removal_id")
+  createdBy   String?   @map("created_by")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@index([targetDate])
+  @@index([createdAt])
+  @@map("pick_lists")
 }
 
 // ============ STOCK MOVEMENTS ============

@@ -58,3 +58,46 @@ describe('categorizeBatchesByExpiry', () => {
     expect(result.missing).toHaveLength(1);
   });
 });
+
+describe('calendar-day boundaries', () => {
+  it('puts a batch that expired yesterday in expired with daysUntil -1', () => {
+    const result = categorizeBatchesByExpiry([batch('2026-06-09T12:00:00Z')], NOW);
+    expect(result.expired).toHaveLength(1);
+    expect(result.expired[0].daysUntil).toBe(-1);
+    expect(result.critical).toHaveLength(0);
+  });
+
+  it('puts a batch that expired only hours ago (yesterday evening) in expired, not critical', () => {
+    // 6h before "now" but on the previous calendar day — the old elapsed-time
+    // ceil() rounded this to 0 and filed it under critical.
+    const earlyMorning = new Date('2026-06-10T04:00:00Z');
+    const result = categorizeBatchesByExpiry([batch('2026-06-09T22:00:00Z')], earlyMorning);
+    expect(result.expired).toHaveLength(1);
+    expect(result.expired[0].daysUntil).toBe(-1);
+    expect(result.critical).toHaveLength(0);
+  });
+
+  it('counts a batch expiring today as critical with daysUntil 0', () => {
+    // Later than "now" on the same day AND earlier than "now" on the same day:
+    // both are "expires today", never expired.
+    const later = categorizeBatchesByExpiry([batch('2026-06-10T18:00:00Z')], NOW);
+    expect(later.critical).toHaveLength(1);
+    expect(later.critical[0].daysUntil).toBe(0);
+    expect(later.expired).toHaveLength(0);
+
+    const earlier = categorizeBatchesByExpiry([batch('2026-06-10T06:00:00Z')], NOW);
+    expect(earlier.critical).toHaveLength(1);
+    expect(earlier.critical[0].daysUntil).toBe(0);
+    expect(earlier.expired).toHaveLength(0);
+  });
+
+  it('puts exactly 7 days out in critical and 8 days out in warning', () => {
+    const seven = categorizeBatchesByExpiry([batch('2026-06-17T00:00:00Z')], NOW);
+    expect(seven.critical).toHaveLength(1);
+    expect(seven.critical[0].daysUntil).toBe(7);
+
+    const eight = categorizeBatchesByExpiry([batch('2026-06-18T00:00:00Z')], NOW);
+    expect(eight.warning).toHaveLength(1);
+    expect(eight.warning[0].daysUntil).toBe(8);
+  });
+});

@@ -1,6 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { format } from 'date-fns';
+import { RefreshCw, ChevronDown, ChevronRight, ArrowRight } from 'lucide-react';
 import { useStock } from '../../context/StockContext';
 import ordersService from '../../services/orders.service';
+import buyingListsService from '../../services/buyingLists.service';
 import vendliveService from '../../services/vendlive.service';
 
 // Compact "2h ago" / "just now" formatter for sync timestamps.
@@ -17,40 +21,11 @@ function formatRelativeTime(ts) {
   return `${days}d ago`;
 }
 
-// Shared print styles for the PO order sheets (single-location and consolidated).
-const PO_SHEET_STYLES = `
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: 'Helvetica Neue', Arial, sans-serif; padding: 40px; color: #1a1a1a; }
-    .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 40px; padding-bottom: 20px; border-bottom: 3px solid #059669; }
-    .logo { font-size: 32px; font-weight: bold; color: #059669; }
-    .logo-sub { font-size: 12px; color: #666; margin-top: 4px; }
-    .order-info { text-align: right; }
-    .order-ref { font-size: 24px; font-weight: bold; color: #1a1a1a; }
-    .order-date { font-size: 14px; color: #666; margin-top: 4px; }
-    .details-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; margin-bottom: 30px; }
-    .detail-box { background: #f8f9fa; padding: 20px; border-radius: 8px; }
-    .detail-title { font-size: 12px; text-transform: uppercase; color: #666; margin-bottom: 10px; font-weight: 600; }
-    .detail-content { font-size: 14px; line-height: 1.6; }
-    .detail-name { font-weight: 600; font-size: 16px; margin-bottom: 4px; }
-    table { width: 100%; border-collapse: collapse; margin-bottom: 30px; }
-    th { background: #059669; color: white; padding: 12px; text-align: left; font-size: 12px; text-transform: uppercase; }
-    th:last-child, th:nth-child(3), th:nth-child(4) { text-align: right; }
-    td { padding: 12px; border-bottom: 1px solid #e5e5e5; font-size: 14px; }
-    td:last-child, td:nth-child(3), td:nth-child(4) { text-align: right; }
-    tr:nth-child(even) { background: #f8f9fa; }
-    .priority-critical { color: #dc2626; font-weight: 600; }
-    .priority-warning { color: #d97706; }
-    .totals { margin-left: auto; width: 300px; }
-    .total-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #e5e5e5; }
-    .total-row.grand { font-size: 18px; font-weight: bold; color: #059669; border-bottom: none; border-top: 2px solid #059669; margin-top: 10px; padding-top: 15px; }
-    .notes { background: #fef3c7; padding: 20px; border-radius: 8px; margin-top: 30px; }
-    .notes-title { font-weight: 600; margin-bottom: 8px; color: #92400e; }
-    .footer { margin-top: 40px; padding-top: 20px; border-top: 1px solid #e5e5e5; text-align: center; color: #666; font-size: 12px; }
-    .category-badge { display: inline-block; background: #e5e5e5; padding: 2px 8px; border-radius: 4px; font-size: 11px; margin-left: 8px; }
-    .supplier-head { font-size: 16px; font-weight: 700; color: #059669; margin: 28px 0 8px; padding-bottom: 6px; border-bottom: 2px solid #d1fae5; }
-    .supplier-sub { font-size: 12px; color: #666; font-weight: 400; }
-    .loc-note { color: #666; font-size: 12px; }
-`;
+function formatDay(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : format(d, 'd MMM');
+}
 
 function OrderCard({ order, data, onEdit, onDelete }) {
   const [expanded, setExpanded] = useState(false);
@@ -64,6 +39,11 @@ function OrderCard({ order, data, onEdit, onDelete }) {
     pickup: 'Pick Up'
   };
 
+  // Receive progress — items carry receivedQty once anything has been booked in.
+  const totalQty = (order.items || []).reduce((a, i) => a + (i.quantity || 0), 0);
+  const totalReceived = (order.items || []).reduce((a, i) => a + (i.receivedQty || 0), 0);
+  const partiallyReceived = totalReceived > 0 && order.status === 'pending';
+
   return (
     <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4">
       <div className="flex items-start justify-between">
@@ -71,12 +51,17 @@ function OrderCard({ order, data, onEdit, onDelete }) {
           <div className="flex items-center gap-2 flex-wrap">
             <span className="font-medium text-zinc-200">{supplier?.name || order.supplierId}</span>
             <span className={`text-xs px-2 py-0.5 rounded ${
-              order.status === 'pending'
+              order.status === 'received'
                 ? 'bg-emerald-500/20 text-emerald-400'
-                : 'bg-emerald-500/20 text-emerald-400'
+                : 'bg-amber-500/20 text-amber-400'
             }`}>
               {order.status}
             </span>
+            {partiallyReceived && (
+              <span className="text-xs px-2 py-0.5 rounded bg-sky-500/20 text-sky-400">
+                {totalReceived}/{totalQty} received
+              </span>
+            )}
             <span className="text-xs bg-zinc-800 px-2 py-0.5 rounded text-zinc-400">
               {deliveryMethodLabels[order.deliveryMethod] || 'Standard'}
             </span>
@@ -109,6 +94,9 @@ function OrderCard({ order, data, onEdit, onDelete }) {
                 <span className="text-teal-400 ml-1">({boxes} box{boxes > 1 ? 'es' : ''})</span>
               )}
               {item.unitPrice > 0 && <span className="text-zinc-500 ml-1">@ £{item.unitPrice.toFixed(2)}</span>}
+              {item.receivedQty > 0 && (
+                <span className="text-sky-400 ml-1">✓{item.receivedQty}</span>
+              )}
             </span>
           );
         })}
@@ -133,12 +121,6 @@ function OrderCard({ order, data, onEdit, onDelete }) {
           {order.notes && (
             <div className="text-zinc-500 text-xs">
               <span className="font-medium">Notes:</span> {order.notes}
-            </div>
-          )}
-          {order.invoiceImage && (
-            <div className="mt-2">
-              <span className="text-zinc-500 text-xs font-medium block mb-1">Invoice:</span>
-              <img src={order.invoiceImage} alt="Invoice" className="max-h-32 rounded border border-zinc-700" />
             </div>
           )}
         </div>
@@ -191,34 +173,36 @@ function OrderCard({ order, data, onEdit, onDelete }) {
 }
 
 export default function Orders() {
-  const { data, createOrder, updateOrder, deleteOrder, bulkImportProducts, addSupplier } = useStock();
+  const { data, createOrder, updateOrder, deleteOrder } = useStock();
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [showForm, setShowForm] = useState(false);
   const [editingOrder, setEditingOrder] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [showInvoiceUpload, setShowInvoiceUpload] = useState(false);
-  const [invoiceData, setInvoiceData] = useState(null);
-  const [invoiceProcessing, setInvoiceProcessing] = useState(false);
-  const [invoiceError, setInvoiceError] = useState(null);
-  const [reviewMode, setReviewMode] = useState(false);
-  const [extractedItems, setExtractedItems] = useState([]);
-  const [productsToCreate, setProductsToCreate] = useState([]);
 
-  // Generate Order states
+  // ===== Plan weekly buy (consolidated suggestions) =====
   const [showGenerateOrder, setShowGenerateOrder] = useState(false);
+  const [buyMode, setBuyMode] = useState('weekly'); // 'weekly' | 'topup'
+  const [selectedLocationIds, setSelectedLocationIds] = useState([]);
   const [suggestedItems, setSuggestedItems] = useState([]);
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
-  const [suggestionMeta, setSuggestionMeta] = useState(null); // { leadTimeDays, coverDays, velocityWindows }
-  const [selectedLocation, setSelectedLocation] = useState('');
-  // 'single' restocks one location; 'all' consolidates many locations into one
-  // list, grouped by supplier and creating one PO per supplier.
-  const [orderMode, setOrderMode] = useState('single');
-  const [selectedLocationIds, setSelectedLocationIds] = useState([]);
+  const [suggestionMeta, setSuggestionMeta] = useState(null); // { mode, restockDate, coverTradingDays, ... }
   const [expandedLines, setExpandedLines] = useState(() => new Set());
-  const [orderSupplier, setOrderSupplier] = useState('');
   const [orderNotes, setOrderNotes] = useState('');
-  const [generatingPdf, setGeneratingPdf] = useState(false);
   const [stockFreshness, setStockFreshness] = useState([]); // [{ locationId, mapped, lastSyncedAt }]
-  const [syncingStock, setSyncingStock] = useState(false);
+  const [syncingLocations, setSyncingLocations] = useState(() => new Set());
+  const [panelBanner, setPanelBanner] = useState(null); // { type, message, details? }
+  const [savingList, setSavingList] = useState(false);
+  const [creatingOrders, setCreatingOrders] = useState(false);
+
+  // Keys ('sku' or 'frive:{mealType}') whose orderQty/unitPrice/selected the
+  // user has touched — re-fetches must not clobber these lines.
+  const editedKeysRef = useRef(new Set());
+  // Fetch race guard: only the latest request may apply its response.
+  const fetchSeqRef = useRef(0);
+  // Latest suggestions, readable synchronously inside async fetch merges.
+  const suggestedItemsRef = useRef([]);
+  useEffect(() => { suggestedItemsRef.current = suggestedItems; }, [suggestedItems]);
 
   const [form, setForm] = useState({
     supplierId: '',
@@ -230,8 +214,7 @@ export default function Orders() {
     expectedDate: '',
     deliveryFee: '',
     notes: '',
-    invoiceRef: '',
-    invoiceImage: null
+    invoiceRef: ''
   });
 
   const resetForm = () => {
@@ -245,132 +228,148 @@ export default function Orders() {
       expectedDate: '',
       deliveryFee: '',
       notes: '',
-      invoiceRef: '',
-      invoiceImage: null
+      invoiceRef: ''
     });
     setEditingOrder(null);
     setShowForm(false);
-    setInvoiceData(null);
-    setExtractedItems([]);
-    setProductsToCreate([]);
-    setReviewMode(false);
-    setInvoiceError(null);
   };
 
-  // Fetch suggestions from the server engine (velocity / days-of-cover model,
-  // Frive fresh meals collapsed into meal-type groups). Each line is tagged with
-  // a stable id, an editable unitPrice (from unit cost) and selected=true.
-  // Shared mapper: tag each server suggestion with a stable id, an editable
-  // unitPrice (from unit cost) and selected=true. Works for both single-location
-  // and consolidated payloads (the latter already carries an `id`).
-  const toSuggestionItem = (s) => ({
-    ...s,
-    id: s.id || (s.type === 'freshMealGroup' ? `frive:${s.mealType}` : s.sku),
-    category: s.category || (s.type === 'freshMealGroup' ? 'Fresh Meal' : 'Other'),
-    unitPrice: s.unitCost ?? 0,
-    selected: true,
-  });
+  // A consolidated line is either a concrete SKU or a fresh-meal group keyed by
+  // meal type. The key is stable across re-fetches so user edits survive.
+  const lineKey = (s) => (s.sku ? s.sku : `frive:${s.mealType}`);
+  const isFreshMealGroup = (s) =>
+    s.type === 'freshMealGroup' || (!s.sku && !!s.mealType) || s.isFreshMeal === true;
 
-  const fetchSuggestions = async (locationId) => {
-    if (!locationId) {
-      setSuggestedItems([]);
-      setSuggestionMeta(null);
-      return;
-    }
-    setSuggestionsLoading(true);
-    try {
-      const res = await ordersService.generateSuggestions(locationId);
-      setSuggestionMeta({
-        leadTimeDays: res.leadTimeDays,
-        coverDays: res.coverDays,
-        velocityWindows: res.velocityWindows,
-      });
-      setSuggestedItems((res.suggestions || []).map(toSuggestionItem));
-    } catch (err) {
-      console.error('Failed to load order suggestions:', err);
-      setSuggestedItems([]);
-      setSuggestionMeta(null);
-    } finally {
-      setSuggestionsLoading(false);
-    }
-  };
-
-  // Consolidated across many locations. Per-location lead/cover varies, so the
-  // single-line meta banner is hidden (null) in this mode.
-  const fetchConsolidatedSuggestions = async (locationIds) => {
+  // Fetch consolidated suggestions, merging over any user-edited lines and
+  // discarding stale responses (sequence counter).
+  const fetchSuggestions = useCallback(async (locationIds, mode) => {
+    const seq = ++fetchSeqRef.current;
     if (!locationIds || locationIds.length === 0) {
       setSuggestedItems([]);
       setSuggestionMeta(null);
+      setSuggestionsLoading(false);
       return;
     }
     setSuggestionsLoading(true);
     try {
-      const res = await ordersService.generateConsolidatedSuggestions(locationIds);
-      setSuggestionMeta(null);
-      setSuggestedItems((res.suggestions || []).map(toSuggestionItem));
+      const res = await ordersService.generateConsolidatedSuggestions(locationIds, mode);
+      if (seq !== fetchSeqRef.current) return; // superseded by a newer request
+      const prevByKey = new Map(suggestedItemsRef.current.map(i => [i.key, i]));
+      const items = (res.suggestions || []).map(s => {
+        const key = lineKey(s);
+        const base = {
+          ...s,
+          key,
+          unitPrice: s.unitCost ?? 0,
+          selected: true,
+        };
+        if (editedKeysRef.current.has(key) && prevByKey.has(key)) {
+          const prev = prevByKey.get(key);
+          return { ...base, orderQty: prev.orderQty, unitPrice: prev.unitPrice, selected: prev.selected };
+        }
+        return base;
+      });
+      setSuggestedItems(items);
+      setSuggestionMeta(res.meta || null);
     } catch (err) {
+      if (seq !== fetchSeqRef.current) return;
       console.error('Failed to load consolidated suggestions:', err);
       setSuggestedItems([]);
       setSuggestionMeta(null);
+      setPanelBanner({ type: 'error', message: 'Failed to load suggestions — check the connection and try again.' });
     } finally {
-      setSuggestionsLoading(false);
+      if (seq === fetchSeqRef.current) setSuggestionsLoading(false);
     }
-  };
+  }, []);
 
-  const loadStockFreshness = async () => {
+  const loadStockFreshness = useCallback(async () => {
     try {
       setStockFreshness(await vendliveService.getStockFreshness());
     } catch (err) {
       console.error('Failed to load stock freshness:', err);
     }
-  };
+  }, []);
 
-  // On-demand: pull VendLive truth into LocationStock for this location, then
-  // re-fetch suggestions so they reflect the freshened stock.
-  const syncLocationStock = async () => {
-    if (!selectedLocation) return;
-    setSyncingStock(true);
+  // Pull VendLive truth into LocationStock for one location, then refresh
+  // freshness + suggestions so the plan reflects live machine stock.
+  const syncOneLocation = async (locId) => {
+    setSyncingLocations(prev => new Set(prev).add(locId));
     try {
-      await vendliveService.syncLocationStock(selectedLocation);
-      await Promise.all([fetchSuggestions(selectedLocation), loadStockFreshness()]);
+      await vendliveService.syncLocationStock(locId);
+      await Promise.all([
+        loadStockFreshness(),
+        fetchSuggestions(selectedLocationIds, buyMode),
+      ]);
     } catch (err) {
       console.error('Stock sync failed:', err);
-      alert(err.response?.data?.error || 'Stock sync failed');
+      setPanelBanner({
+        type: 'error',
+        message: `Sync failed for ${data.locations.find(l => l.id === locId)?.name || locId}: ${err.response?.data?.error || err.message || 'unknown error'}`,
+      });
     } finally {
-      setSyncingStock(false);
+      setSyncingLocations(prev => {
+        const next = new Set(prev);
+        next.delete(locId);
+        return next;
+      });
     }
   };
 
-  const openGenerateOrder = () => {
-    const firstLocation = data.locations[0]?.id || '';
-    setOrderMode('single');
-    setSelectedLocation(firstLocation);
-    setSelectedLocationIds(data.locations.map(l => l.id));
+  const syncAllSelected = async () => {
+    const mappedIds = selectedLocationIds.filter(id => {
+      const fr = stockFreshness.find(f => f.locationId === id);
+      return !fr || fr.mapped !== false;
+    });
+    if (mappedIds.length === 0) return;
+    setSyncingLocations(new Set(mappedIds));
+    const results = await Promise.allSettled(
+      mappedIds.map(id => vendliveService.syncLocationStock(id))
+    );
+    setSyncingLocations(new Set());
+    const failed = results
+      .map((r, i) => (r.status === 'rejected' ? mappedIds[i] : null))
+      .filter(Boolean)
+      .map(id => data.locations.find(l => l.id === id)?.name || id);
+    if (failed.length > 0) {
+      setPanelBanner({ type: 'error', message: `Sync failed for: ${failed.join(', ')}` });
+    } else {
+      setPanelBanner({ type: 'success', message: `Synced ${mappedIds.length} location${mappedIds.length === 1 ? '' : 's'} from VendLive.` });
+    }
+    await Promise.all([
+      loadStockFreshness(),
+      fetchSuggestions(selectedLocationIds, buyMode),
+    ]);
+  };
+
+  const openGenerateOrder = useCallback(() => {
+    const ids = data.locations.map(l => l.id);
+    setSelectedLocationIds(ids);
+    setBuyMode('weekly');
     setExpandedLines(new Set());
-    setOrderSupplier('');
     setOrderNotes('');
+    setPanelBanner(null);
+    editedKeysRef.current = new Set();
     setShowGenerateOrder(true);
     loadStockFreshness();
-    fetchSuggestions(firstLocation);
-  };
+    fetchSuggestions(ids, 'weekly');
+  }, [data.locations, fetchSuggestions, loadStockFreshness]);
 
-  const handleLocationChange = (locId) => {
-    setSelectedLocation(locId);
-    fetchSuggestions(locId);
-  };
-
-  // Flip between single-location and all-locations (consolidated) generation.
-  const switchOrderMode = (mode) => {
-    if (mode === orderMode) return;
-    setOrderMode(mode);
-    setExpandedLines(new Set());
-    if (mode === 'all') {
-      const ids = selectedLocationIds.length ? selectedLocationIds : data.locations.map(l => l.id);
-      setSelectedLocationIds(ids);
-      fetchConsolidatedSuggestions(ids);
-    } else {
-      fetchSuggestions(selectedLocation);
+  // Deep link: /orders/purchase?generate=1 auto-opens the planning panel
+  // (used by the Buying Lists "New buying list" button).
+  useEffect(() => {
+    if (searchParams.get('generate') === '1') {
+      openGenerateOrder();
+      const next = new URLSearchParams(searchParams);
+      next.delete('generate');
+      setSearchParams(next, { replace: true });
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const switchBuyMode = (mode) => {
+    if (mode === buyMode) return;
+    setBuyMode(mode);
+    fetchSuggestions(selectedLocationIds, mode);
   };
 
   const toggleLocationId = (id) => {
@@ -378,131 +377,170 @@ export default function Orders() {
       ? selectedLocationIds.filter(x => x !== id)
       : [...selectedLocationIds, id];
     setSelectedLocationIds(next);
-    fetchConsolidatedSuggestions(next);
+    fetchSuggestions(next, buyMode);
   };
 
-  const toggleLineExpanded = (id) => {
+  const setAllLocations = (ids) => {
+    setSelectedLocationIds(ids);
+    fetchSuggestions(ids, buyMode);
+  };
+
+  const toggleLineExpanded = (key) => {
     setExpandedLines(prev => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
+      if (next.has(key)) next.delete(key); else next.add(key);
       return next;
     });
   };
 
-  // Distinct suppliers among currently-selected consolidated lines (drives the
-  // "Create N Orders" button label — one PO per supplier).
-  const consolidatedSupplierCount = () => {
+  const updateSuggestedItem = (key, field, value) => {
+    editedKeysRef.current.add(key);
+    setSuggestedItems(items => items.map(i =>
+      i.key === key
+        ? { ...i, [field]: field === 'orderQty' ? (parseInt(value) || 0) : value, edited: true }
+        : i
+    ));
+  };
+
+  const toggleSuggestedItem = (key) => {
+    editedKeysRef.current.add(key);
+    setSuggestedItems(items => items.map(i =>
+      i.key === key ? { ...i, selected: !i.selected, edited: true } : i
+    ));
+  };
+
+  const boxesFor = (item) => {
+    const upb = item.unitsPerBox || 1;
+    return upb > 1 ? Math.ceil((item.orderQty || 0) / upb) : item.orderQty || 0;
+  };
+
+  const calculateSuggestedTotal = () => suggestedItems
+    .filter(i => i.selected)
+    .reduce((acc, i) => acc + (i.orderQty * i.unitPrice), 0);
+
+  // Buying lists and POs carry concrete SKUs, but a Frive suggestion is a
+  // meal-type group. Split a group's quantity across its flavour SKUs by recent
+  // sell-through (even split if there's no sales signal), assigning any rounding
+  // remainder to the strongest sellers. Non-group lines pass through unchanged.
+  const splitGroupQuantities = (item) => {
+    const members = item.members || [];
+    if (members.length === 0) return [];
+    const totalVel = members.reduce((a, m) => a + (m.velocityLong || m.blendedVelocity || 0), 0);
+    const shares = members.map(m => ({
+      member: m,
+      raw: totalVel > 0
+        ? item.orderQty * ((m.velocityLong || m.blendedVelocity || 0) / totalVel)
+        : item.orderQty / members.length,
+    }));
+    let assigned = 0;
+    const lines = shares.map(s => {
+      const q = Math.floor(s.raw);
+      assigned += q;
+      return { member: s.member, quantity: q, frac: s.raw - q };
+    });
+    let remainder = item.orderQty - assigned;
+    lines.sort((a, b) => b.frac - a.frac);
+    for (let i = 0; remainder > 0; i++, remainder--) lines[i % lines.length].quantity += 1;
+    return lines.filter(l => l.quantity > 0);
+  };
+
+  // Expand a suggestion line into buying-list item lines. Fresh-meal groups
+  // become one line per member SKU; each member inherits the group's supplier
+  // and netting fields and carries the group's perLocation breakdown.
+  const expandToListLines = (item) => {
+    const upb = item.unitsPerBox || 1;
+    const baseFields = {
+      supplierId: item.supplierId || null,
+      supplierName: item.supplierName || null,
+      unitsPerBox: upb,
+      unitCost: item.unitPrice,
+      machineStock: item.machineStock,
+      projectedStock: item.projectedStock,
+      warehouseStock: item.warehouseStock,
+      pendingPOQty: item.pendingPOQty,
+      grossNeed: item.grossNeed,
+      netNeed: item.netNeed,
+      priority: item.priority,
+      perLocation: item.perLocation || [],
+    };
+    if (!isFreshMealGroup(item)) {
+      return [{
+        ...baseFields,
+        sku: item.sku,
+        name: item.name,
+        quantity: item.orderQty,
+        boxes: upb > 1 ? Math.ceil(item.orderQty / upb) : item.orderQty,
+      }];
+    }
+    return splitGroupQuantities(item).map(({ member, quantity }) => ({
+      ...baseFields,
+      sku: member.sku,
+      name: member.name || `${item.name} (${member.sku})`,
+      mealType: item.mealType,
+      quantity,
+      boxes: upb > 1 ? Math.ceil(quantity / upb) : quantity,
+    }));
+  };
+
+  // Same expansion, but shaped as PO order lines.
+  const expandToOrderLines = (item) => {
+    if (!isFreshMealGroup(item)) {
+      return [{ sku: item.sku, quantity: item.orderQty, unitPrice: item.unitPrice }];
+    }
+    return splitGroupQuantities(item).map(({ member, quantity }) => ({
+      sku: member.sku,
+      quantity,
+      unitPrice: item.unitPrice,
+    }));
+  };
+
+  // Primary CTA: persist the plan as a draft buying list and jump to it.
+  const saveAsBuyingList = async () => {
+    const selected = suggestedItems.filter(i => i.selected && i.orderQty > 0);
+    if (selected.length === 0) return;
+    setSavingList(true);
+    setPanelBanner(null);
+    try {
+      const items = selected.flatMap(expandToListLines);
+      const restockDate = suggestionMeta?.restockDate || null;
+      const name = restockDate
+        ? `Buy for Mon ${formatDay(restockDate)}`
+        : `Buying list ${formatDay(new Date().toISOString())}`;
+      const created = await buyingListsService.create({
+        name,
+        targetDate: restockDate,
+        items,
+        ...(orderNotes ? { notes: orderNotes } : {}),
+      });
+      navigate(`/orders/buying-lists/${created.id}`);
+    } catch (err) {
+      console.error('Failed to save buying list:', err);
+      setPanelBanner({
+        type: 'error',
+        message: `Failed to save buying list: ${err.response?.data?.error || err.message || 'unknown error'}`,
+      });
+    } finally {
+      setSavingList(false);
+    }
+  };
+
+  // Distinct suppliers among currently-selected lines (drives the secondary
+  // "create one PO per supplier" button label).
+  const selectedSupplierCount = () => {
     const keys = new Set(
       suggestedItems.filter(i => i.selected && i.orderQty > 0).map(i => i.supplierId || '__none__')
     );
     return keys.size;
   };
 
-  const updateSuggestedItem = (idx, field, value) => {
-    const items = [...suggestedItems];
-    items[idx][field] = field === 'orderQty' ? (parseInt(value) || 0) : value;
-    setSuggestedItems(items);
-  };
-
-  const toggleSuggestedItem = (idx) => {
-    const items = [...suggestedItems];
-    items[idx].selected = !items[idx].selected;
-    setSuggestedItems(items);
-  };
-
-  const calculateSuggestedTotal = () => {
-    return suggestedItems
-      .filter(i => i.selected)
-      .reduce((acc, i) => acc + (i.orderQty * i.unitPrice), 0);
-  };
-
-  // Orders carry concrete SKUs, but a Frive suggestion is a meal-type group.
-  // Split a group's quantity across its flavour SKUs by recent sell-through
-  // (even split if there's no sales signal), assigning any rounding remainder to
-  // the strongest sellers. Non-group lines pass through as a single SKU line.
-  const expandSuggestionToLines = (item) => {
-    if (item.type !== 'freshMealGroup') {
-      return [{ sku: item.sku, quantity: item.orderQty, unitPrice: item.unitPrice }];
-    }
-    const members = item.members || [];
-    if (members.length === 0) return [];
-
-    const totalVel = members.reduce((a, m) => a + (m.velocityLong || 0), 0);
-    const shares = members.map(m => ({
-      sku: m.sku,
-      raw: totalVel > 0
-        ? item.orderQty * ((m.velocityLong || 0) / totalVel)
-        : item.orderQty / members.length,
-    }));
-
-    let assigned = 0;
-    const lines = shares.map(s => {
-      const q = Math.floor(s.raw);
-      assigned += q;
-      return { sku: s.sku, quantity: q, frac: s.raw - q };
-    });
-    let remainder = item.orderQty - assigned;
-    lines.sort((a, b) => b.frac - a.frac);
-    for (let i = 0; remainder > 0; i++, remainder--) lines[i % lines.length].quantity += 1;
-
-    return lines
-      .filter(l => l.quantity > 0)
-      .map(l => ({ sku: l.sku, quantity: l.quantity, unitPrice: item.unitPrice }));
-  };
-
-  const createOrderFromSuggestions = () => {
-    const selectedItems = suggestedItems.filter(i => i.selected && i.orderQty > 0);
-    if (selectedItems.length === 0) return;
-
-    const lines = selectedItems.flatMap(expandSuggestionToLines);
-
-    setForm({
-      supplierId: orderSupplier,
-      deliveryMethod: 'standard',
-      deliveryType: 'warehouse',
-      warehouseId: data.warehouses[0]?.id || '',
-      customAddress: '',
-      items: lines.map(l => ({
-        sku: l.sku,
-        quantity: l.quantity.toString(),
-        unitPrice: l.unitPrice.toString()
-      })),
-      expectedDate: '',
-      deliveryFee: '0',
-      notes: orderNotes,
-      invoiceRef: '',
-      invoiceImage: null
-    });
-
-    setShowGenerateOrder(false);
-    setShowForm(true);
-  };
-
-  // Group the currently-selected consolidated lines by preferred supplier.
-  // Lines with no preferred supplier fall into a single "No preferred supplier"
-  // bucket. Returns [{ supplierId, supplierName, items:[{item, idx}] }].
-  const supplierGroups = () => {
-    const groups = new Map();
-    suggestedItems.forEach((item, idx) => {
-      const key = item.supplierId || '__none__';
-      if (!groups.has(key)) {
-        groups.set(key, {
-          supplierId: item.supplierId || null,
-          supplierName: item.supplierName || 'No preferred supplier',
-          items: [],
-        });
-      }
-      groups.get(key).items.push({ item, idx });
-    });
-    return [...groups.values()];
-  };
-
-  // All-locations mode: split the selected lines by supplier and create one
-  // pending PO per supplier (delivered to the first warehouse), bypassing the
-  // single-order form since several suppliers can't share one form.
-  const createOrdersConsolidated = async () => {
+  // Secondary path: skip the buying list and raise one pending PO per supplier
+  // directly. Each order is created independently so one failure doesn't sink
+  // the rest — the banner summarises what was created and what failed.
+  const createOrdersDirectly = async () => {
     const selected = suggestedItems.filter(i => i.selected && i.orderQty > 0);
     if (selected.length === 0) return;
+    setCreatingOrders(true);
+    setPanelBanner(null);
 
     const warehouseId = data.warehouses[0]?.id || null;
     const bySupplier = new Map();
@@ -512,292 +550,67 @@ export default function Orders() {
       bySupplier.get(key).push(item);
     }
 
+    // Client ids match the manual form's convention (numeric-string, unique);
+    // the offline context replaces them with its own ids anyway.
     const stamp = Date.now();
-    let created = 0;
+    const created = [];
+    const failed = [];
     let idx = 0;
     for (const [supplierId, items] of bySupplier.entries()) {
-      const lines = items.flatMap(expandSuggestionToLines);
+      const supplierName = items[0]?.supplierName || 'No preferred supplier';
+      const lines = items.flatMap(expandToOrderLines).filter(l => l.quantity > 0);
       if (lines.length === 0) { idx++; continue; }
       const subtotal = lines.reduce((a, l) => a + l.quantity * l.unitPrice, 0);
-      await createOrder({
-        id: (stamp + idx).toString(),
-        supplierId: supplierId || null,
-        deliveryMethod: 'standard',
-        deliveryType: 'warehouse',
-        warehouseId,
-        customAddress: null,
-        items: lines.map(l => ({
-          sku: l.sku,
-          quantity: l.quantity,
-          unitPrice: l.unitPrice,
-          lineTotal: l.quantity * l.unitPrice,
-        })),
-        expectedDate: '',
-        deliveryFee: 0,
-        subtotal,
-        total: subtotal,
-        notes: orderNotes,
-        invoiceRef: '',
-        invoiceImage: null,
-        status: 'pending',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      });
-      created++;
+      try {
+        await createOrder({
+          id: (stamp + idx).toString(),
+          supplierId: supplierId || null,
+          deliveryMethod: 'standard',
+          deliveryType: 'warehouse',
+          warehouseId,
+          customAddress: null,
+          items: lines.map(l => ({
+            sku: l.sku,
+            quantity: l.quantity,
+            unitPrice: l.unitPrice,
+            lineTotal: l.quantity * l.unitPrice,
+          })),
+          expectedDate: '',
+          deliveryFee: 0,
+          subtotal,
+          total: subtotal,
+          notes: orderNotes,
+          invoiceRef: '',
+          status: 'pending',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+        created.push(supplierName);
+      } catch (err) {
+        failed.push({
+          supplierName,
+          reason: err.response?.data?.error || err.message || 'unknown error',
+        });
+      }
       idx++;
     }
 
-    setShowGenerateOrder(false);
-    alert(`Created ${created} purchase order${created === 1 ? '' : 's'} (one per supplier).`);
+    setCreatingOrders(false);
+    if (failed.length === 0) {
+      setPanelBanner({
+        type: 'success',
+        message: `Created ${created.length} purchase order${created.length === 1 ? '' : 's'} (one per supplier).`,
+      });
+    } else {
+      setPanelBanner({
+        type: failed.length === bySupplier.size ? 'error' : 'warning',
+        message: `Created ${created.length}, failed ${failed.length}.`,
+        details: failed.map(f => `${f.supplierName}: ${f.reason}`),
+      });
+    }
   };
 
-  // Generate PDF Order Sheet
-  const generateOrderPDF = async () => {
-    setGeneratingPdf(true);
-
-    const selectedItems = suggestedItems.filter(i => i.selected && i.orderQty > 0);
-    const supplier = data.suppliers.find(s => s.id === orderSupplier);
-    const location = data.locations.find(l => l.id === selectedLocation);
-    const total = calculateSuggestedTotal();
-    const orderDate = new Date().toLocaleDateString('en-GB');
-    const orderRef = `PO-${Date.now().toString().slice(-8)}`;
-
-    const html = `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <style>${PO_SHEET_STYLES}</style>
-</head>
-<body>
-  <div class="header">
-    <div>
-      <div class="logo">Hatch</div>
-      <div class="logo-sub">Fresh made easy</div>
-    </div>
-    <div class="order-info">
-      <div class="order-ref">${orderRef}</div>
-      <div class="order-date">${orderDate}</div>
-    </div>
-  </div>
-
-  <div class="details-grid">
-    <div class="detail-box">
-      <div class="detail-title">Supplier</div>
-      <div class="detail-content">
-        <div class="detail-name">${supplier?.name || 'Not specified'}</div>
-        ${supplier?.contact ? `<div>${supplier.contact}</div>` : ''}
-        ${supplier?.email ? `<div>${supplier.email}</div>` : ''}
-        ${supplier?.phone ? `<div>${supplier.phone}</div>` : ''}
-      </div>
-    </div>
-    <div class="detail-box">
-      <div class="detail-title">Deliver To</div>
-      <div class="detail-content">
-        <div class="detail-name">${location?.name || 'Not specified'}</div>
-        <div>Hatch International Limited</div>
-      </div>
-    </div>
-  </div>
-
-  <table>
-    <thead>
-      <tr>
-        <th style="width: 35%">Product</th>
-        <th>Current Stock</th>
-        <th>Order Qty</th>
-        <th>Boxes</th>
-        <th>Unit Price</th>
-        <th>Line Total</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${selectedItems.map(item => `
-        <tr>
-          <td>
-            ${item.name}
-            <span class="category-badge">${item.category || 'Other'}</span>
-            ${item.priority === 'critical' ? '<br><small class="priority-critical">Warning - Below minimum</small>' : ''}
-            ${item.priority === 'warning' ? '<br><small class="priority-warning">Low stock warning</small>' : ''}
-          </td>
-          <td>${item.currentStock} / ${item.maxStock || '-'}</td>
-          <td><strong>${item.orderQty}</strong></td>
-          <td>${item.boxesNeeded} × ${item.unitsPerBox}</td>
-          <td>£${item.unitPrice.toFixed(2)}</td>
-          <td>£${(item.orderQty * item.unitPrice).toFixed(2)}</td>
-        </tr>
-      `).join('')}
-    </tbody>
-  </table>
-
-  <div class="totals">
-    <div class="total-row">
-      <span>Items:</span>
-      <span>${selectedItems.length}</span>
-    </div>
-    <div class="total-row">
-      <span>Total Boxes:</span>
-      <span>${selectedItems.reduce((a, i) => a + i.boxesNeeded, 0)}</span>
-    </div>
-    <div class="total-row">
-      <span>Total Units:</span>
-      <span>${selectedItems.reduce((a, i) => a + i.orderQty, 0)}</span>
-    </div>
-    <div class="total-row grand">
-      <span>Order Total:</span>
-      <span>£${total.toFixed(2)}</span>
-    </div>
-  </div>
-
-  ${orderNotes ? `
-  <div class="notes">
-    <div class="notes-title">Notes</div>
-    <div>${orderNotes}</div>
-  </div>
-  ` : ''}
-
-  <div class="footer">
-    Generated by Hatch Stock Management System
-  </div>
-</body>
-</html>`;
-
-    const printWindow = window.open('', '_blank');
-    printWindow.document.write(html);
-    printWindow.document.close();
-
-    setTimeout(() => {
-      printWindow.print();
-      setGeneratingPdf(false);
-    }, 500);
-  };
-
-  // Consolidated order sheet: one printable page with a section per supplier and
-  // a grand total, plus a per-line breakdown of which locations drove the qty.
-  const generateConsolidatedPDF = async () => {
-    setGeneratingPdf(true);
-
-    const groups = supplierGroups()
-      .map(g => ({ ...g, items: g.items.map(x => x.item).filter(i => i.selected && i.orderQty > 0) }))
-      .filter(g => g.items.length > 0);
-
-    const locNames = data.locations
-      .filter(l => selectedLocationIds.includes(l.id))
-      .map(l => l.name);
-    const grandTotal = calculateSuggestedTotal();
-    const totalUnits = groups.reduce((a, g) => a + g.items.reduce((b, i) => b + i.orderQty, 0), 0);
-    const orderDate = new Date().toLocaleDateString('en-GB');
-    const orderRef = `PO-ALL-${Date.now().toString().slice(-8)}`;
-
-    const sections = groups.map(g => {
-      const subtotal = g.items.reduce((a, i) => a + i.orderQty * i.unitPrice, 0);
-      const rows = g.items.map(item => {
-        const breakdown = (item.perLocation || [])
-          .filter(pl => pl.orderQty > 0)
-          .map(pl => `${pl.locationName}: ${pl.orderQty}`)
-          .join(' · ');
-        return `
-        <tr>
-          <td>
-            ${item.name}
-            <span class="category-badge">${item.category || 'Other'}</span>
-            ${item.priority === 'critical' ? '<br><small class="priority-critical">Critical</small>' : ''}
-            ${breakdown ? `<br><small class="loc-note">${breakdown}</small>` : ''}
-          </td>
-          <td>${item.orderQty}</td>
-          <td>${item.boxesNeeded} × ${item.unitsPerBox}</td>
-          <td>£${item.unitPrice.toFixed(2)}</td>
-          <td>£${(item.orderQty * item.unitPrice).toFixed(2)}</td>
-        </tr>`;
-      }).join('');
-      return `
-      <div class="supplier-head">${g.supplierName} <span class="supplier-sub">· ${g.items.length} line${g.items.length === 1 ? '' : 's'} · £${subtotal.toFixed(2)}</span></div>
-      <table>
-        <thead>
-          <tr>
-            <th style="width: 45%">Product</th>
-            <th>Order Qty</th>
-            <th>Boxes</th>
-            <th>Unit Price</th>
-            <th>Line Total</th>
-          </tr>
-        </thead>
-        <tbody>${rows}</tbody>
-      </table>`;
-    }).join('');
-
-    const html = `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <style>${PO_SHEET_STYLES}</style>
-</head>
-<body>
-  <div class="header">
-    <div>
-      <div class="logo">Hatch</div>
-      <div class="logo-sub">Fresh made easy</div>
-    </div>
-    <div class="order-info">
-      <div class="order-ref">${orderRef}</div>
-      <div class="order-date">${orderDate}</div>
-    </div>
-  </div>
-
-  <div class="details-grid">
-    <div class="detail-box">
-      <div class="detail-title">Consolidated Order</div>
-      <div class="detail-content">
-        <div class="detail-name">${groups.length} supplier${groups.length === 1 ? '' : 's'}</div>
-        <div>Deliver to Hatch International Limited</div>
-      </div>
-    </div>
-    <div class="detail-box">
-      <div class="detail-title">Locations Covered (${locNames.length})</div>
-      <div class="detail-content">${locNames.join(', ') || 'None'}</div>
-    </div>
-  </div>
-
-  ${sections}
-
-  <div class="totals">
-    <div class="total-row">
-      <span>Suppliers:</span>
-      <span>${groups.length}</span>
-    </div>
-    <div class="total-row">
-      <span>Total Units:</span>
-      <span>${totalUnits}</span>
-    </div>
-    <div class="total-row grand">
-      <span>Grand Total:</span>
-      <span>£${grandTotal.toFixed(2)}</span>
-    </div>
-  </div>
-
-  ${orderNotes ? `
-  <div class="notes">
-    <div class="notes-title">Notes</div>
-    <div>${orderNotes}</div>
-  </div>
-  ` : ''}
-
-  <div class="footer">
-    Generated by Hatch Stock Management System
-  </div>
-</body>
-</html>`;
-
-    const printWindow = window.open('', '_blank');
-    printWindow.document.write(html);
-    printWindow.document.close();
-
-    setTimeout(() => {
-      printWindow.print();
-      setGeneratingPdf(false);
-    }, 500);
-  };
+  // ===== Manual PO form =====
 
   const startEdit = (order) => {
     setForm({
@@ -814,8 +627,7 @@ export default function Orders() {
       expectedDate: order.expectedDate || '',
       deliveryFee: order.deliveryFee?.toString() || '',
       notes: order.notes || '',
-      invoiceRef: order.invoiceRef || '',
-      invoiceImage: order.invoiceImage || null
+      invoiceRef: order.invoiceRef || ''
     });
     setEditingOrder(order.id);
     setShowForm(true);
@@ -879,7 +691,6 @@ export default function Orders() {
       total: calculateTotal(),
       notes: form.notes,
       invoiceRef: form.invoiceRef,
-      invoiceImage: form.invoiceImage,
       status: editingOrder ? data.orders.find(o => o.id === editingOrder)?.status || 'pending' : 'pending',
       createdAt: editingOrder ? data.orders.find(o => o.id === editingOrder)?.createdAt : new Date().toISOString(),
       updatedAt: new Date().toISOString()
@@ -891,244 +702,6 @@ export default function Orders() {
       await createOrder(order);
     }
     resetForm();
-  };
-
-  // AI-powered invoice analysis
-  const analyzeInvoiceWithAI = async (imageData, mimeType) => {
-    const prompt = `Analyze this invoice/purchase order image and extract all information in JSON format.
-
-Return ONLY valid JSON with this exact structure (no markdown, no explanation):
-{
-  "supplier": {
-    "name": "supplier company name",
-    "detected": true/false
-  },
-  "invoiceRef": "invoice/PO number if found",
-  "orderDate": "date in YYYY-MM-DD format if found",
-  "deliveryFee": 0,
-  "items": [
-    {
-      "sku": "product SKU/part number if available, otherwise generate from name like 'PROD-001'",
-      "name": "full product name",
-      "description": "any additional description or variant info",
-      "quantity": 1,
-      "unitPrice": 0.00,
-      "lineTotal": 0.00,
-      "category": "one of: Meals, Drinks, Snacks, Other",
-      "packSize": "e.g., '6x250g' or '8 pack' if mentioned"
-    }
-  ],
-  "subtotal": 0.00,
-  "tax": 0.00,
-  "total": 0.00,
-  "deliveryAddress": "delivery address if found",
-  "notes": "any other relevant information"
-}`;
-
-    try {
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 4000,
-          messages: [{
-            role: 'user',
-            content: [
-              {
-                type: 'image',
-                source: {
-                  type: 'base64',
-                  media_type: mimeType,
-                  data: imageData.split(',')[1]
-                }
-              },
-              { type: 'text', text: prompt }
-            ]
-          }]
-        })
-      });
-
-      const result = await response.json();
-      const textContent = result.content?.find(c => c.type === 'text')?.text || '';
-
-      const jsonMatch = textContent.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        return JSON.parse(jsonMatch[0]);
-      }
-      throw new Error('Could not parse AI response');
-    } catch (error) {
-      console.error('AI analysis error:', error);
-      throw error;
-    }
-  };
-
-  const handleInvoiceUpload = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    setInvoiceProcessing(true);
-    setShowInvoiceUpload(true);
-    setInvoiceError(null);
-
-    const reader = new FileReader();
-    reader.onload = async (ev) => {
-      const imageData = ev.target?.result;
-      const mimeType = file.type || 'image/png';
-
-      try {
-        const analyzed = await analyzeInvoiceWithAI(imageData, mimeType);
-
-        let matchedSupplierId = '';
-        if (analyzed.supplier?.name) {
-          const supplierMatch = data.suppliers.find(s =>
-            s.name.toLowerCase().includes(analyzed.supplier.name.toLowerCase()) ||
-            analyzed.supplier.name.toLowerCase().includes(s.name.toLowerCase())
-          );
-          if (supplierMatch) {
-            matchedSupplierId = supplierMatch.id;
-          }
-        }
-
-        const processedItems = [];
-        const newProducts = [];
-
-        for (const item of analyzed.items || []) {
-          let matchedProduct = data.products.find(p =>
-            p.sku.toLowerCase() === item.sku?.toLowerCase()
-          );
-
-          if (!matchedProduct) {
-            matchedProduct = data.products.find(p =>
-              p.name.toLowerCase().includes(item.name?.toLowerCase()) ||
-              item.name?.toLowerCase().includes(p.name?.toLowerCase())
-            );
-          }
-
-          if (matchedProduct) {
-            processedItems.push({
-              ...item,
-              matchedSku: matchedProduct.sku,
-              matchedName: matchedProduct.name,
-              isNew: false,
-              selected: true
-            });
-          } else {
-            const generatedSku = item.sku || `NEW-${Date.now().toString().slice(-4)}-${processedItems.length + newProducts.length + 1}`;
-            processedItems.push({
-              ...item,
-              sku: generatedSku,
-              isNew: true,
-              selected: true,
-              category: item.category || 'Other'
-            });
-            newProducts.push({
-              sku: generatedSku,
-              name: item.name,
-              category: item.category || 'Other',
-              unitCost: item.unitPrice,
-              salePrice: item.unitPrice * 1.4
-            });
-          }
-        }
-
-        setInvoiceData({
-          ...analyzed,
-          matchedSupplierId,
-          invoiceImage: imageData
-        });
-        setExtractedItems(processedItems);
-        setProductsToCreate(newProducts);
-        setReviewMode(true);
-        setInvoiceProcessing(false);
-
-      } catch (error) {
-        console.error('Invoice processing error:', error);
-        setInvoiceError('Failed to analyze invoice. Please try again or enter details manually.');
-        setInvoiceProcessing(false);
-        setForm(prev => ({ ...prev, invoiceImage: imageData }));
-      }
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const updateExtractedItem = (idx, field, value) => {
-    const items = [...extractedItems];
-    items[idx][field] = value;
-
-    if (field === 'matchedSku' && value) {
-      const product = data.products.find(p => p.sku === value);
-      if (product) {
-        items[idx].matchedName = product.name;
-        items[idx].isNew = false;
-        setProductsToCreate(prev => prev.filter(p => p.sku !== items[idx].sku));
-      }
-    }
-
-    setExtractedItems(items);
-  };
-
-  const toggleItemSelection = (idx) => {
-    const items = [...extractedItems];
-    items[idx].selected = !items[idx].selected;
-    setExtractedItems(items);
-  };
-
-  const applyExtractedData = async () => {
-    const selectedNewProducts = productsToCreate.filter(p =>
-      extractedItems.some(item => item.selected && item.isNew && item.sku === p.sku)
-    );
-
-    if (selectedNewProducts.length > 0) {
-      const newProductsList = [...data.products, ...selectedNewProducts.map(p => ({
-        sku: p.sku,
-        name: p.name,
-        category: p.category,
-        unitCost: p.unitCost,
-        salePrice: p.salePrice
-      }))];
-      await bulkImportProducts(newProductsList);
-    }
-
-    let supplierId = invoiceData.matchedSupplierId;
-
-    if (!supplierId && invoiceData.supplier?.name) {
-      const newSupplier = {
-        id: `sup-${Date.now()}`,
-        name: invoiceData.supplier.name,
-        contact: '',
-        email: '',
-        phone: ''
-      };
-      await addSupplier(newSupplier);
-      supplierId = newSupplier.id;
-    }
-
-    const orderItems = extractedItems
-      .filter(item => item.selected)
-      .map(item => ({
-        sku: item.isNew ? item.sku : (item.matchedSku || item.sku),
-        quantity: item.quantity?.toString() || '1',
-        unitPrice: item.unitPrice?.toString() || '0'
-      }));
-
-    setForm({
-      supplierId: supplierId,
-      deliveryMethod: 'standard',
-      deliveryType: invoiceData.deliveryAddress ? 'custom' : 'warehouse',
-      warehouseId: '',
-      customAddress: invoiceData.deliveryAddress || '',
-      items: orderItems.length > 0 ? orderItems : [{ sku: '', quantity: '', unitPrice: '' }],
-      expectedDate: invoiceData.orderDate || '',
-      deliveryFee: invoiceData.deliveryFee?.toString() || '0',
-      notes: invoiceData.notes || '',
-      invoiceRef: invoiceData.invoiceRef || '',
-      invoiceImage: invoiceData.invoiceImage
-    });
-
-    setShowInvoiceUpload(false);
-    setReviewMode(false);
-    setShowForm(true);
   };
 
   // Dynamic order search: every typed word must match somewhere in the
@@ -1151,143 +724,156 @@ Return ONLY valid JSON with this exact structure (no markdown, no explanation):
     return query.split(/\s+/).every(token => haystack.includes(token));
   };
 
-  // One suggestion row. `idx` indexes into suggestedItems so the qty/price/select
-  // handlers keep working whether rows are shown flat (single mode) or grouped by
-  // supplier (all mode). Consolidated lines carry `perLocation` and expand.
-  const renderSuggestionRow = (item, idx) => {
+  // Group the current lines by preferred supplier for the table sections.
+  const supplierGroups = () => {
+    const groups = new Map();
+    suggestedItems.forEach((item) => {
+      const key = item.supplierId || '__none__';
+      if (!groups.has(key)) {
+        groups.set(key, {
+          supplierId: item.supplierId || null,
+          supplierName: item.supplierName || 'No preferred supplier',
+          items: [],
+        });
+      }
+      groups.get(key).items.push(item);
+    });
+    return [...groups.values()];
+  };
+
+  // One suggestion table row (+ optional per-location breakdown row).
+  const renderSuggestionRow = (item) => {
     const expandable = Array.isArray(item.perLocation) && item.perLocation.length > 0;
-    const expanded = expandedLines.has(item.id);
+    const expanded = expandedLines.has(item.key);
     return (
-      <div
-        key={item.id}
-        className={`rounded-lg border transition-all ${
-          item.selected
-            ? item.priority === 'critical'
-              ? 'bg-red-500/5 border-red-500/30'
-              : 'bg-yellow-500/5 border-yellow-500/30'
-            : 'bg-zinc-800/30 border-zinc-700 opacity-50'
-        }`}
-      >
-        <div className="flex items-center gap-3 p-3">
-          <input
-            type="checkbox"
-            checked={item.selected}
-            onChange={() => toggleSuggestedItem(idx)}
-            className="w-4 h-4 rounded border-zinc-600"
-          />
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className={`text-xs px-1.5 py-0.5 rounded ${
-                item.priority === 'critical' ? 'bg-red-500/20 text-red-400' : 'bg-yellow-500/20 text-yellow-400'
-              }`}>
-                {item.priority === 'critical' ? 'CRITICAL' : 'LOW'}
-              </span>
-              <span className="text-xs bg-zinc-700 px-1.5 py-0.5 rounded text-zinc-400">{item.category || 'Other'}</span>
-              {item.daysOfCover != null ? (
-                <span className="text-xs bg-teal-500/20 text-teal-400 px-1.5 py-0.5 rounded">
-                  {item.daysOfCover}d cover
-                </span>
-              ) : item.basis === 'par_fallback' ? (
-                <span className="text-xs bg-zinc-600/40 text-zinc-300 px-1.5 py-0.5 rounded">no recent sales</span>
-              ) : null}
+      <React.Fragment key={item.key}>
+        <tr className={`border-t border-zinc-800 ${item.selected ? '' : 'opacity-40'}`}>
+          <td className="px-2 py-2">
+            <input
+              type="checkbox"
+              checked={item.selected}
+              onChange={() => toggleSuggestedItem(item.key)}
+              className="w-4 h-4 rounded border-zinc-600"
+            />
+          </td>
+          <td className="px-2 py-2 min-w-[180px]">
+            <div className="flex items-center gap-1.5">
               {expandable && (
-                <span className="text-xs bg-zinc-700 px-1.5 py-0.5 rounded text-zinc-400">
-                  {item.perLocation.filter(pl => pl.orderQty > 0).length} location{item.perLocation.filter(pl => pl.orderQty > 0).length === 1 ? '' : 's'}
-                </span>
+                <button
+                  onClick={() => toggleLineExpanded(item.key)}
+                  className="shrink-0 text-zinc-500 hover:text-zinc-300"
+                  title={expanded ? 'Hide locations' : 'Show per-location breakdown'}
+                >
+                  {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                </button>
+              )}
+              <span className="text-sm text-zinc-200">{item.name}</span>
+              {item.edited && (
+                <span
+                  className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0"
+                  title="Edited — kept across refreshes"
+                />
               )}
             </div>
-            <p className="text-sm text-zinc-200 mt-1">
-              {item.name}
-              {item.type === 'freshMealGroup' && item.members && (
-                <span className="text-zinc-500"> · {item.members.length} flavour{item.members.length > 1 ? 's' : ''}</span>
+            <div className="text-xs text-zinc-500 mt-0.5">
+              {item.supplierName || 'No preferred supplier'}
+              {isFreshMealGroup(item) && item.members && (
+                <span> · {item.members.length} flavour{item.members.length > 1 ? 's' : ''}</span>
               )}
-            </p>
-            <p className="text-xs text-zinc-500">
-              Stock: {item.currentStock}{item.maxStock != null ? `/${item.maxStock}` : ''}
-              {' · '}Selling {item.blendedVelocity}/day{' · '}Target {item.targetStock}
-              {item.unitsPerBox > 1 && ` · ${item.boxesNeeded} box${item.boxesNeeded > 1 ? 'es' : ''} × ${item.unitsPerBox}`}
-            </p>
-          </div>
-          {expandable && (
-            <button
-              onClick={() => toggleLineExpanded(item.id)}
-              className="shrink-0 text-zinc-500 hover:text-zinc-300 text-xs px-2 py-1"
-              title={expanded ? 'Hide locations' : 'Show per-location breakdown'}
-            >
-              {expanded ? '▾' : '▸'}
-            </button>
-          )}
-          <div className="text-center">
-            <p className="text-zinc-500 text-xs">Order Qty</p>
+            </div>
+          </td>
+          <td className="px-2 py-2 text-sm whitespace-nowrap" title="projected at restock">
+            <span className="text-zinc-300">{item.machineStock ?? '—'}</span>
+            <ArrowRight size={11} className="inline mx-1 text-zinc-600" />
+            <span className={`${(item.projectedStock ?? 0) <= 0 ? 'text-red-400' : 'text-zinc-400'}`}>
+              {item.projectedStock ?? '—'}
+            </span>
+          </td>
+          <td className="px-2 py-2 text-sm text-zinc-400 text-right">{item.warehouseStock ?? 0}</td>
+          <td className="px-2 py-2 text-sm text-zinc-400 text-right">{item.pendingPOQty ?? 0}</td>
+          <td className="px-2 py-2 text-sm text-zinc-300 text-right">{item.netNeed ?? 0}</td>
+          <td className="px-2 py-2">
             <input
               type="number"
+              min="0"
               value={item.orderQty}
-              onChange={(e) => updateSuggestedItem(idx, 'orderQty', e.target.value)}
-              className="w-16 bg-zinc-700 border border-zinc-600 rounded px-2 py-1 text-center text-sm"
+              onChange={(e) => updateSuggestedItem(item.key, 'orderQty', e.target.value)}
+              className="w-16 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-center text-sm focus:outline-none focus:border-emerald-500"
             />
-          </div>
-          <div className="text-center">
-            <p className="text-zinc-500 text-xs">Unit £</p>
+          </td>
+          <td className="px-2 py-2 text-sm text-zinc-400 text-center whitespace-nowrap">
+            {boxesFor(item)}{(item.unitsPerBox || 1) > 1 && <span className="text-zinc-600"> × {item.unitsPerBox}</span>}
+          </td>
+          <td className="px-2 py-2">
             <input
               type="number"
               step="0.01"
+              min="0"
               value={item.unitPrice}
-              onChange={(e) => updateSuggestedItem(idx, 'unitPrice', parseFloat(e.target.value) || 0)}
-              className="w-16 bg-zinc-700 border border-zinc-600 rounded px-2 py-1 text-center text-sm"
+              onChange={(e) => updateSuggestedItem(item.key, 'unitPrice', parseFloat(e.target.value) || 0)}
+              className="w-16 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-center text-sm focus:outline-none focus:border-emerald-500"
             />
-          </div>
-          <div className="text-right w-20">
-            <p className="text-zinc-500 text-xs">Line Total</p>
-            <p className="text-zinc-300 text-sm">£{(item.orderQty * item.unitPrice).toFixed(2)}</p>
-          </div>
-        </div>
-
+          </td>
+          <td className="px-2 py-2 text-sm text-center whitespace-nowrap">
+            {item.daysOfCover != null ? (
+              <span className="text-teal-400">{item.daysOfCover}td</span>
+            ) : (
+              <span className="text-zinc-600">—</span>
+            )}
+          </td>
+          <td className="px-2 py-2">
+            <span className={`text-xs px-1.5 py-0.5 rounded whitespace-nowrap ${
+              item.priority === 'critical' ? 'bg-red-500/20 text-red-400' : 'bg-yellow-500/20 text-yellow-400'
+            }`}>
+              {item.priority === 'critical' ? 'CRITICAL' : 'LOW'}
+            </span>
+          </td>
+        </tr>
         {expandable && expanded && (
-          <div className="px-3 pb-3 -mt-1">
-            <div className="rounded-md bg-zinc-800/40 border border-zinc-700 divide-y divide-zinc-700/60">
-              {item.perLocation.filter(pl => pl.orderQty > 0).map(pl => (
-                <div key={pl.locationId} className="flex items-center justify-between px-3 py-1.5 text-xs">
-                  <span className="text-zinc-300">{pl.locationName}</span>
-                  <span className="text-zinc-500">
-                    stock {pl.currentStock}
-                    {pl.daysOfCover != null && ` · ${pl.daysOfCover}d cover`}
-                    {' · '}<span className="text-teal-400">order {pl.orderQty}</span>
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
+          <tr className="border-t border-zinc-800/50">
+            <td />
+            <td colSpan={10} className="px-2 pb-2">
+              <div className="rounded-md bg-zinc-800/40 border border-zinc-700 divide-y divide-zinc-700/60">
+                {item.perLocation.map(pl => (
+                  <div key={pl.locationId} className="flex items-center justify-between px-3 py-1.5 text-xs">
+                    <span className="text-zinc-300">{pl.locationName}</span>
+                    <span className="text-zinc-500">
+                      {pl.machineStock != null && `machine ${pl.machineStock}`}
+                      {pl.projectedStock != null && ` → ${pl.projectedStock}`}
+                      {pl.daysOfCover != null && ` · ${pl.daysOfCover}td cover`}
+                      {pl.orderQty != null && (
+                        <>
+                          {' · '}<span className="text-teal-400">order {pl.orderQty}</span>
+                        </>
+                      )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </td>
+          </tr>
         )}
-      </div>
+      </React.Fragment>
     );
   };
 
   const isSearching = searchQuery.trim().length > 0;
   const pendingOrders = data.orders.filter(o => o.status === 'pending').filter(orderMatchesSearch);
   const completedOrders = data.orders.filter(o => o.status === 'received').filter(orderMatchesSearch);
+  const selectedCount = suggestedItems.filter(i => i.selected && i.orderQty > 0).length;
 
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <h2 className="text-xl font-semibold">Purchase Orders</h2>
-        <div className="grid grid-cols-3 sm:flex gap-2">
+        <div className="grid grid-cols-2 sm:flex gap-2">
           <button
             onClick={openGenerateOrder}
             className="px-3 py-2.5 bg-teal-600 text-white rounded text-sm font-medium hover:bg-teal-500 transition-colors"
           >
-            <span className="hidden sm:inline">Generate</span>
-            <span className="sm:hidden">Gen</span>
+            <span className="hidden sm:inline">Plan weekly buy</span>
+            <span className="sm:hidden">Plan buy</span>
           </button>
-          <label className="px-3 py-2.5 bg-zinc-700 text-zinc-300 rounded text-sm font-medium hover:bg-zinc-600 transition-colors cursor-pointer text-center">
-            <span className="hidden sm:inline">Invoice</span>
-            <span className="sm:hidden">Inv</span>
-            <input
-              type="file"
-              accept="image/*,.pdf"
-              onChange={handleInvoiceUpload}
-              className="hidden"
-            />
-          </label>
           <button
             onClick={() => { resetForm(); setShowForm(!showForm); }}
             className="px-3 py-2.5 bg-emerald-500 text-zinc-900 rounded text-sm font-medium hover:bg-emerald-400 transition-colors"
@@ -1297,146 +883,142 @@ Return ONLY valid JSON with this exact structure (no markdown, no explanation):
         </div>
       </div>
 
-      {/* Generate Order Modal */}
+      {/* Plan weekly buy panel */}
       {showGenerateOrder && (
         <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-6 space-y-5">
           <div className="flex items-center justify-between">
             <div>
-              <h3 className="font-medium text-zinc-200">Generate Order</h3>
+              <h3 className="font-medium text-zinc-200">Plan weekly buy</h3>
               <p className="text-zinc-500 text-sm mt-1">
-                Suggests quantities from sales velocity and days of cover
-                {suggestionMeta && ` · ${suggestionMeta.leadTimeDays}d lead + ${suggestionMeta.coverDays}d cover`}
+                Suggested quantities from machine velocity, projected to restock day and netted
+                against warehouse stock and pending POs.
               </p>
             </div>
             <button onClick={() => setShowGenerateOrder(false)} className="text-zinc-500 hover:text-zinc-300 text-xl">×</button>
           </div>
 
-          {/* Single-location vs consolidated all-locations mode */}
-          <div className="flex gap-2">
-            {[{ id: 'single', label: 'Single Location' }, { id: 'all', label: 'All Locations' }].map(m => (
-              <button
-                key={m.id}
-                onClick={() => switchOrderMode(m.id)}
-                className={`px-4 py-2 rounded text-sm transition-colors ${
-                  orderMode === m.id ? 'bg-teal-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:text-white'
-                }`}
-              >
-                {m.label}
-              </button>
-            ))}
+          {panelBanner && (
+            <div className={`rounded-lg px-4 py-3 text-sm border ${
+              panelBanner.type === 'success'
+                ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+                : panelBanner.type === 'warning'
+                  ? 'bg-amber-500/10 border-amber-500/30 text-amber-400'
+                  : 'bg-red-500/10 border-red-500/30 text-red-400'
+            }`}>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p>{panelBanner.message}</p>
+                  {panelBanner.details && (
+                    <ul className="mt-1 list-disc list-inside text-xs opacity-80">
+                      {panelBanner.details.map((d, i) => <li key={i}>{d}</li>)}
+                    </ul>
+                  )}
+                </div>
+                <button onClick={() => setPanelBanner(null)} className="shrink-0 opacity-70 hover:opacity-100">×</button>
+              </div>
+            </div>
+          )}
+
+          {/* Mode toggle */}
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex gap-2">
+              {[{ id: 'weekly', label: 'Weekly order' }, { id: 'topup', label: 'Midweek top-up' }].map(m => (
+                <button
+                  key={m.id}
+                  onClick={() => switchBuyMode(m.id)}
+                  className={`px-4 py-2 rounded text-sm transition-colors ${
+                    buyMode === m.id ? 'bg-teal-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:text-white'
+                  }`}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+            {suggestionMeta?.restockDate && (
+              <span className="text-xs bg-zinc-800 border border-zinc-700 rounded px-2.5 py-1.5 text-zinc-300">
+                Covering restock Monday {formatDay(suggestionMeta.restockDate)}
+                {' · '}{suggestionMeta.coverTradingDays ?? suggestionMeta.tradingDaysToRestock ?? '—'} trading days
+              </span>
+            )}
           </div>
 
-          {orderMode === 'single' ? (() => {
-            const fresh = stockFreshness.find(f => f.locationId === selectedLocation);
-            const unmapped = fresh && !fresh.mapped;
-            return (
-              <div className={`flex items-center justify-between gap-3 rounded-lg px-3 py-2 text-xs border ${
-                unmapped ? 'bg-yellow-500/5 border-yellow-500/30 text-yellow-300' : 'bg-zinc-800/40 border-zinc-700 text-zinc-400'
-              }`}>
-                <span>
-                  {unmapped
-                    ? 'No VendLive machine linked — stock is a manual estimate, not live truth.'
-                    : fresh?.lastSyncedAt
-                      ? `Stock last synced from VendLive ${formatRelativeTime(fresh.lastSyncedAt)}`
-                      : 'Stock not yet synced from VendLive for this location.'}
-                </span>
-                {!unmapped && (
-                  <button
-                    onClick={syncLocationStock}
-                    disabled={syncingStock || !selectedLocation}
-                    className="shrink-0 px-2.5 py-1 bg-zinc-700 text-zinc-200 rounded hover:bg-zinc-600 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {syncingStock ? 'Syncing…' : 'Sync stock'}
-                  </button>
-                )}
+          {/* Location multi-select with per-location freshness + sync */}
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-xs text-zinc-500">Locations ({selectedLocationIds.length} selected)</label>
+              <div className="flex gap-3 text-xs">
+                <button
+                  onClick={() => setAllLocations(data.locations.map(l => l.id))}
+                  className="text-teal-400 hover:text-teal-300"
+                >
+                  Select all
+                </button>
+                <button
+                  onClick={() => setAllLocations([])}
+                  className="text-zinc-500 hover:text-zinc-300"
+                >
+                  Clear
+                </button>
               </div>
-            );
-          })() : (
-            <div className="rounded-lg px-3 py-2 text-xs border bg-zinc-800/40 border-zinc-700 text-zinc-400">
-              <span>Stock read from the database (not re-synced). Per-location freshness:</span>
-              <div className="mt-1.5 flex flex-wrap gap-1.5">
-                {data.locations.filter(l => selectedLocationIds.includes(l.id)).map(l => {
-                  const fr = stockFreshness.find(f => f.locationId === l.id);
-                  const label = !fr || fr.mapped === false
-                    ? 'no VendLive link'
-                    : fr.lastSyncedAt ? formatRelativeTime(fr.lastSyncedAt) : 'never synced';
-                  return (
-                    <span key={l.id} className="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700">
-                      {l.name}: <span className="text-zinc-300">{label}</span>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 max-h-48 overflow-y-auto">
+              {data.locations.map(l => {
+                const fr = stockFreshness.find(f => f.locationId === l.id);
+                const unmapped = fr && fr.mapped === false;
+                const syncing = syncingLocations.has(l.id);
+                const checked = selectedLocationIds.includes(l.id);
+                return (
+                  <div
+                    key={l.id}
+                    className={`flex items-center gap-2 text-sm bg-zinc-800 border rounded px-2 py-1.5 ${
+                      checked ? 'border-zinc-600' : 'border-zinc-700'
+                    }`}
+                  >
+                    <label className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleLocationId(l.id)}
+                        className="w-4 h-4 rounded border-zinc-600"
+                      />
+                      <span className="truncate text-zinc-300">{l.name}</span>
+                    </label>
+                    <span className={`text-[10px] whitespace-nowrap ${unmapped ? 'text-yellow-400' : 'text-zinc-500'}`}>
+                      {unmapped ? 'no VendLive link' : fr?.lastSyncedAt ? formatRelativeTime(fr.lastSyncedAt) : 'never synced'}
                     </span>
-                  );
-                })}
-              </div>
+                    {checked && !unmapped && (
+                      <button
+                        onClick={() => syncOneLocation(l.id)}
+                        disabled={syncing}
+                        className="shrink-0 flex items-center gap-1 px-1.5 py-0.5 text-[10px] bg-zinc-700 text-zinc-200 rounded hover:bg-zinc-600 disabled:opacity-50"
+                        title="Sync stock from VendLive"
+                      >
+                        <RefreshCw size={10} className={syncing ? 'animate-spin' : ''} />
+                        Sync
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
             </div>
-          )}
+            <div className="mt-2 flex items-center justify-between">
+              <p className="text-xs text-zinc-600">Stock is read from the last VendLive sync — sync before planning for live truth.</p>
+              <button
+                onClick={syncAllSelected}
+                disabled={syncingLocations.size > 0 || selectedLocationIds.length === 0}
+                className="flex items-center gap-1.5 px-2.5 py-1 text-xs bg-zinc-700 text-zinc-200 rounded hover:bg-zinc-600 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <RefreshCw size={12} className={syncingLocations.size > 0 ? 'animate-spin' : ''} />
+                {syncingLocations.size > 0 ? 'Syncing…' : 'Sync all selected'}
+              </button>
+            </div>
+          </div>
 
-          {orderMode === 'single' ? (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs text-zinc-500 mb-1">Location to Restock</label>
-                <select
-                  value={selectedLocation}
-                  onChange={(e) => handleLocationChange(e.target.value)}
-                  className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-teal-500"
-                >
-                  {data.locations.map(l => (
-                    <option key={l.id} value={l.id}>{l.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs text-zinc-500 mb-1">Supplier (Optional)</label>
-                <select
-                  value={orderSupplier}
-                  onChange={(e) => setOrderSupplier(e.target.value)}
-                  className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-teal-500"
-                >
-                  <option value="">Select supplier</option>
-                  {data.suppliers.map(s => (
-                    <option key={s.id} value={s.id}>{s.name}</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-          ) : (
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <label className="block text-xs text-zinc-500">Locations to Consolidate ({selectedLocationIds.length})</label>
-                <div className="flex gap-3 text-xs">
-                  <button
-                    onClick={() => { const ids = data.locations.map(l => l.id); setSelectedLocationIds(ids); fetchConsolidatedSuggestions(ids); }}
-                    className="text-teal-400 hover:text-teal-300"
-                  >
-                    Select all
-                  </button>
-                  <button
-                    onClick={() => { setSelectedLocationIds([]); fetchConsolidatedSuggestions([]); }}
-                    className="text-zinc-500 hover:text-zinc-300"
-                  >
-                    Clear
-                  </button>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-2 max-h-40 overflow-y-auto">
-                {data.locations.map(l => (
-                  <label key={l.id} className="flex items-center gap-2 text-sm bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 cursor-pointer hover:border-zinc-600">
-                    <input
-                      type="checkbox"
-                      checked={selectedLocationIds.includes(l.id)}
-                      onChange={() => toggleLocationId(l.id)}
-                      className="w-4 h-4 rounded border-zinc-600"
-                    />
-                    <span className="truncate text-zinc-300">{l.name}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-          )}
-
+          {/* Summary stats */}
           <div className="grid grid-cols-4 gap-4">
             <div className="bg-zinc-800/50 rounded-lg p-3 text-center">
               <div className="text-xl font-bold text-teal-400">{suggestedItems.length}</div>
-              <div className="text-xs text-zinc-500">Items Need Stock</div>
+              <div className="text-xs text-zinc-500">Lines</div>
             </div>
             <div className="bg-zinc-800/50 rounded-lg p-3 text-center">
               <div className="text-xl font-bold text-red-400">{suggestedItems.filter(i => i.priority === 'critical').length}</div>
@@ -1452,6 +1034,7 @@ Return ONLY valid JSON with this exact structure (no markdown, no explanation):
             </div>
           </div>
 
+          {/* Suggestions table */}
           {suggestionsLoading ? (
             <div className="bg-zinc-800/40 border border-zinc-700 rounded-lg p-6 text-center">
               <p className="text-zinc-400 text-sm">Analysing stock and sales velocity…</p>
@@ -1459,40 +1042,59 @@ Return ONLY valid JSON with this exact structure (no markdown, no explanation):
           ) : suggestedItems.length === 0 ? (
             <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-6 text-center">
               <p className="text-emerald-400 font-medium">
-                {orderMode === 'all' && selectedLocationIds.length === 0 ? 'No locations selected' : 'All stocked up!'}
+                {selectedLocationIds.length === 0 ? 'No locations selected' : 'All stocked up!'}
               </p>
               <p className="text-zinc-500 text-sm mt-1">
-                {orderMode === 'all'
-                  ? selectedLocationIds.length === 0
-                    ? 'Pick one or more locations to consolidate.'
-                    : 'Nothing is below its days-of-cover target across the selected locations.'
-                  : 'Nothing is below its days-of-cover target for this location.'}
+                {selectedLocationIds.length === 0
+                  ? 'Pick one or more locations to plan for.'
+                  : 'Nothing needs ordering across the selected locations for this window.'}
               </p>
             </div>
           ) : (
-            <div className="space-y-2 max-h-80 overflow-y-auto">
-              {orderMode === 'single'
-                ? suggestedItems.map((item, idx) => renderSuggestionRow(item, idx))
-                : supplierGroups().map(group => {
-                    const selectedInGroup = group.items.filter(x => x.item.selected && x.item.orderQty > 0);
-                    const subtotal = selectedInGroup.reduce((a, x) => a + x.item.orderQty * x.item.unitPrice, 0);
+            <div className="overflow-x-auto max-h-96 overflow-y-auto rounded-lg border border-zinc-800">
+              <table className="w-full text-left">
+                <thead className="sticky top-0 bg-zinc-900 z-10">
+                  <tr className="text-xs text-zinc-500">
+                    <th className="px-2 py-2 font-medium w-8" />
+                    <th className="px-2 py-2 font-medium">Product / Supplier</th>
+                    <th className="px-2 py-2 font-medium whitespace-nowrap" title="Machine stock now → projected at restock">Machine</th>
+                    <th className="px-2 py-2 font-medium text-right">Warehouse</th>
+                    <th className="px-2 py-2 font-medium text-right whitespace-nowrap">On order</th>
+                    <th className="px-2 py-2 font-medium text-right whitespace-nowrap">Net need</th>
+                    <th className="px-2 py-2 font-medium whitespace-nowrap">Order qty</th>
+                    <th className="px-2 py-2 font-medium text-center">Boxes</th>
+                    <th className="px-2 py-2 font-medium">Unit £</th>
+                    <th className="px-2 py-2 font-medium text-center" title="Days of cover (trading days)">Cover</th>
+                    <th className="px-2 py-2 font-medium" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {supplierGroups().map(group => {
+                    const selectedInGroup = group.items.filter(i => i.selected && i.orderQty > 0);
+                    const subtotal = selectedInGroup.reduce((a, i) => a + i.orderQty * i.unitPrice, 0);
                     return (
-                      <div key={group.supplierId || '__none__'} className="space-y-2">
-                        <div className="flex items-center justify-between px-1 pt-2">
-                          <span className="text-sm font-medium text-teal-400">{group.supplierName}</span>
-                          <span className="text-xs text-zinc-500">
-                            {selectedInGroup.length} selected · £{subtotal.toFixed(2)}
-                          </span>
-                        </div>
-                        {group.items.map(({ item, idx }) => renderSuggestionRow(item, idx))}
-                      </div>
+                      <React.Fragment key={group.supplierId || '__none__'}>
+                        <tr className="bg-zinc-800/60">
+                          <td colSpan={11} className="px-2 py-1.5">
+                            <div className="flex items-center justify-between">
+                              <span className="text-sm font-medium text-teal-400">{group.supplierName}</span>
+                              <span className="text-xs text-zinc-500">
+                                {selectedInGroup.length} selected · £{subtotal.toFixed(2)}
+                              </span>
+                            </div>
+                          </td>
+                        </tr>
+                        {group.items.map(renderSuggestionRow)}
+                      </React.Fragment>
                     );
                   })}
+                </tbody>
+              </table>
             </div>
           )}
 
           <div>
-            <label className="block text-xs text-zinc-500 mb-1">Order Notes (Optional)</label>
+            <label className="block text-xs text-zinc-500 mb-1">Notes (Optional)</label>
             <textarea
               value={orderNotes}
               onChange={(e) => setOrderNotes(e.target.value)}
@@ -1502,22 +1104,22 @@ Return ONLY valid JSON with this exact structure (no markdown, no explanation):
             />
           </div>
 
-          <div className="flex gap-3 pt-4 border-t border-zinc-800">
+          <div className="flex flex-col sm:flex-row gap-3 pt-4 border-t border-zinc-800">
             <button
-              onClick={orderMode === 'all' ? generateConsolidatedPDF : generateOrderPDF}
-              disabled={suggestedItems.filter(i => i.selected).length === 0 || generatingPdf}
-              className="px-4 py-3 bg-zinc-700 text-zinc-200 rounded-lg text-sm font-medium hover:bg-zinc-600 disabled:opacity-50 disabled:cursor-not-allowed"
+              onClick={saveAsBuyingList}
+              disabled={selectedCount === 0 || savingList}
+              className="flex-1 px-4 py-3 bg-emerald-500 text-zinc-900 rounded-lg text-sm font-medium hover:bg-emerald-400 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {generatingPdf ? 'Generating...' : 'Generate PDF'}
+              {savingList ? 'Saving…' : `Save as buying list (${selectedCount} line${selectedCount === 1 ? '' : 's'})`}
             </button>
             <button
-              onClick={orderMode === 'all' ? createOrdersConsolidated : createOrderFromSuggestions}
-              disabled={suggestedItems.filter(i => i.selected && i.orderQty > 0).length === 0}
-              className="flex-1 px-4 py-3 bg-teal-600 text-white rounded-lg text-sm font-medium hover:bg-teal-500 disabled:opacity-50 disabled:cursor-not-allowed"
+              onClick={createOrdersDirectly}
+              disabled={selectedCount === 0 || creatingOrders}
+              className="px-4 py-3 bg-zinc-700 text-zinc-200 rounded-lg text-sm font-medium hover:bg-zinc-600 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {orderMode === 'all'
-                ? `Create ${consolidatedSupplierCount()} Order${consolidatedSupplierCount() === 1 ? '' : 's'} (one per supplier)`
-                : `Create Order (${suggestedItems.filter(i => i.selected).length} items)`}
+              {creatingOrders
+                ? 'Creating…'
+                : `Create ${selectedSupplierCount()} PO${selectedSupplierCount() === 1 ? '' : 's'} directly`}
             </button>
             <button onClick={() => setShowGenerateOrder(false)} className="px-4 py-3 bg-zinc-800 text-zinc-400 rounded-lg text-sm hover:bg-zinc-700">
               Cancel
@@ -1526,120 +1128,11 @@ Return ONLY valid JSON with this exact structure (no markdown, no explanation):
         </div>
       )}
 
-      {/* Invoice Analysis Modal */}
-      {showInvoiceUpload && (
-        <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-6 space-y-4">
-          <div className="flex items-center justify-between">
-            <h3 className="font-medium text-zinc-200">{reviewMode ? 'Review Extracted Data' : 'Analyzing Invoice'}</h3>
-            <button onClick={() => { setShowInvoiceUpload(false); setReviewMode(false); }} className="text-zinc-500 hover:text-zinc-300 text-xl">×</button>
-          </div>
-
-          {invoiceProcessing && (
-            <div className="text-center py-12">
-              <div className="inline-block animate-spin text-emerald-400 text-3xl mb-4">↻</div>
-              <p className="text-zinc-400">Analyzing invoice with AI...</p>
-            </div>
-          )}
-
-          {invoiceError && (
-            <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4">
-              <p className="text-red-400 text-sm">{invoiceError}</p>
-              <button onClick={() => { setShowInvoiceUpload(false); setShowForm(true); }} className="mt-3 px-4 py-2 bg-zinc-700 text-zinc-300 rounded text-sm hover:bg-zinc-600">
-                Enter Manually
-              </button>
-            </div>
-          )}
-
-          {reviewMode && invoiceData && (
-            <div className="space-y-6">
-              <div className="bg-zinc-800/30 rounded-lg p-4 space-y-3">
-                <h4 className="text-sm font-medium text-zinc-300">Order Details</h4>
-                <div className="grid grid-cols-2 gap-4 text-sm">
-                  <div>
-                    <span className="text-zinc-500">Supplier:</span>
-                    <span className={`ml-2 ${invoiceData.matchedSupplierId ? 'text-emerald-400' : 'text-yellow-400'}`}>
-                      {invoiceData.supplier?.name || 'Not detected'}
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-zinc-500">Invoice Ref:</span>
-                    <span className="ml-2 text-zinc-300">{invoiceData.invoiceRef || 'N/A'}</span>
-                  </div>
-                  <div>
-                    <span className="text-zinc-500">Total:</span>
-                    <span className="ml-2 text-zinc-300">£{invoiceData.total?.toFixed(2) || '0.00'}</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="bg-zinc-800/30 rounded-lg p-4">
-                <h4 className="text-sm font-medium text-zinc-300 mb-3">Extracted Items ({extractedItems.length})</h4>
-                <div className="space-y-2 max-h-64 overflow-y-auto">
-                  {extractedItems.map((item, idx) => (
-                    <div key={idx} className={`flex items-center gap-3 p-3 rounded-lg border ${
-                      item.selected
-                        ? item.isNew ? 'bg-yellow-500/5 border-yellow-500/30' : 'bg-emerald-500/5 border-emerald-500/30'
-                        : 'bg-zinc-800/50 border-zinc-700 opacity-50'
-                    }`}>
-                      <input
-                        type="checkbox"
-                        checked={item.selected}
-                        onChange={() => toggleItemSelection(idx)}
-                        className="w-4 h-4 rounded border-zinc-600"
-                      />
-                      <div className="flex-1 min-w-0">
-                        <span className={`text-xs px-1.5 py-0.5 rounded ${item.isNew ? 'bg-yellow-500/20 text-yellow-400' : 'bg-emerald-500/20 text-emerald-400'}`}>
-                          {item.isNew ? 'NEW' : 'MATCHED'}
-                        </span>
-                        <p className="text-sm text-zinc-200 truncate">{item.name}</p>
-                      </div>
-                      <div className="text-center">
-                        <p className="text-zinc-500 text-xs">Qty</p>
-                        <input
-                          type="number"
-                          value={item.quantity}
-                          onChange={(e) => updateExtractedItem(idx, 'quantity', parseInt(e.target.value) || 0)}
-                          className="w-16 bg-zinc-700 border border-zinc-600 rounded px-2 py-1 text-center text-sm"
-                        />
-                      </div>
-                      <div className="text-center">
-                        <p className="text-zinc-500 text-xs">Unit £</p>
-                        <input
-                          type="number"
-                          step="0.01"
-                          value={item.unitPrice}
-                          onChange={(e) => updateExtractedItem(idx, 'unitPrice', parseFloat(e.target.value) || 0)}
-                          className="w-20 bg-zinc-700 border border-zinc-600 rounded px-2 py-1 text-center text-sm"
-                        />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="flex gap-3 pt-4 border-t border-zinc-800">
-                <button
-                  onClick={applyExtractedData}
-                  disabled={extractedItems.filter(i => i.selected).length === 0}
-                  className="flex-1 px-4 py-3 bg-emerald-500 text-zinc-900 rounded-lg text-sm font-medium hover:bg-emerald-400 disabled:opacity-50"
-                >
-                  Confirm & Create Order
-                </button>
-                <button onClick={() => { setShowInvoiceUpload(false); setShowForm(true); setReviewMode(false); }} className="px-4 py-3 bg-zinc-700 text-zinc-300 rounded-lg text-sm hover:bg-zinc-600">
-                  Edit Manually
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
       {/* Order Form */}
-      {showForm && !showInvoiceUpload && (
+      {showForm && (
         <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-6 space-y-4">
           <div className="flex items-center justify-between">
             <h3 className="font-medium text-zinc-200">{editingOrder ? 'Edit Order' : 'New Purchase Order'}</h3>
-            {form.invoiceImage && <span className="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-1 rounded">Invoice attached</span>}
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1723,7 +1216,7 @@ Return ONLY valid JSON with this exact structure (no markdown, no explanation):
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <label className="block text-xs text-zinc-500 mb-1">Expected Date</label>
+              <label className="block text-xs text-zinc-500 mb-1">Expected delivery</label>
               <input
                 type="date"
                 value={form.expectedDate}

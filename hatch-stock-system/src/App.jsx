@@ -18,6 +18,11 @@ import Admin from './components/pages/Admin';
 import RestockingDocs from './components/pages/RestockingDocs';
 import Login from './components/pages/Login';
 import Users from './components/pages/Users';
+import BuyingLists from './components/pages/orders/BuyingLists';
+import BuyingListDetail from './components/pages/orders/BuyingListDetail';
+import SharedBuyingList from './components/pages/SharedBuyingList';
+import PickLists from './components/pages/restock/PickLists';
+import PickListDetail from './components/pages/restock/PickListDetail';
 
 // Parent layouts
 import OrdersLayout from './components/pages/orders/OrdersLayout';
@@ -58,6 +63,9 @@ function App() {
     <ErrorBoundary>
       <Routes>
         <Route path="/login" element={<Login />} />
+        {/* Public share view — the unguessable token is the credential, so this
+            deliberately sits outside RequireAuth and the app chrome. */}
+        <Route path="/share/buying-list/:token" element={<SharedBuyingList />} />
         <Route
           path="/*"
           element={
@@ -72,7 +80,7 @@ function App() {
 }
 
 function AppLayout() {
-  const { loading, syncStatus } = useStock();
+  const { loading, syncStatus, error, clearError } = useStock();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
@@ -123,21 +131,37 @@ function AppLayout() {
 
         <main className="flex-1 overflow-auto p-4 md:p-6">
           <div className="max-w-7xl mx-auto">
+            {error && (
+              <div className="mb-4 flex items-start justify-between gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+                <p className="min-w-0">{error}</p>
+                <button
+                  onClick={clearError}
+                  aria-label="Dismiss"
+                  className="flex-shrink-0 rounded px-2 py-0.5 text-amber-300 hover:bg-amber-500/20 hover:text-amber-100"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
             <Routes>
               <Route path="/" element={<Dashboard />} />
               <Route path="/sales" element={<SalesOverview />} />
               <Route path="/locations" element={<LocationStock />} />
 
               <Route path="/orders" element={<OrdersLayout />}>
-                <Route index element={<Navigate to="warehouse" replace />} />
+                <Route index element={<Navigate to="purchase" replace />} />
                 <Route path="warehouse" element={<Inventory />} />
                 <Route path="purchase" element={<Orders />} />
+                <Route path="buying-lists" element={<BuyingLists />} />
+                <Route path="buying-lists/:id" element={<BuyingListDetail />} />
                 <Route path="receive" element={<ReceiveStock />} />
               </Route>
 
               <Route path="/restock" element={<RestockLayout />}>
                 <Route index element={<RestockWorkflow />} />
                 <Route path="route" element={<SelectRoute />} />
+                <Route path="picklists" element={<PickLists />} />
+                <Route path="picklists/:id" element={<PickListDetail />} />
                 <Route path="remove" element={<RemoveStock />} />
                 <Route path="machine" element={<RestockMachine />} />
                 <Route path="shrinkage" element={<Shrinkage />} />

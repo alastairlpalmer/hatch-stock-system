@@ -127,8 +127,9 @@ export function StockProvider({ children }) {
       setIsOfflineMode(false);
     } catch (err) {
       console.log('Backend unavailable, trying local storage...');
-      
-      // Fall back to local storage (demo/offline mode)
+
+      // Fall back to local storage (demo/offline mode) — but surface the
+      // failure so the user knows they're looking at cached data.
       try {
         const stored = localStorage.getItem('hatch-stock-data');
         if (stored) {
@@ -136,12 +137,16 @@ export function StockProvider({ children }) {
         }
         setIsOfflineMode(true);
         setSyncStatus({ status: 'offline', lastSaved: null });
+        setError('Could not reach the server — showing locally cached data. Changes may not be saved.');
       } catch (e) {
         console.error('Failed to load local data:', e);
+        setError('Could not reach the server, and no locally cached data was available.');
       }
     }
     setLoading(false);
   };
+
+  const clearError = useCallback(() => setError(null), []);
 
   // ========== DATA PERSISTENCE ==========
 
@@ -156,6 +161,7 @@ export function StockProvider({ children }) {
         setSyncStatus({ status: 'saved', lastSaved: new Date() });
       } catch (e) {
         console.error('Failed to save locally:', e);
+        setError('Failed to save changes to local storage — your latest changes may be lost.');
         setSyncStatus(prev => ({ ...prev, status: 'error' }));
       }
     } else {
@@ -277,23 +283,50 @@ export function StockProvider({ children }) {
     return created;
   }, [data, isOfflineMode, saveData]);
 
-  const receiveOrder = useCallback(async (orderId, receivedItems, warehouseId) => {
+  // Receive stock against an order. Supports PARTIAL receiving: items may
+  // contain multiple lines per SKU (one per expiry lot); the order stays
+  // pending until every line is fully received, or opts.closeShort is true.
+  // opts: { closeShort?: boolean, receivedBy?: string }
+  const receiveOrder = useCallback(async (orderId, receivedItems, warehouseId, opts = {}) => {
     if (isOfflineMode) {
-      // Update order status
-      const orders = data.orders.map(o => 
-        o.id === orderId ? { ...o, status: 'received', receivedAt: new Date().toISOString() } : o
+      const order = data.orders.find(o => o.id === orderId);
+      if (!order) return;
+
+      // Sum received quantities per SKU (multiple lots per SKU allowed)
+      const receivedBySku = {};
+      receivedItems.forEach(item => {
+        receivedBySku[item.sku] = (receivedBySku[item.sku] || 0) + item.quantity;
+      });
+
+      const updatedItems = order.items.map(it => ({
+        ...it,
+        receivedQty: Math.min(it.quantity, (it.receivedQty || 0) + (receivedBySku[it.sku] || 0)),
+      }));
+      const fullyReceived = updatedItems.every(it => (it.receivedQty || 0) >= it.quantity);
+      const closed = fullyReceived || !!opts.closeShort;
+
+      const orders = data.orders.map(o =>
+        o.id === orderId
+          ? {
+              ...o,
+              items: updatedItems,
+              status: closed ? 'received' : 'pending',
+              ...(closed ? { receivedAt: new Date().toISOString(), closedShort: !fullyReceived && !!opts.closeShort } : {}),
+            }
+          : o
       );
-      
+
       // Update warehouse stock
       const stock = { ...data.stock };
       if (!stock[warehouseId]) stock[warehouseId] = {};
+      stock[warehouseId] = { ...stock[warehouseId] };
       receivedItems.forEach(item => {
         stock[warehouseId][item.sku] = (stock[warehouseId][item.sku] || 0) + item.quantity;
       });
 
-      // Create batches
-      const newBatches = receivedItems.map(item => ({
-        id: `batch-${Date.now()}-${item.sku}`,
+      // Create one batch per received lot
+      const newBatches = receivedItems.map((item, idx) => ({
+        id: `batch-${Date.now()}-${idx}-${item.sku}`,
         sku: item.sku,
         warehouseId,
         quantity: item.quantity,
@@ -313,20 +346,30 @@ export function StockProvider({ children }) {
       await saveData(updated);
       return;
     }
-    await ordersService.receive(orderId, receivedItems, warehouseId);
-    // Refresh orders, stock and batches (receiving creates expiry batches —
-    // without the refresh they don't appear in the expiry tab until reload)
-    const [orders, stockData, stockBatches] = await Promise.all([
-      ordersService.getAll(),
-      inventoryService.getWarehouseStock(warehouseId),
-      inventoryService.getBatches(),
-    ]);
-    setData(prev => ({
-      ...prev,
-      orders,
-      stock: { ...prev.stock, [warehouseId]: stockData },
-      stockBatches,
-    }));
+    try {
+      const result = await ordersService.receive(orderId, receivedItems, warehouseId, opts);
+      // Refresh orders, stock and batches (receiving creates expiry batches —
+      // without the refresh they don't appear in the expiry tab until reload).
+      // Re-fetching orders keeps a partially-received order in the list as
+      // pending with its updated items.receivedQty.
+      // getWarehouseStock() returns the full { warehouseId: { sku: qty } } map,
+      // so replace the whole stock map rather than nesting it under one key.
+      const [orders, stockData, stockBatches] = await Promise.all([
+        ordersService.getAll(),
+        inventoryService.getWarehouseStock(),
+        inventoryService.getBatches(),
+      ]);
+      setData(prev => ({
+        ...prev,
+        orders,
+        stock: stockData,
+        stockBatches,
+      }));
+      return result;
+    } catch (err) {
+      setError(err.message || 'Failed to receive the order — please try again.');
+      throw err;
+    }
   }, [data, isOfflineMode, saveData]);
 
   // ========== WAREHOUSE OPERATIONS ==========
@@ -709,14 +752,16 @@ export function StockProvider({ children }) {
       return newRemoval;
     }
     const result = await inventoryService.recordRemoval(removal);
-    // Refresh stock and removals
+    // Refresh stock and removals. getWarehouseStock() returns the full
+    // { warehouseId: { sku: qty } } map, so replace the whole stock map
+    // rather than nesting the response under one warehouse key.
     const [stockData, removals] = await Promise.all([
-      inventoryService.getWarehouseStock(removal.warehouseId),
+      inventoryService.getWarehouseStock(),
       inventoryService.getRemovalHistory(),
     ]);
     setData(prev => ({
       ...prev,
-      stock: { ...prev.stock, [removal.warehouseId]: stockData },
+      stock: stockData,
       removals,
     }));
     return result;
@@ -1042,10 +1087,12 @@ export function StockProvider({ children }) {
       return;
     }
     await inventoryService.bulkUpdateWarehouse(warehouseId, items);
-    const stockData = await inventoryService.getWarehouseStock(warehouseId);
+    // getWarehouseStock() returns the full { warehouseId: { sku: qty } } map,
+    // so replace the whole stock map rather than nesting it under one key.
+    const stockData = await inventoryService.getWarehouseStock();
     setData(prev => ({
       ...prev,
-      stock: { ...prev.stock, [warehouseId]: stockData },
+      stock: stockData,
     }));
   }, [data, isOfflineMode, saveData]);
 
@@ -1075,6 +1122,7 @@ export function StockProvider({ children }) {
     data,
     loading,
     error,
+    clearError,
     syncStatus,
     isOfflineMode,
 
