@@ -1,33 +1,33 @@
-# Route-run: prefilled restocks, run progress, van reconciliation
+# Expiry intelligence: machine-level expiry, expiry-aware pick lists, waste report
 
-Phase B — closes the loop between pick list → van → machines. The restocker packs from the pick list, runs the route from one screen, restocks each machine with quantities already filled in, and reconciles what's left in the van at the end.
+Phase C — closes the expiry blind spot: stock in machines now carries its expiry date (VendLive already sends it; we were dropping it), pick lists warn when you're packing tomorrow's waste, receiving nags on missing dates, and waste finally has a report.
 
 ## ⚠️ Deploy steps (order matters)
 
-1. **Run `hatch-backend/manual-sql/013_route_run.sql` in the Supabase SQL editor first** (idempotent; two small columns).
+1. **Run `hatch-backend/manual-sql/014_expiry_intel.sql` in the Supabase SQL editor first** (idempotent; one column + index on `location_stock`).
 2. Deploy backend (Railway), then frontend (Vercel).
 
-## Today's Run (new page, Restock → Today's Run)
+## Machine-level expiry (from VendLive)
 
-- Starts from the most recent packed pick list (or "Start the run" straight from a just-packed list). Machines listed in route order with planned units and two status chips — Check ✓ and Restock ✓ with times — plus progress ("2 of 5 machines done") and a done banner when the route is complete (which also completes the workflow hub's step 3).
-- **Check** deep-links into the mobile stock check with the machine preselected and returns to the run afterwards.
-- **Restock** deep-links into the wizard: machine preselected, restocker name remembered, and step 3's quantities **prefilled from that machine's share of the pick list** (editable). The restock record is linked to the pick list.
+- Every stock sync now captures the earliest channel expiry per SKU into `LocationStock.earliestExpiry` — the data VendLive was already sending.
+- New `GET /api/inventory/machine-expiry?days=N` and a dashboard **"Expiring in machines"** panel (7-day window): "Chicken Wrap × 4 — Kitchen — expires Mon 6 Jul (3d)", red when ≤2 days. Hidden entirely when there's nothing expiring.
+- Location Stock rows show a small expiry chip per product (`exp 5d` / `expired`).
 
-## Van reconciliation
+## Expiry-aware pick lists
 
-- Bottom panel: "Packed 120 · Loaded 108 · Returned 0 · In van 12" with a per-SKU breakdown (packed / loaded / returned / remaining).
-- **Return leftovers to warehouse**: prefilled with the remaining quantities, editable, then booked back as warehouse batches carrying the earliest expiry of the SKU's original allocation (conservative for FEFO) — over-returns rejected server-side.
+- FEFO batch allocations that expire **before the next restock** (target date + 7 days) are flagged; the pick list shows an amber banner ("N units will expire before the next restock — sell first or pull") and flagged pull instructions are marked on screen and `(EXPIRES SOON)` on the printout.
 
-## Backend
+## Receiving nag
 
-- `RestockRecord.pickListId` links machine loads to the pick list they came from.
-- `GET /api/pick-lists/:id/run` — one response with per-location plan, latest stock check + restock status, reconciliation, and `allDone`.
-- `POST /api/pick-lists/:id/return-leftovers` — validated returns (409 unless packed; 400 with per-SKU violations on over-return), batch-materialised with expiry provenance.
-- Reconciliation math extracted as pure helpers with 13 new tests.
+- Submitting a receipt with lines missing expiry dates now requires ticking "Receive without expiry dates" after an explicit warning — soft block, no hard stop.
+
+## Waste report
+
+- New `GET /api/reports/waste?months=N` + a **Waste** tab on the Shrinkage page: per-month write-off units/cost and shrinkage attributed to expired/damaged, plus an "Expired on shelf now" card with the current dead batches.
 
 ## Verification
 
-- Backend: 193/193 vitest tests green (16 files)
-- Frontend: production build clean; run page, deep links, empty/error states verified in preview
+- Backend: 214/214 vitest tests green (17 files; 23 new: expiry-flag boundaries, waste month-bucketing, loss orientation)
+- Frontend: production build clean; all surfaces degrade gracefully when the API is unreachable (verified in preview)
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)

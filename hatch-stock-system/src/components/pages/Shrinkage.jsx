@@ -1,6 +1,8 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { useStock } from '../../context/StockContext';
 import { inventoryService } from '../../services';
+import { reportsService } from '../../services/reports.service';
 
 // One-tap categorisation chips for discrepancy lines (API vocabulary)
 const CHIP_REASONS = [
@@ -21,6 +23,32 @@ export default function Shrinkage() {
   const [reasonOverrides, setReasonOverrides] = useState({});
   const [reasonSaving, setReasonSaving] = useState({});
   const [reasonError, setReasonError] = useState(null);
+
+  // Waste tab — write-off / expiry waste report, fetched when the tab opens
+  // (and again via Retry). wasteRefresh bumps force a refetch.
+  const [wasteReport, setWasteReport] = useState(null);
+  const [wasteLoading, setWasteLoading] = useState(false);
+  const [wasteError, setWasteError] = useState(null);
+  const [wasteRefresh, setWasteRefresh] = useState(0);
+  const [expiredBatchesOpen, setExpiredBatchesOpen] = useState(false);
+
+  useEffect(() => {
+    if (activeSubTab !== 'waste') return;
+    let cancelled = false;
+    setWasteLoading(true);
+    setWasteError(null);
+    reportsService.getWasteReport(6)
+      .then(result => {
+        if (!cancelled) setWasteReport(result);
+      })
+      .catch(err => {
+        if (!cancelled) setWasteError(err.message || 'Failed to load the waste report');
+      })
+      .finally(() => {
+        if (!cancelled) setWasteLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [activeSubTab, wasteRefresh]);
 
   const stockChecks = data.stockCheckHistory || [];
 
@@ -325,6 +353,7 @@ export default function Shrinkage() {
           { id: 'byProduct', label: 'By Product' },
           { id: 'byReason', label: 'By Reason' },
           { id: 'trend', label: 'Trend' },
+          { id: 'waste', label: 'Waste' },
         ].map(tab => (
           <button
             key={tab.id}
@@ -709,6 +738,176 @@ export default function Shrinkage() {
               </tbody>
             </table>
           </div>
+        </div>
+      )}
+
+      {/* Waste Tab — write-offs + expiry waste from the API report */}
+      {activeSubTab === 'waste' && (
+        <div className="space-y-6">
+          {wasteLoading ? (
+            <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-8 text-center">
+              <p className="text-zinc-500">Loading waste report…</p>
+            </div>
+          ) : wasteError ? (
+            <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 flex items-start justify-between gap-3">
+              <p className="text-red-400 text-sm min-w-0">{wasteError}</p>
+              <button
+                onClick={() => setWasteRefresh(n => n + 1)}
+                className="flex-shrink-0 text-sm text-red-300 hover:text-red-100"
+              >
+                Retry
+              </button>
+            </div>
+          ) : wasteReport && (
+            <>
+              {/* Expired on shelf right now */}
+              {(() => {
+                const shelf = wasteReport.currentExpiredOnShelf || {};
+                const batches = shelf.batches || [];
+                const hasExpired = (shelf.units || 0) > 0 || batches.length > 0;
+                return (
+                  <div className={`rounded-lg border p-6 ${
+                    hasExpired ? 'bg-red-900/20 border-red-900/50' : 'bg-zinc-900/50 border-zinc-800'
+                  }`}>
+                    <div className="flex items-center justify-between mb-3">
+                      <h3 className={`text-sm font-medium ${hasExpired ? 'text-red-400' : 'text-zinc-400'}`}>
+                        Expired on shelf now
+                      </h3>
+                      <Link
+                        to="/orders/warehouse"
+                        className={`text-xs ${hasExpired ? 'text-red-400/70 hover:text-red-300' : 'text-zinc-500 hover:text-zinc-300'}`}
+                      >
+                        Warehouse stock →
+                      </Link>
+                    </div>
+                    {!hasExpired ? (
+                      <p className="text-zinc-500 text-sm">Nothing expired on the shelf — nice.</p>
+                    ) : (
+                      <>
+                        <div className="flex gap-8">
+                          <div>
+                            <div className="text-2xl font-bold text-red-400">{shelf.units || 0}</div>
+                            <div className="text-xs text-zinc-500 mt-1">Units</div>
+                          </div>
+                          <div>
+                            <div className="text-2xl font-bold text-red-400">£{(shelf.cost || 0).toFixed(2)}</div>
+                            <div className="text-xs text-zinc-500 mt-1">Cost Value</div>
+                          </div>
+                        </div>
+                        {batches.length > 0 && (
+                          <div className="mt-4">
+                            <button
+                              onClick={() => setExpiredBatchesOpen(v => !v)}
+                              className="text-xs text-red-400 hover:text-red-300"
+                            >
+                              {expiredBatchesOpen
+                                ? 'Hide batches ▲'
+                                : `Show ${batches.length} batch${batches.length === 1 ? '' : 'es'} ▼`}
+                            </button>
+                            {expiredBatchesOpen && (
+                              <div className="mt-3 space-y-2">
+                                {batches.map((b, i) => (
+                                  <Link
+                                    key={`${b.sku}-${i}`}
+                                    to="/orders/warehouse"
+                                    className="flex items-center justify-between gap-3 py-2 border-b border-red-900/30 last:border-0 group"
+                                  >
+                                    <div className="min-w-0">
+                                      <span className="text-zinc-300 text-sm group-hover:text-white transition-colors">
+                                        {b.name || b.sku}
+                                      </span>
+                                      <span className="text-zinc-600 text-xs ml-2">{b.warehouseName}</span>
+                                    </div>
+                                    <div className="flex items-center gap-3 shrink-0 text-xs">
+                                      <span className="text-zinc-400">{b.remainingQty} units</span>
+                                      <span className="bg-red-500/20 text-red-400 px-2 py-0.5 rounded whitespace-nowrap">
+                                        expired {b.expiryDate ? new Date(b.expiryDate).toLocaleDateString('en-GB') : '—'}
+                                      </span>
+                                    </div>
+                                  </Link>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {/* Monthly waste breakdown */}
+              <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-6">
+                <h3 className="text-sm font-medium text-zinc-400 mb-4">Waste by Month (last 6 months)</h3>
+                {(wasteReport.months || []).length === 0 ? (
+                  <p className="text-zinc-600 text-sm">No waste recorded in this period</p>
+                ) : (() => {
+                  const months = wasteReport.months;
+                  const maxCost = Math.max(...months.map(m => m.writeOffCost || 0), 0);
+                  return (
+                    <div className="space-y-4">
+                      {months.map(month => {
+                        const barWidth = maxCost > 0 ? ((month.writeOffCost || 0) / maxCost) * 100 : 0;
+                        return (
+                          <div key={month.month}>
+                            <div className="flex justify-between text-sm mb-1 flex-wrap gap-x-4">
+                              <span className="text-zinc-300">
+                                {new Date(month.month + '-01').toLocaleDateString('en-GB', { month: 'long', year: 'numeric' })}
+                              </span>
+                              <div className="flex gap-4 text-xs sm:text-sm">
+                                <span className="text-red-400">
+                                  {month.writeOffUnits || 0} written off · £{(month.writeOffCost || 0).toFixed(2)}
+                                </span>
+                                <span className="text-amber-400">{month.shrinkageExpiredUnits || 0} expired</span>
+                                <span className="text-orange-400">{month.shrinkageDamagedUnits || 0} damaged</span>
+                              </div>
+                            </div>
+                            <div className="h-4 bg-zinc-800 rounded-full overflow-hidden">
+                              <div
+                                className="h-full bg-gradient-to-r from-amber-600 to-amber-400 rounded-full transition-all"
+                                style={{ width: `${barWidth}%` }}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
+              </div>
+
+              {(wasteReport.months || []).length > 0 && (
+                <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-zinc-800">
+                          <th className="text-left px-4 py-3 text-zinc-500 font-medium">Month</th>
+                          <th className="text-right px-4 py-3 text-zinc-500 font-medium">Write-off Units</th>
+                          <th className="text-right px-4 py-3 text-zinc-500 font-medium">Write-off Cost</th>
+                          <th className="text-right px-4 py-3 text-zinc-500 font-medium">Shrinkage: Expired</th>
+                          <th className="text-right px-4 py-3 text-zinc-500 font-medium">Shrinkage: Damaged</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {wasteReport.months.map(month => (
+                          <tr key={month.month} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
+                            <td className="px-4 py-3 text-zinc-200">
+                              {new Date(month.month + '-01').toLocaleDateString('en-GB', { month: 'long', year: 'numeric' })}
+                            </td>
+                            <td className="text-right px-4 py-3 text-red-400">{month.writeOffUnits || 0}</td>
+                            <td className="text-right px-4 py-3 text-red-400 font-medium">£{(month.writeOffCost || 0).toFixed(2)}</td>
+                            <td className="text-right px-4 py-3 text-amber-400">{month.shrinkageExpiredUnits || 0}</td>
+                            <td className="text-right px-4 py-3 text-orange-400">{month.shrinkageDamagedUnits || 0}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
         </div>
       )}
 

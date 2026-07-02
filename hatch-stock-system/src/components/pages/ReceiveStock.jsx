@@ -34,6 +34,9 @@ export default function ReceiveStock() {
   // What to do when the delivery is short: keep the order open (default)
   // or close it short and write off the undelivered units.
   const [shortAction, setShortAction] = useState('keepOpen');
+  // Soft-block acknowledgement for receiving lines without an expiry date —
+  // FEFO picking and expiry tracking can't cover dateless batches.
+  const [noExpiryAck, setNoExpiryAck] = useState(false);
   const [scannerOpen, setScannerOpen] = useState(false);
   // Handle to BarcodeScanner.flash() — set on overlay mount via onReady.
   const scannerApiRef = useRef(null);
@@ -85,6 +88,7 @@ export default function ReceiveStock() {
     setReceivedItems(items);
     setBulkExpiry('');
     setShortAction('keepOpen');
+    setNoExpiryAck(false);
     setError(null);
     setSuccess(null);
   };
@@ -245,9 +249,16 @@ export default function ReceiveStock() {
   const anyShort = orderLineState.some(l => l.short);
   const totalReceivingNow = orderLineState.reduce((sum, l) => sum + l.receivingNow, 0);
   const totalShortUnits = orderLineState.reduce((sum, l) => sum + (l.short ? l.remaining - l.receivingNow : 0), 0);
+  // Receiving lines (lots with units) that carry no expiry date — nagged at
+  // review time with a soft acknowledgement, never a hard stop.
+  const missingExpiryLines = orderLineState.reduce(
+    (acc, l) => acc + l.lots.filter(lot => (lot.quantity || 0) > 0 && !lot.expiryDate).length,
+    0
+  );
+  const needsExpiryAck = missingExpiryLines > 0 && !noExpiryAck;
 
   const confirmReceive = async () => {
-    if (!selectedOrder || !receiveWarehouseId || hasOverError || totalReceivingNow <= 0) return;
+    if (!selectedOrder || !receiveWarehouseId || hasOverError || totalReceivingNow <= 0 || needsExpiryAck) return;
 
     setLoading(true);
     setError(null);
@@ -680,6 +691,32 @@ export default function ReceiveStock() {
                 </div>
               )}
 
+              {/* Missing-expiry nag — soft block with acknowledgement */}
+              {missingExpiryLines > 0 && totalReceivingNow > 0 && (
+                <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-4 space-y-3">
+                  <div className="text-amber-400 text-sm font-medium">
+                    {missingExpiryLines} line{missingExpiryLines === 1 ? ' has' : 's have'} no
+                    expiry date — expiry tracking and FEFO picking won't cover
+                    {missingExpiryLines === 1 ? ' it' : ' them'}
+                  </div>
+                  <label className="flex items-start gap-2 text-sm text-zinc-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={noExpiryAck}
+                      onChange={e => setNoExpiryAck(e.target.checked)}
+                      className="mt-0.5 accent-amber-500"
+                    />
+                    <span>
+                      Receive without expiry dates
+                      <span className="block text-xs text-zinc-500">
+                        Tick to confirm, or add dates above (the "Apply expiry to all" shortcut fills
+                        every empty field).
+                      </span>
+                    </span>
+                  </label>
+                </div>
+              )}
+
               {/* Summary before confirmation */}
               <div className="bg-zinc-800/50 rounded-lg p-4">
                 <div className="text-sm text-zinc-400 mb-2">Receipt Summary</div>
@@ -705,9 +742,15 @@ export default function ReceiveStock() {
 
               <button
                 onClick={confirmReceive}
-                disabled={!receiveWarehouseId || loading || hasOverError || totalReceivingNow <= 0}
+                disabled={!receiveWarehouseId || loading || hasOverError || totalReceivingNow <= 0 || needsExpiryAck}
                 className="w-full sm:w-auto px-4 py-2 bg-emerald-600 text-white rounded text-sm font-medium hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed"
-                title={hasOverError ? 'Fix lot quantities that exceed the remaining amount' : undefined}
+                title={
+                  hasOverError
+                    ? 'Fix lot quantities that exceed the remaining amount'
+                    : needsExpiryAck
+                      ? 'Add expiry dates or tick "Receive without expiry dates"'
+                      : undefined
+                }
               >
                 {loading ? 'Receiving...' : 'Confirm Receipt'}
               </button>

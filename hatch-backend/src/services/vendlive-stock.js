@@ -53,6 +53,24 @@ function aggregateChannelStock(channels) {
 }
 
 /**
+ * Earliest non-null item expiry across a SKU's aggregated channels (null when
+ * no channel reports one). VendLive item expiry dates arrive as strings;
+ * unparseable values are skipped rather than poisoning the comparison.
+ */
+function earliestChannelExpiry(channels) {
+  let earliest = null;
+  for (const channel of channels || []) {
+    for (const item of channel.items || []) {
+      if (!item.expiryDate) continue;
+      const d = new Date(item.expiryDate);
+      if (isNaN(d.getTime())) continue;
+      if (!earliest || d < earliest) earliest = d;
+    }
+  }
+  return earliest;
+}
+
+/**
  * Sync stock for a single machine.
  * Pulls channel data from VendLive, compares to Hatch LocationStock,
  * updates LocationStock to match VendLive, and calculates shrinkage.
@@ -147,11 +165,16 @@ export async function syncMachineStock(vendliveMachineId, locationId, config, sy
       varianceCost += variance > 0 ? cost : -cost;
     }
 
+    // Earliest expiry among this SKU's machine channels — refreshed wholesale
+    // on every sync (null when VendLive reports none), so a cleared machine
+    // doesn't keep a stale alert. Rows the sync doesn't touch keep theirs.
+    const earliestExpiry = earliestChannelExpiry(vl.channels);
+
     upsertOperations.push(
       prisma.locationStock.upsert({
         where: { locationId_sku: { locationId, sku } },
-        update: { quantity: confirmed },
-        create: { locationId, sku, quantity: confirmed },
+        update: { quantity: confirmed, earliestExpiry },
+        create: { locationId, sku, quantity: confirmed, earliestExpiry },
       })
     );
   }
