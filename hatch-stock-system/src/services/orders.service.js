@@ -52,22 +52,38 @@ export const ordersService = {
   },
 
   /**
-   * Receive order - mark as received and update stock
-   * @param {string} orderId 
-   * @param {Array} receivedItems - [{ sku, quantity, expiryDate, hasDamage, damageNotes }]
+   * Receive stock against an order (supports PARTIAL receiving). items may
+   * contain multiple lines for the same SKU — one per expiry lot. The order
+   * only flips to `received` when every line is fully received, or when
+   * closeShort is true (operator writes off the undelivered remainder).
+   * @param {string} orderId
+   * @param {Array} receivedItems - [{ sku, quantity, expiryDate?, hasDamage?, damageNotes? }]
    * @param {string} warehouseId - Destination warehouse
+   * @param {Object} [opts] - { closeShort?: boolean, receivedBy?: string }
    */
-  receive: async (orderId, receivedItems, warehouseId) => {
+  receive: async (orderId, receivedItems, warehouseId, opts = {}) => {
     const response = await api.post(`/orders/${orderId}/receive`, {
       items: receivedItems,
       warehouseId,
+      closeShort: !!opts.closeShort,
+      receivedBy: opts.receivedBy || undefined,
     });
     return response.data;
   },
 
   /**
+   * Recent receiving events across all orders (Receipt History).
+   * Returns [{ id, orderId, warehouseId, items, closedShort, receivedBy,
+   *            createdAt, order: { id, supplier, status } }]
+   */
+  getReceipts: async (limit = 50) => {
+    const response = await api.get('/orders/receipts', { params: { limit } });
+    return response.data;
+  },
+
+  /**
    * Generate order suggestions based on low stock
-   * @param {string} locationId 
+   * @param {string} locationId
    * @param {string} supplierId - Optional filter suggestions by supplier
    */
   generateSuggestions: async (locationId, supplierId = null) => {
@@ -81,11 +97,25 @@ export const ordersService = {
    * Generate ONE consolidated suggestion list across many locations. Lines are
    * merged per product / fresh-meal group and tagged with their preferred
    * supplier so the caller can split them into one PO per supplier.
+   *
+   * mode 'weekly' (default): anchored to the Mon–Fri trading cycle — projects
+   * machine stock forward to the next restock Monday, targets Monday-to-Monday
+   * cover, and nets off warehouse on-hand and pending POs.
+   * mode 'topup': short-horizon midweek top-up (next trading day → next Monday).
+   *
+   * Each line carries: { sku|mealType, name, supplierId, supplierName,
+   *   machineStock, projectedStock, warehouseStock, pendingPOQty, grossNeed,
+   *   netNeed, orderQty, boxes, unitsPerBox, unitCost, priority, perLocation }
+   * plus response-level meta { restockDate, mode, tradingDaysToRestock }.
    * @param {string[]} [locationIds] - omit/empty = all locations
+   * @param {'weekly'|'topup'} [mode]
    */
-  generateConsolidatedSuggestions: async (locationIds = []) => {
+  generateConsolidatedSuggestions: async (locationIds = [], mode = 'weekly') => {
     const response = await api.get('/orders/suggestions/consolidated', {
-      params: locationIds.length ? { locationIds: locationIds.join(',') } : {},
+      params: {
+        ...(locationIds.length ? { locationIds: locationIds.join(',') } : {}),
+        mode,
+      },
     });
     return response.data;
   },

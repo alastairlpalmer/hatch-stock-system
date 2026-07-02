@@ -16,6 +16,8 @@ import warehousesRouter from './routes/warehouses.js';
 import locationsRouter from './routes/locations.js';
 import inventoryRouter from './routes/inventory.js';
 import ordersRouter from './routes/orders.js';
+import buyingListsRouter, { publicBuyingListsRouter } from './routes/buying-lists.js';
+import pickListsRouter from './routes/pick-lists.js';
 import suppliersRouter from './routes/suppliers.js';
 import routesRouter from './routes/routes.js';
 import salesRouter from './routes/sales.js';
@@ -105,12 +107,15 @@ if (process.env.NODE_ENV !== 'production') {
 // Authentication — applied to all /api routes. authMiddleware is a no-op
 // unless AUTH_ENABLED=true, so this is safe to deploy ahead of enabling auth.
 // Exempt paths: login/register (register self-gates: bootstrap first user,
-// admin-only afterwards) and the webhook, which authenticates via HMAC.
+// admin-only afterwards), the webhook, which authenticates via HMAC, and the
+// public buying-list share view, where the unguessable share token IS the
+// credential.
 const PUBLIC_API_PATHS = ['/api/auth/login', '/api/auth/register'];
 app.use((req, res, next) => {
   if (!req.path.startsWith('/api')) return next();
   if (PUBLIC_API_PATHS.includes(req.path)) return next();
   if (req.path.startsWith('/api/vendlive/webhook/')) return next();
+  if (req.path.startsWith('/api/public/buying-lists/')) return next();
   return authMiddleware(req, res, next);
 });
 
@@ -138,6 +143,10 @@ app.use('/api/warehouses', warehousesRouter);
 app.use('/api/locations', locationsRouter);
 app.use('/api/inventory', inventoryRouter);
 app.use('/api/orders', ordersRouter);
+app.use('/api/buying-lists', buyingListsRouter);
+// Read-only share view — exempted from auth above; the token is the credential.
+app.use('/api/public/buying-lists', publicBuyingListsRouter);
+app.use('/api/pick-lists', pickListsRouter);
 app.use('/api/suppliers', suppliersRouter);
 app.use('/api/routes', routesRouter);
 app.use('/api/sales', salesRouter);

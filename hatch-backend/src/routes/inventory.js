@@ -114,53 +114,70 @@ router.post('/transfers', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'Source and destination warehouses must differ' });
   }
 
-  const transfer = await prisma.$transaction(async (tx) => {
-    // Pre-check source stock: reject the whole transfer if any SKU is short
-    // rather than silently losing product when batches are drained.
-    for (const { sku, quantity } of items) {
-      const source = await tx.warehouseStock.findUnique({
-        where: { warehouseId_sku: { warehouseId: fromWarehouseId, sku } },
-      });
-      const available = source?.quantity ?? 0;
-      if (available < quantity) {
-        const err = new Error(
-          `Insufficient stock for ${sku} at source: have ${available}, need ${quantity}`
-        );
-        err.status = 400;
-        throw err;
-      }
-    }
-
-    for (const { sku, quantity } of items) {
-      // Move actual batches FEFO from source to destination so expiry travels
-      // with the stock (the destination batches keep the original expiry, damage
-      // flags and received date). Both aggregates are then recomputed from
-      // batches.
-      const { consumed } = await consumeBatchesFEFO(tx, fromWarehouseId, sku, quantity);
-      for (const { batch, take } of consumed) {
-        await tx.stockBatch.create({
-          data: {
-            warehouseId: toWarehouseId,
-            sku,
-            quantity: take,
-            remainingQty: take,
-            expiryDate: batch.expiryDate,
-            hasDamage: batch.hasDamage,
-            damageNotes: batch.damageNotes,
-            receivedAt: batch.receivedAt,
-          },
+  try {
+    const transfer = await prisma.$transaction(async (tx) => {
+      // Pre-check source stock: reject the whole transfer if any SKU is short
+      // rather than silently losing product when batches are drained.
+      for (const { sku, quantity } of items) {
+        const source = await tx.warehouseStock.findUnique({
+          where: { warehouseId_sku: { warehouseId: fromWarehouseId, sku } },
         });
+        const available = source?.quantity ?? 0;
+        if (available < quantity) {
+          const err = new Error(
+            `Insufficient stock for ${sku} at source: have ${available}, need ${quantity}`
+          );
+          err.status = 400;
+          throw err;
+        }
       }
-      await recomputeWarehouseStock(tx, fromWarehouseId, sku);
-      await recomputeWarehouseStock(tx, toWarehouseId, sku);
-    }
 
-    return tx.stockTransfer.create({
-      data: { fromWarehouseId, toWarehouseId, items, notes, performedBy },
+      for (const { sku, quantity } of items) {
+        // Move actual batches FEFO from source to destination so expiry travels
+        // with the stock (the destination batches keep the original expiry, damage
+        // flags and received date). Both aggregates are then recomputed from
+        // batches.
+        const { consumed, shortfall } = await consumeBatchesFEFO(tx, fromWarehouseId, sku, quantity);
+        // The aggregate pre-check passed, but the batches themselves are the
+        // source of truth — if they can't cover the quantity (drift or a
+        // concurrent consumer), roll the transfer back rather than moving
+        // stock that doesn't exist.
+        if (shortfall > 0) {
+          const err = new Error('Insufficient warehouse stock');
+          err.status = 400;
+          err.shortfalls = [{ sku, requested: quantity, available: quantity - shortfall }];
+          throw err;
+        }
+        for (const { batch, take } of consumed) {
+          await tx.stockBatch.create({
+            data: {
+              warehouseId: toWarehouseId,
+              sku,
+              quantity: take,
+              remainingQty: take,
+              expiryDate: batch.expiryDate,
+              hasDamage: batch.hasDamage,
+              damageNotes: batch.damageNotes,
+              receivedAt: batch.receivedAt,
+            },
+          });
+        }
+        await recomputeWarehouseStock(tx, fromWarehouseId, sku);
+        await recomputeWarehouseStock(tx, toWarehouseId, sku);
+      }
+
+      return tx.stockTransfer.create({
+        data: { fromWarehouseId, toWarehouseId, items, notes, performedBy },
+      });
     });
-  });
 
-  res.json(transfer);
+    res.json(transfer);
+  } catch (err) {
+    if (err.shortfalls) {
+      return res.status(400).json({ error: 'Insufficient warehouse stock', shortfalls: err.shortfalls });
+    }
+    throw err;
+  }
 }));
 
 // List recent transfers (optionally filtered to a warehouse, either side).
@@ -571,30 +588,50 @@ const removalSchema = z.object({
 router.post('/removals', asyncHandler(async (req, res) => {
   const { warehouseId, routeId, routeName, items, takenBy, notes } = removalSchema.parse(req.body);
 
-  const removal = await prisma.$transaction(async (tx) => {
-    const record = await tx.stockRemoval.create({
-      data: {
-        warehouseId,
-        routeId,
-        routeName,
-        items,
-        takenBy,
-        notes,
-      },
+  try {
+    const removal = await prisma.$transaction(async (tx) => {
+      const record = await tx.stockRemoval.create({
+        data: {
+          warehouseId,
+          routeId,
+          routeName,
+          items,
+          takenBy,
+          notes,
+        },
+      });
+
+      const shortfalls = [];
+      for (const item of items) {
+        // Consume batches FEFO (first-expiry-first-out) so the expiry report
+        // reflects what actually left the warehouse, then recompute the aggregate
+        // from the surviving batches (batches are the source of truth for qty).
+        const { shortfall } = await consumeBatchesFEFO(tx, warehouseId, item.sku, item.quantity);
+        if (shortfall > 0) {
+          shortfalls.push({ sku: item.sku, requested: item.quantity, available: item.quantity - shortfall });
+        }
+        await recomputeWarehouseStock(tx, warehouseId, item.sku);
+      }
+
+      // A removal that batches cannot cover must fail loudly, not silently
+      // under-deliver: throwing rolls back the whole removal.
+      if (shortfalls.length > 0) {
+        const err = new Error('Insufficient warehouse stock');
+        err.status = 400;
+        err.shortfalls = shortfalls;
+        throw err;
+      }
+
+      return record;
     });
 
-    for (const item of items) {
-      // Consume batches FEFO (first-expiry-first-out) so the expiry report
-      // reflects what actually left the warehouse, then recompute the aggregate
-      // from the surviving batches (batches are the source of truth for qty).
-      await consumeBatchesFEFO(tx, warehouseId, item.sku, item.quantity);
-      await recomputeWarehouseStock(tx, warehouseId, item.sku);
+    res.status(201).json(removal);
+  } catch (err) {
+    if (err.shortfalls) {
+      return res.status(400).json({ error: 'Insufficient warehouse stock', shortfalls: err.shortfalls });
     }
-
-    return record;
-  });
-
-  res.status(201).json(removal);
+    throw err;
+  }
 }));
 
 // Get removal history

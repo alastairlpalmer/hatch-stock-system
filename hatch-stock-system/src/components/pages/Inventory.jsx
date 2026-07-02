@@ -32,9 +32,14 @@ export default function Inventory() {
 
   // Add Stock states
   const [showAddStock, setShowAddStock] = useState(false);
+  // Explicit flag for "adding a brand-new product". The new product's SKU
+  // lives in its own newSku field so typing it can't collapse the new-product
+  // block (which previously keyed off sku === '').
+  const [isNewProduct, setIsNewProduct] = useState(false);
   const [addStockForm, setAddStockForm] = useState({
     warehouseId: '',
     sku: '',
+    newSku: '',
     productName: '',
     quantity: '',
     category: 'Other',
@@ -429,18 +434,27 @@ export default function Inventory() {
     setAddStockForm({
       warehouseId: selectedWarehouse !== 'all' ? selectedWarehouse : (data.warehouses[0]?.id || ''),
       sku: '',
+      newSku: '',
       productName: '',
       quantity: '',
       category: 'Other',
       unitCost: '',
       expiryDate: ''
     });
+    setIsNewProduct(false);
     setShowAddStock(true);
     setError(null);
   };
 
+  const closeAddStock = () => {
+    setShowAddStock(false);
+    setIsNewProduct(false);
+  };
+
   const handleAddStockSubmit = async () => {
-    if (!addStockForm.warehouseId || !addStockForm.sku || !addStockForm.quantity) return;
+    const sku = isNewProduct ? addStockForm.newSku.trim() : addStockForm.sku;
+    if (!addStockForm.warehouseId || !sku || !addStockForm.quantity) return;
+    if (isNewProduct && !addStockForm.productName.trim()) return;
 
     const qty = parseInt(addStockForm.quantity) || 0;
     if (qty <= 0) return;
@@ -449,18 +463,18 @@ export default function Inventory() {
     setError(null);
 
     try {
-      // Check if product exists
-      const existingProduct = data.products.find(p => p.sku === addStockForm.sku);
-
-      if (!existingProduct) {
-        // Create new product
-        await addProduct({
-          sku: addStockForm.sku,
-          name: addStockForm.productName || addStockForm.sku,
-          category: addStockForm.category,
-          unitCost: parseFloat(addStockForm.unitCost) || 0,
-          salePrice: parseFloat(addStockForm.unitCost) || 0
-        });
+      if (isNewProduct) {
+        // Create the product first (unless the typed SKU already exists)
+        const existingProduct = data.products.find(p => p.sku === sku);
+        if (!existingProduct) {
+          await addProduct({
+            sku,
+            name: addStockForm.productName.trim(),
+            category: addStockForm.category,
+            unitCost: parseFloat(addStockForm.unitCost) || 0,
+            salePrice: parseFloat(addStockForm.unitCost) || 0
+          });
+        }
       }
 
       // Add the stock as a batch — batches are authoritative, so creating the
@@ -468,12 +482,12 @@ export default function Inventory() {
       // double-count). No expiry typed -> null expiry, flagged as "missing".
       await createBatch({
         warehouseId: addStockForm.warehouseId,
-        sku: addStockForm.sku,
+        sku,
         quantity: qty,
         expiryDate: addStockForm.expiryDate || null,
       });
 
-      setShowAddStock(false);
+      closeAddStock();
     } catch (err) {
       setError(err.message || 'Failed to add stock');
     } finally {
@@ -860,7 +874,7 @@ export default function Inventory() {
         <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-6 space-y-4">
           <div className="flex items-center justify-between">
             <h3 className="font-medium text-zinc-200">Add Stock</h3>
-            <button onClick={() => setShowAddStock(false)} className="text-zinc-500 hover:text-zinc-300 text-xl">x</button>
+            <button onClick={closeAddStock} className="text-zinc-500 hover:text-zinc-300 text-xl">x</button>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -877,16 +891,19 @@ export default function Inventory() {
             <div>
               <label className="block text-xs text-zinc-500 mb-1">Product *</label>
               <select
-                value={addStockForm.sku}
+                value={isNewProduct ? '__new__' : addStockForm.sku}
                 onChange={e => {
                   const sku = e.target.value;
                   if (sku === '__new__') {
-                    setAddStockForm({ ...addStockForm, sku: '', productName: '', category: 'Other', unitCost: '' });
+                    setIsNewProduct(true);
+                    setAddStockForm({ ...addStockForm, sku: '', newSku: '', productName: '', category: 'Other', unitCost: '' });
                   } else {
+                    setIsNewProduct(false);
                     const existing = data.products.find(p => p.sku === sku);
                     setAddStockForm({
                       ...addStockForm,
                       sku,
+                      newSku: '',
                       productName: existing?.name || '',
                       category: existing?.category || 'Other',
                       unitCost: existing?.unitCost?.toString() || ''
@@ -904,14 +921,14 @@ export default function Inventory() {
             </div>
 
             {/* New product fields */}
-            {addStockForm.sku === '' && (
+            {isNewProduct && (
               <>
                 <div>
                   <label className="block text-xs text-zinc-500 mb-1">New SKU *</label>
                   <input
                     type="text"
-                    value={addStockForm.sku}
-                    onChange={e => setAddStockForm({ ...addStockForm, sku: e.target.value })}
+                    value={addStockForm.newSku}
+                    onChange={e => setAddStockForm({ ...addStockForm, newSku: e.target.value })}
                     placeholder="e.g., PROD-001"
                     className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm"
                   />
@@ -1013,13 +1030,18 @@ export default function Inventory() {
           <div className="flex gap-3 pt-4 border-t border-zinc-800">
             <button
               onClick={handleAddStockSubmit}
-              disabled={!addStockForm.warehouseId || !addStockForm.sku || !addStockForm.quantity || loading}
+              disabled={
+                !addStockForm.warehouseId ||
+                (isNewProduct ? (!addStockForm.newSku.trim() || !addStockForm.productName.trim()) : !addStockForm.sku) ||
+                !addStockForm.quantity ||
+                loading
+              }
               className="px-4 py-2 bg-emerald-600 text-white rounded text-sm font-medium hover:bg-emerald-500 disabled:opacity-50"
             >
               {loading ? 'Adding...' : 'Add Stock'}
             </button>
             <button
-              onClick={() => setShowAddStock(false)}
+              onClick={closeAddStock}
               className="px-4 py-2 bg-zinc-700 text-zinc-300 rounded text-sm hover:bg-zinc-600"
             >
               Cancel

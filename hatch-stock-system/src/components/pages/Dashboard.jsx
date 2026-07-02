@@ -51,7 +51,11 @@ export default function Dashboard() {
   // Sales summary (last 30 days)
   const thirtyDaysAgo = new Date();
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-  const recentSales = (data.salesData || []).filter(s => new Date(s.timestamp) >= thirtyDaysAgo);
+  // Refunded sales are excluded — they contribute no revenue or profit
+  // (is_refunded fallback matches the CSV-import shape, as in SalesOverview)
+  const recentSales = (data.salesData || []).filter(
+    s => !(s.isRefunded ?? s.is_refunded) && new Date(s.timestamp) >= thirtyDaysAgo
+  );
   const totalSalesRevenue = recentSales.reduce((acc, s) => acc + s.charged, 0);
   const totalSalesProfit = recentSales.reduce((acc, s) => acc + (s.charged - s.costPrice), 0);
 
@@ -168,30 +172,30 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Warning expiry (30 days) */}
+      {/* Warning expiry (8-30 days) — amber, not green: it needs attention */}
       {warningBatches.length > 0 && (
-        <div className="bg-emerald-900/20 border border-emerald-900/50 rounded-lg p-6">
-          <h3 className="text-sm font-medium text-emerald-400 mb-4">Expiring Within 30 Days</h3>
+        <div className="bg-amber-900/20 border border-amber-900/50 rounded-lg p-6">
+          <h3 className="text-sm font-medium text-amber-400 mb-4">Expiring Within 30 Days</h3>
           <div className="space-y-3">
             {warningBatches.slice(0, 5).map(batch => {
               const product = data.products.find(p => p.sku === batch.sku);
               const warehouse = data.warehouses.find(w => w.id === batch.warehouseId);
               const daysLeft = Math.ceil((new Date(batch.expiryDate) - new Date()) / (1000 * 60 * 60 * 24));
               return (
-                <div key={batch.id} className="flex items-center justify-between py-2 border-b border-emerald-900/30 last:border-0">
+                <div key={batch.id} className="flex items-center justify-between py-2 border-b border-amber-900/30 last:border-0">
                   <div>
                     <span className="text-zinc-300 text-sm">{product?.name || batch.sku}</span>
                     <span className="text-zinc-600 text-xs ml-2">({warehouse?.name})</span>
                   </div>
                   <div className="flex items-center gap-3">
                     <span className="text-zinc-400 text-sm">{batch.remainingQty} units</span>
-                    <span className="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded">{daysLeft}d left</span>
+                    <span className="text-xs bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded">{daysLeft}d left</span>
                   </div>
                 </div>
               );
             })}
             {warningBatches.length > 5 && (
-              <div className="text-xs text-emerald-400 pt-2">+{warningBatches.length - 5} more items</div>
+              <div className="text-xs text-amber-400 pt-2">+{warningBatches.length - 5} more items</div>
             )}
           </div>
         </div>

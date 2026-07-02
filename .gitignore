@@ -1,0 +1,6 @@
+# Local agent/editor config
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db

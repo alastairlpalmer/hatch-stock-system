@@ -8,6 +8,8 @@ export { salesService } from './sales.service';
 export { mealTypesService } from './mealTypes.service';
 export { vendliveService } from './vendlive.service';
 export { authService } from './auth.service';
+export { buyingListsService } from './buyingLists.service';
+export { pickListsService } from './pickLists.service';
 export {
   warehousesService,
   suppliersService,
