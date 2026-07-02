@@ -1,5 +1,27 @@
-import { describe, it, expect } from 'vitest';
-import { normalizeWebhookPayload, normalizePollPayload, computeCharged, computeProductPriceUpdates } from './vendlive-sync.js';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+vi.mock('../utils/db.js', () => ({
+  default: {
+    product: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), update: vi.fn() },
+    sale: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), update: vi.fn(), createMany: vi.fn() },
+    vendliveMachineMapping: { findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
+    vendliveQuarantinedSale: { upsert: vi.fn() },
+    locationStock: { upsert: vi.fn(), updateMany: vi.fn() },
+    vendliveConfig: { findUnique: vi.fn(), update: vi.fn() },
+    vendliveSyncLog: { create: vi.fn() },
+    $transaction: vi.fn((ops) => Promise.all(ops)),
+  },
+}));
+
+import prisma from '../utils/db.js';
+import {
+  normalizeWebhookPayload,
+  normalizePollPayload,
+  computeCharged,
+  computeProductPriceUpdates,
+  processVendliveOrder,
+  resolveSalesMachineMapping,
+} from './vendlive-sync.js';
 
 describe('computeCharged', () => {
   it('uses totalPaid when present', () => {
@@ -220,5 +242,202 @@ describe('computeProductPriceUpdates', () => {
     expect(computeProductPriceUpdates(items, products)).toEqual([
       { sku: 'SKU-2', data: { unitCost: 2.2 } },
     ]);
+  });
+});
+
+// ============ DB-BACKED PATHS (mocked prisma) ============
+
+const location = { id: 'loc-1', name: 'Site A' };
+
+const mappingRow = (overrides = {}) => ({
+  id: 'map-1',
+  vendliveMachineId: 900,
+  salesMachineId: null,
+  machineName: 'Front Lobby',
+  locationId: location.id,
+  autoCreated: false,
+  createdAt: new Date('2026-01-01T00:00:00Z'),
+  location,
+  ...overrides,
+});
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  prisma.product.findUnique.mockResolvedValue(null);
+  prisma.product.create.mockResolvedValue({});
+  prisma.product.update.mockResolvedValue({});
+  prisma.sale.findUnique.mockResolvedValue(null);
+  prisma.sale.create.mockResolvedValue({});
+  prisma.sale.update.mockResolvedValue({});
+  prisma.vendliveMachineMapping.findMany.mockResolvedValue([]);
+  prisma.vendliveMachineMapping.findFirst.mockResolvedValue(null);
+  prisma.vendliveMachineMapping.create.mockImplementation(({ data }) => Promise.resolve({ id: 'map-new', location: null, ...data }));
+  prisma.vendliveMachineMapping.update.mockResolvedValue({});
+  prisma.vendliveQuarantinedSale.upsert.mockResolvedValue({});
+  prisma.locationStock.upsert.mockResolvedValue({});
+  prisma.locationStock.updateMany.mockResolvedValue({ count: 0 });
+});
+
+describe('resolveSalesMachineMapping', () => {
+  it('prefers the location-mapped row over an unmapped duplicate (last-wins bug)', async () => {
+    const unmapped = mappingRow({ id: 'map-dup', vendliveMachineId: 42, salesMachineId: 42, locationId: null, location: null, autoCreated: true });
+    const mapped = mappingRow({ salesMachineId: 42 });
+    prisma.vendliveMachineMapping.findMany.mockResolvedValue([unmapped, mapped]);
+
+    const result = await resolveSalesMachineMapping('Front Lobby', 42);
+
+    expect(result.id).toBe('map-1');
+    expect(result.location).toEqual(location);
+    expect(prisma.vendliveMachineMapping.update).not.toHaveBeenCalled();
+    expect(prisma.vendliveMachineMapping.create).not.toHaveBeenCalled();
+  });
+
+  it('backfills salesMachineId when the chosen row is missing it', async () => {
+    prisma.vendliveMachineMapping.findMany.mockResolvedValue([mappingRow()]);
+
+    await resolveSalesMachineMapping('Front Lobby', 42);
+
+    expect(prisma.vendliveMachineMapping.update).toHaveBeenCalledWith({
+      where: { id: 'map-1' },
+      data: { salesMachineId: 42 },
+    });
+  });
+
+  it('leaves a row alone when salesMachineId already matches', async () => {
+    prisma.vendliveMachineMapping.findMany.mockResolvedValue([mappingRow({ salesMachineId: 42 })]);
+
+    await resolveSalesMachineMapping('Front Lobby', 42);
+
+    expect(prisma.vendliveMachineMapping.update).not.toHaveBeenCalled();
+  });
+
+  it('creates a new mapping holding the sales id in BOTH id columns', async () => {
+    const result = await resolveSalesMachineMapping('New Kiosk', 77);
+
+    expect(prisma.vendliveMachineMapping.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: {
+        vendliveMachineId: 77,
+        salesMachineId: 77,
+        machineName: 'New Kiosk',
+        autoCreated: true,
+      },
+    }));
+    expect(result.machineName).toBe('New Kiosk');
+  });
+
+  it('creates nothing without a machine name or a sales machine id', async () => {
+    expect(await resolveSalesMachineMapping(null, 42)).toBeNull();
+    expect(await resolveSalesMachineMapping('Front Lobby', null)).toBeNull();
+    expect(prisma.vendliveMachineMapping.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('processVendliveOrder', () => {
+  const orderData = (itemOverrides = {}) => ({
+    orderSaleId: 100,
+    machineName: 'Front Lobby',
+    locationName: 'Raw VendLive Name',
+    createdAt: '2026-06-09T10:00:00Z',
+    items: [{
+      productSaleId: 1,
+      productExternalId: 'SKU-X',
+      machineId: 42,
+      vendStatusName: 'Success',
+      timestamp: '2026-06-09T10:00:01Z',
+      price: 2.5,
+      costPrice: 1.1,
+      totalPaid: 2.5,
+      discountValue: 0,
+      isRefunded: false,
+      ...itemOverrides,
+    }],
+  });
+  const product = { sku: 'SKU-X', name: 'Cola Can', unitCost: 1.1, salePrice: 2.5 };
+
+  it('quarantines unknown SKUs instead of erroring when auto-create is off', async () => {
+    prisma.vendliveMachineMapping.findMany.mockResolvedValue([mappingRow({ salesMachineId: 42 })]);
+
+    const result = await processVendliveOrder(orderData(), 'webhook', { autoCreateProducts: false });
+
+    expect(result).toMatchObject({ created: 0, quarantined: 1, errored: 0 });
+    expect(result.errors).toEqual([]);
+    expect(prisma.sale.create).not.toHaveBeenCalled();
+    expect(prisma.vendliveQuarantinedSale.upsert).toHaveBeenCalledTimes(1);
+
+    const call = prisma.vendliveQuarantinedSale.upsert.mock.calls[0][0];
+    expect(call.where).toEqual({ id: 'vl-100-1' });
+    expect(call.create).toMatchObject({
+      id: 'vl-100-1',
+      vendliveOrderSaleId: 100,
+      vendliveProductSaleId: 1,
+      reason: 'unknown_sku',
+      sku: 'SKU-X',
+      machineName: 'Front Lobby',
+    });
+    // Payload is the ready-to-insert Sale row, resolved to the MAPPED location name
+    expect(call.create.payload).toMatchObject({
+      id: 'vl-100-1',
+      sku: 'SKU-X',
+      locationName: 'Site A',
+      syncSource: 'webhook',
+    });
+  });
+
+  it('restores location stock when a known sale flips to refunded', async () => {
+    prisma.vendliveMachineMapping.findMany.mockResolvedValue([mappingRow({ salesMachineId: 42 })]);
+    prisma.product.findUnique.mockResolvedValue(product);
+    prisma.sale.findUnique.mockResolvedValue({ id: 'vl-100-1', isRefunded: false, quantity: 1 });
+
+    const result = await processVendliveOrder(orderData({ isRefunded: true }), 'webhook', {});
+
+    expect(result).toMatchObject({ created: 0, skipped: 1, errored: 0 });
+    expect(prisma.sale.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ isRefunded: true }),
+    }));
+    expect(prisma.locationStock.upsert).toHaveBeenCalledWith({
+      where: { locationId_sku: { locationId: 'loc-1', sku: 'SKU-X' } },
+      create: { locationId: 'loc-1', sku: 'SKU-X', quantity: 1 },
+      update: { quantity: { increment: 1 } },
+    });
+  });
+
+  it('does not touch stock when the refund state is unchanged on re-sync', async () => {
+    prisma.vendliveMachineMapping.findMany.mockResolvedValue([mappingRow({ salesMachineId: 42 })]);
+    prisma.product.findUnique.mockResolvedValue(product);
+    prisma.sale.findUnique.mockResolvedValue({ id: 'vl-100-1', isRefunded: true, quantity: 1 });
+
+    await processVendliveOrder(orderData({ isRefunded: true }), 'webhook', {});
+
+    expect(prisma.sale.update).not.toHaveBeenCalled();
+    expect(prisma.locationStock.upsert).not.toHaveBeenCalled();
+  });
+
+  it('books a new sale against the mapped location and decrements its stock', async () => {
+    prisma.vendliveMachineMapping.findMany.mockResolvedValue([mappingRow({ salesMachineId: 42 })]);
+    prisma.product.findUnique.mockResolvedValue(product);
+
+    const result = await processVendliveOrder(orderData(), 'webhook', {});
+
+    expect(result).toMatchObject({ created: 1, skipped: 0, quarantined: 0, errored: 0 });
+    expect(prisma.sale.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ id: 'vl-100-1', sku: 'SKU-X', locationName: 'Site A' }),
+    }));
+    // Decrement runs inside a clamp transaction
+    expect(prisma.locationStock.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { locationId_sku: { locationId: 'loc-1', sku: 'SKU-X' } },
+      update: { quantity: { decrement: 1 } },
+    }));
+  });
+
+  it('backfills salesMachineId on the mapping from the sale machine id', async () => {
+    prisma.vendliveMachineMapping.findMany.mockResolvedValue([mappingRow()]); // salesMachineId null
+    prisma.product.findUnique.mockResolvedValue(product);
+
+    await processVendliveOrder(orderData(), 'webhook', {});
+
+    expect(prisma.vendliveMachineMapping.update).toHaveBeenCalledWith({
+      where: { id: 'map-1' },
+      data: { salesMachineId: 42 },
+    });
   });
 });

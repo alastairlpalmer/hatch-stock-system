@@ -213,18 +213,156 @@ async function applySaleStockDecrements(decrements) {
   }
 }
 
+/**
+ * Restore location stock for sales that were refunded AFTER first ingest
+ * (mirror image of applySaleStockDecrements — same "locationId|sku" -> qty map
+ * shape). No clamp needed for increments. Idempotency comes from the caller:
+ * only isRefunded false→true FLIPS contribute, so re-syncs never double-restore.
+ */
+async function applySaleStockIncrements(increments) {
+  for (const [key, qty] of increments) {
+    const [locationId, sku] = key.split('|');
+    try {
+      await prisma.locationStock.upsert({
+        where: { locationId_sku: { locationId, sku } },
+        create: { locationId, sku, quantity: qty },
+        update: { quantity: { increment: qty } },
+      });
+    } catch (err) {
+      console.error(`Refund stock restore failed for location ${locationId}, sku ${sku}:`, err.message);
+    }
+  }
+}
+
+// ============ MACHINE MAPPING RESOLUTION ============
+
+/**
+ * Resolve (and heal) the mapping row for a machine seen on the sales feed.
+ *
+ * VendLive exposes the same physical machine under TWO numeric ids: the
+ * /machines/ API id (vendliveMachineId, used by stock sync) and the
+ * order-sales/webhook feed id (salesMachineId, carried on Sale rows). One row
+ * per physical machine holds both; the friendly machineName is the only key
+ * that matches across namespaces, so that is what we look up by here.
+ *
+ * - Duplicate rows for a name (legacy namespace bug): prefer the one actually
+ *   mapped to a location, then the oldest, deterministically.
+ * - Backfill: when the chosen row is missing (or disagrees on) the sales-feed
+ *   id, write it — fire-and-forget, this run resolves by name either way, but
+ *   the SQL-side join (vmm.sales_machine_id = s.vendlive_machine_id) needs it.
+ * - No row at all: create one holding the sales-feed id in BOTH columns
+ *   (machine-list auto-detect corrects vendliveMachineId to the /machines/
+ *   namespace id when it runs). Never creates a second row for a known name.
+ *
+ * Returns the mapping (location included) or null.
+ */
+export async function resolveSalesMachineMapping(machineName, salesMachineId) {
+  if (!machineName) return null;
+
+  const rows = await prisma.vendliveMachineMapping.findMany({
+    where: { machineName },
+    include: { location: { select: { id: true, name: true } } },
+    orderBy: { createdAt: 'asc' },
+  });
+  const mapping = rows.find(r => r.locationId) || rows[0] || null;
+
+  if (mapping) {
+    if (salesMachineId && mapping.salesMachineId !== salesMachineId) {
+      prisma.vendliveMachineMapping.update({
+        where: { id: mapping.id },
+        data: { salesMachineId },
+      }).catch(err => {
+        console.error(`VendLive sync: failed to backfill salesMachineId ${salesMachineId} on mapping "${machineName}":`, err.message);
+      });
+    }
+    return mapping;
+  }
+
+  if (!salesMachineId) return null;
+
+  try {
+    return await prisma.vendliveMachineMapping.create({
+      data: {
+        vendliveMachineId: salesMachineId,
+        salesMachineId,
+        machineName,
+        autoCreated: true,
+      },
+      include: { location: { select: { id: true, name: true } } },
+    });
+  } catch (err) {
+    if (err.code === 'P2002') {
+      // Raced a concurrent ingest — fetch whichever row won.
+      return prisma.vendliveMachineMapping.findFirst({
+        where: { machineName },
+        include: { location: { select: { id: true, name: true } } },
+      });
+    }
+    console.error(`VendLive sync: failed to auto-create mapping for machine "${machineName}" (${salesMachineId}):`, err.message);
+    return null;
+  }
+}
+
+// ============ UNKNOWN-SKU QUARANTINE ============
+
+/**
+ * Park a sale whose SKU has no product (auto-create disabled) for later
+ * replay, instead of dropping it — the old skip-and-advance behaviour lost
+ * the sale forever once lastPollSaleId moved past it. The payload is the
+ * exact Sale create row, so POST /api/vendlive/quarantine/replay is a plain
+ * insert once the product exists. Upsert: re-syncs refresh the payload
+ * rather than erroring. Throws on failure — callers decide whether that
+ * holds the poll checkpoint.
+ */
+async function quarantineUnknownSkuSale(orderData, item, locationName, syncSource) {
+  const sku = item.productExternalId;
+  const saleData = buildSaleData(
+    orderData,
+    item,
+    { sku, name: item.productName || sku, unitCost: null },
+    locationName,
+    syncSource
+  );
+  await prisma.vendliveQuarantinedSale.upsert({
+    where: { id: saleData.id },
+    create: {
+      id: saleData.id,
+      vendliveOrderSaleId: orderData.orderSaleId,
+      vendliveProductSaleId: item.productSaleId,
+      payload: saleData,
+      reason: 'unknown_sku',
+      sku,
+      productName: item.productName || null,
+      machineName: orderData.machineName,
+      timestamp: saleData.timestamp,
+    },
+    update: { payload: saleData },
+  });
+}
+
 // ============ SALE PROCESSING (webhook path) ============
 
 /**
  * Process a single VendLive order and create Sale records for each product sale item.
- * Newly created sales decrement LocationStock via the machine→location mapping.
- * Returns { created: number, skipped: number, errored: number, errors: string[] }
+ * Newly created sales decrement LocationStock via the machine→location mapping;
+ * refund flips restore it. Unknown SKUs (auto-create off) are quarantined.
+ * Returns { created, skipped, quarantined, errored, errors: string[] }
  */
 export async function processVendliveOrder(orderData, syncSource, config) {
-  const result = { created: 0, skipped: 0, errored: 0, errors: [] };
+  const result = { created: 0, skipped: 0, quarantined: 0, errored: 0, errors: [] };
   const decrements = new Map();
+  const increments = new Map();
   const productMap = new Map();
   const pricedItems = [];
+
+  // Resolve the machine mapping ONCE per order, by friendly name (the sale
+  // items carry the sales-feed machine id, a different namespace from the
+  // /machines id — see resolveSalesMachineMapping, which also backfills the
+  // sales id onto the row and auto-creates mappings for brand-new machines).
+  const salesMachineId = orderData.items.map(i => i.machineId).find(id => id != null) || null;
+  const mapping = await resolveSalesMachineMapping(orderData.machineName, salesMachineId);
+  const locationName = mapping?.location?.name || orderData.locationName;
+  const locationId = mapping?.location?.id || null;
 
   for (const item of orderData.items) {
     try {
@@ -255,8 +393,10 @@ export async function processVendliveOrder(orderData, syncSource, config) {
       }
 
       if (!product) {
-        result.errored++;
-        result.errors.push(`Product SKU ${sku} not found (auto-create disabled)`);
+        // Unknown SKU with auto-create off: park the normalized sale for
+        // replay once the product exists, instead of dropping it.
+        await quarantineUnknownSkuSale(orderData, item, locationName, syncSource);
+        result.quarantined++;
         continue;
       }
 
@@ -265,23 +405,6 @@ export async function processVendliveOrder(orderData, syncSource, config) {
       productMap.set(sku, product);
       pricedItems.push(item);
 
-      // Look up machine mapping for location by FRIENDLY NAME. The order-sales /
-      // webhook machine id is a different namespace from the /machines id stored
-      // on the mapping (see runPollSync for the full explanation); the friendly
-      // name is the only identifier that matches across both.
-      let locationName = orderData.locationName;
-      let locationId = null;
-      if (orderData.machineName) {
-        const mapping = await prisma.vendliveMachineMapping.findFirst({
-          where: { machineName: orderData.machineName },
-          include: { location: { select: { id: true, name: true } } },
-        });
-        if (mapping?.location) {
-          locationName = mapping.location.name;
-          locationId = mapping.location.id;
-        }
-      }
-
       const existing = await prisma.sale.findUnique({
         where: {
           vendliveOrderSaleId_vendliveProductSaleId: {
@@ -289,17 +412,24 @@ export async function processVendliveOrder(orderData, syncSource, config) {
             vendliveProductSaleId: item.productSaleId,
           },
         },
-        select: { id: true, isRefunded: true },
+        select: { id: true, isRefunded: true, quantity: true },
       });
 
       if (existing) {
         // Re-sync of a known sale: keep mutable fields current (a sale
         // refunded in VendLive after first ingest must not stay frozen).
-        if (existing.isRefunded !== (item.isRefunded || false)) {
+        const nowRefunded = item.isRefunded || false;
+        if (existing.isRefunded !== nowRefunded) {
           await prisma.sale.update({
             where: { id: existing.id },
-            data: { isRefunded: item.isRefunded || false, vendStatus: item.vendStatusName || null },
+            data: { isRefunded: nowRefunded, vendStatus: item.vendStatusName || null },
           });
+          // Refund flip false→true: the unit never left (or came back), so
+          // restore the mapped location's stock — mirror of the ingest decrement.
+          if (!existing.isRefunded && nowRefunded && locationId) {
+            const key = `${locationId}|${product.sku}`;
+            increments.set(key, (increments.get(key) || 0) + (existing.quantity || 1));
+          }
         }
         result.skipped++;
         continue;
@@ -328,6 +458,7 @@ export async function processVendliveOrder(orderData, syncSource, config) {
   }
 
   await applySaleStockDecrements(decrements);
+  await applySaleStockIncrements(increments);
   await applyProductPriceUpdates(pricedItems, productMap);
 
   return result;
@@ -347,7 +478,7 @@ export async function runPollSync() {
     return null;
   }
 
-  const totals = { created: 0, skipped: 0, errored: 0, errors: [] };
+  const totals = { created: 0, skipped: 0, quarantined: 0, errored: 0, errors: [] };
   const unknownSkus = new Set();
   const previousLastPollSaleId = config.lastPollSaleId || 0;
   let highestSaleIdSeen = previousLastPollSaleId;
@@ -386,22 +517,26 @@ export async function runPollSync() {
     });
     const productMap = new Map(existingProducts.map(p => [p.sku, p]));
 
-    // Resolve machine -> location mappings by FRIENDLY NAME, not numeric id.
-    // VendLive exposes the same physical machine under two different numeric
-    // ids: the order-sales feed reports one (item.machineId / machine.id), while
-    // the /machines/ endpoint — which is what populates VendliveMachineMapping
-    // and what the stock/channels sync uses — reports another. Joining on the id
-    // therefore never matches, so sales fall back to the raw VendLive location
-    // string and stock never decrements. The friendly name (machineName) is
-    // stable across both API surfaces, so we key on that.
+    // Resolve machine -> location mappings by FRIENDLY NAME, not numeric id:
+    // the order-sales feed reports a different machine id namespace from the
+    // /machines/ endpoint, and only the friendly name is stable across both
+    // (see resolveSalesMachineMapping). Resolution prefers location-mapped
+    // rows over unmapped duplicates, backfills the sales-feed id onto the row
+    // (so the SQL-side join vmm.sales_machine_id = s.vendlive_machine_id
+    // works), and auto-creates a mapping for machines never seen before.
+    // A handful of physical machines at most, so per-name queries are fine.
+    const salesIdByName = new Map();
+    for (const { orderData, item } of allItems) {
+      if (!orderData.machineName || salesIdByName.has(orderData.machineName)) continue;
+      const salesId = item.machineId || orderData.machineVendliveId || null;
+      if (salesId) salesIdByName.set(orderData.machineName, salesId);
+    }
     const machineNames = [...new Set(allItems.map(({ orderData }) => orderData.machineName).filter(Boolean))];
-    const existingMappings = machineNames.length > 0
-      ? await prisma.vendliveMachineMapping.findMany({
-          where: { machineName: { in: machineNames } },
-          include: { location: { select: { id: true, name: true } } },
-        })
-      : [];
-    const mappingByName = new Map(existingMappings.map(m => [m.machineName, m]));
+    const mappingByName = new Map();
+    for (const name of machineNames) {
+      const mapping = await resolveSalesMachineMapping(name, salesIdByName.get(name) || null);
+      if (mapping) mappingByName.set(name, mapping);
+    }
 
     // Step 3: Auto-create missing products if enabled
     if (config.autoCreateProducts) {
@@ -453,20 +588,33 @@ export async function runPollSync() {
     // existing ones that changed, and decrement location stock for new ones.
     let anyBatchFailed = false;
     const decrements = new Map();
+    const increments = new Map();
 
     for (let i = 0; i < allItems.length; i += BATCH_SIZE) {
       const chunk = allItems.slice(i, i + BATCH_SIZE);
 
       // Partition out items whose product is unknown (auto-create disabled).
-      // These are counted as skipped — NOT errors — and logged with their
-      // SKUs in metadata, because blocking the checkpoint on them would make
-      // the poll re-fetch the same window forever.
+      // These are QUARANTINED — not dropped — so the checkpoint can advance
+      // without losing the sale (blocking on them would make the poll
+      // re-fetch the same window forever; skipping lost them for good). If
+      // the quarantine write itself fails we DO hold the checkpoint, because
+      // then nothing preserves the sale.
       const resolvable = [];
       for (const entry of chunk) {
         const product = productMap.get(entry.item.productExternalId);
         if (!product) {
-          totals.skipped++;
           unknownSkus.add(entry.item.productExternalId);
+          try {
+            const mapping = entry.orderData.machineName ? mappingByName.get(entry.orderData.machineName) : null;
+            const locationName = mapping?.location?.name || entry.orderData.locationName;
+            await quarantineUnknownSkuSale(entry.orderData, entry.item, locationName, 'poll');
+            totals.quarantined++;
+          } catch (err) {
+            console.error(`VendLive sync: failed to quarantine sale for unknown SKU ${entry.item.productExternalId}:`, err.message);
+            totals.errored++;
+            totals.errors.push(`Quarantine ${entry.item.productExternalId}: ${err.message}`);
+            anyBatchFailed = true;
+          }
           continue;
         }
         resolvable.push({ ...entry, product });
@@ -481,7 +629,7 @@ export async function runPollSync() {
         }));
         const existingSales = await prisma.sale.findMany({
           where: { OR: keys },
-          select: { id: true, vendliveOrderSaleId: true, vendliveProductSaleId: true, isRefunded: true },
+          select: { id: true, vendliveOrderSaleId: true, vendliveProductSaleId: true, isRefunded: true, quantity: true },
         });
         const existingByKey = new Map(
           existingSales.map(s => [`${s.vendliveOrderSaleId}-${s.vendliveProductSaleId}`, s])
@@ -489,6 +637,11 @@ export async function runPollSync() {
 
         const createRows = [];
         const refundUpdates = [];
+        // Buffered per chunk and only merged into the run-wide maps once the
+        // transaction commits — a failed chunk must contribute NO stock
+        // movements, or the re-poll would double-apply them.
+        const chunkDecrements = new Map();
+        const chunkIncrements = new Map();
 
         for (const { orderData, item, product } of resolvable) {
           const mapping = orderData.machineName ? mappingByName.get(orderData.machineName) : null;
@@ -497,11 +650,18 @@ export async function runPollSync() {
 
           if (existing) {
             totals.skipped++;
-            if (existing.isRefunded !== (item.isRefunded || false)) {
+            const nowRefunded = item.isRefunded || false;
+            if (existing.isRefunded !== nowRefunded) {
               refundUpdates.push(prisma.sale.update({
                 where: { id: existing.id },
-                data: { isRefunded: item.isRefunded || false, vendStatus: item.vendStatusName || null },
+                data: { isRefunded: nowRefunded, vendStatus: item.vendStatusName || null },
               }));
+              // Refund flip false→true: restore the mapped location's stock —
+              // mirror of the decrement taken when the sale was first ingested.
+              if (!existing.isRefunded && nowRefunded && mapping?.location?.id) {
+                const key = `${mapping.location.id}|${product.sku}`;
+                chunkIncrements.set(key, (chunkIncrements.get(key) || 0) + (existing.quantity || 1));
+              }
             }
             continue;
           }
@@ -510,7 +670,7 @@ export async function runPollSync() {
 
           if (mapping?.location?.id) {
             const key = `${mapping.location.id}|${product.sku}`;
-            decrements.set(key, (decrements.get(key) || 0) + 1);
+            chunkDecrements.set(key, (chunkDecrements.get(key) || 0) + 1);
           }
         }
 
@@ -522,6 +682,9 @@ export async function runPollSync() {
           totals.created += createResult.count;
           totals.skipped += createRows.length - createResult.count; // raced duplicates
         }
+
+        for (const [key, qty] of chunkDecrements) decrements.set(key, (decrements.get(key) || 0) + qty);
+        for (const [key, qty] of chunkIncrements) increments.set(key, (increments.get(key) || 0) + qty);
       } catch (err) {
         console.error(`VendLive sync: batch error at chunk ${Math.floor(i / BATCH_SIZE) + 1}: ${err.message}`);
         totals.errored += resolvable.length;
@@ -532,10 +695,11 @@ export async function runPollSync() {
       console.log(`VendLive sync: processed chunk ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(allItems.length / BATCH_SIZE)}`);
     }
 
-    // Decrement location stock for newly ingested sales only. If a batch
-    // failed, its items contributed nothing to `decrements` (they threw
-    // before being counted), and the re-poll will pick them up.
+    // Apply stock movements for committed chunks only (failed chunks merged
+    // nothing into these maps, and the re-poll will pick them up): decrement
+    // for newly ingested sales, increment for refund flips.
     await applySaleStockDecrements(decrements);
+    await applySaleStockIncrements(increments);
 
     // Refresh catalog pricing from this run's sales (newest sale per SKU
     // wins). Uses items from failed batches too — harmless, since the
@@ -562,7 +726,7 @@ export async function runPollSync() {
       console.warn(`VendLive sync: kept lastPollSaleId at ${previousLastPollSaleId} because batch(es) failed; will retry on next poll`);
     }
     if (unknownSkus.size > 0) {
-      console.warn(`VendLive sync: skipped sales for ${unknownSkus.size} unknown SKU(s) (auto-create disabled): ${[...unknownSkus].slice(0, 10).join(', ')}`);
+      console.warn(`VendLive sync: quarantined sales for ${unknownSkus.size} unknown SKU(s) (auto-create disabled): ${[...unknownSkus].slice(0, 10).join(', ')}`);
     }
 
     // Log the sync
@@ -578,12 +742,13 @@ export async function runPollSync() {
         metadata: {
           pageCount,
           totalResults: results.length,
+          quarantined: totals.quarantined,
           ...(unknownSkus.size > 0 ? { unknownSkus: [...unknownSkus].slice(0, 50) } : {}),
         },
       },
     });
 
-    console.log(`VendLive sync complete: ${totals.created} created, ${totals.skipped} skipped, ${totals.errored} errors`);
+    console.log(`VendLive sync complete: ${totals.created} created, ${totals.skipped} skipped, ${totals.quarantined} quarantined, ${totals.errored} errors`);
     return totals;
   } catch (err) {
     console.error('Poll sync error:', err.message);

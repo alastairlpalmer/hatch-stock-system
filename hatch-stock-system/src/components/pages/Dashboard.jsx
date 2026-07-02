@@ -20,6 +20,167 @@ function StatCard({ label, value, accent, to }) {
   return to ? <Link to={to} className="block">{content}</Link> : content;
 }
 
+// Relative time for sync freshness lines, e.g. "12m ago", "26 h ago", "6 days ago"
+function timeAgo(iso) {
+  if (!iso) return null;
+  const diffMs = Date.now() - new Date(iso).getTime();
+  if (Number.isNaN(diffMs)) return null;
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 48) return `${hours} h ago`;
+  return `${Math.floor(hours / 24)} days ago`;
+}
+
+// Short absolute-ish time for the healthy line: "12m ago" if recent,
+// otherwise "Fri 20:00"
+function shortWhen(iso) {
+  if (!iso) return 'never';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return 'never';
+  const hours = (Date.now() - d.getTime()) / 3600000;
+  if (hours < 6) return timeAgo(iso);
+  const day = d.toLocaleDateString('en-GB', { weekday: 'short' });
+  const time = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  return `${day} ${time}`;
+}
+
+// VendLive sync health panel — surfaces sync problems on the dashboard
+// (instead of email alerts). Polls /vendlive/health every 5 minutes.
+function VendliveSyncHealth() {
+  const [health, setHealth] = useState(null);
+  const [unreachable, setUnreachable] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const h = await vendliveService.getHealth();
+        if (!cancelled) {
+          setHealth(h);
+          setUnreachable(false);
+        }
+      } catch (err) {
+        if (!cancelled) setUnreachable(true);
+      }
+    };
+    load();
+    const id = setInterval(load, 5 * 60 * 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
+
+  // Nothing yet (first fetch in flight) — render nothing rather than a flash
+  if (!health && !unreachable) return null;
+
+  if (unreachable) {
+    return (
+      <div className="bg-amber-900/20 border border-amber-900/50 rounded-lg p-4">
+        <div className="flex items-center gap-2">
+          <div className="w-2 h-2 rounded-full bg-amber-400" />
+          <span className="text-sm text-amber-400">VendLive — can't reach sync status</span>
+          <Link to="/support/settings" className="text-xs text-amber-400/70 hover:text-amber-300 ml-auto">
+            Settings →
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  const sales = health.salesSync || {};
+  const stock = health.stockSync || {};
+
+  // Sync switched off entirely — informational, not an alarm
+  if (!sales.enabled && !stock.enabled) {
+    return (
+      <div className="flex items-center gap-2 text-sm">
+        <div className="w-2 h-2 rounded-full bg-zinc-600" />
+        <span className="text-zinc-500">VendLive sync is off</span>
+        <Link to="/support/settings" className="text-xs text-zinc-600 hover:text-zinc-400">
+          Settings →
+        </Link>
+      </div>
+    );
+  }
+
+  // Build the list of problems as plain sentences
+  const issues = [];
+  if (sales.enabled && sales.stale) {
+    issues.push({
+      text: `Sales sync stale — last success ${timeAgo(sales.lastSuccessAt) || 'never'}`,
+      severe: true,
+    });
+  }
+  if (stock.enabled && stock.stale) {
+    issues.push({
+      text: `Stock levels last synced ${timeAgo(stock.lastSyncAt) || 'never'}`,
+      severe: true,
+    });
+  }
+  if ((health.quarantine?.unresolved || 0) > 0) {
+    const n = health.quarantine.unresolved;
+    issues.push({ text: `${n} sale${n === 1 ? '' : 's'} quarantined (unknown products)` });
+  }
+  if ((health.unmappedMachines || 0) > 0) {
+    const n = health.unmappedMachines;
+    issues.push({ text: `${n} machine${n === 1 ? '' : 's'} not mapped to a location` });
+  }
+  if ((health.errorsLast24h || 0) > 0) {
+    const n = health.errorsLast24h;
+    issues.push({ text: `${n} sync error${n === 1 ? '' : 's'} in the last 24 h` });
+  }
+
+  // Backend says not-ok but nothing above matched — still show something actionable
+  if (!health.ok && issues.length === 0) {
+    issues.push({ text: 'VendLive reports a sync problem — check settings' });
+  }
+
+  if (health.ok && issues.length === 0) {
+    const parts = ['VendLive healthy'];
+    if (sales.enabled) parts.push(`sales synced ${shortWhen(sales.lastSuccessAt)}`);
+    if (stock.enabled) parts.push(`stock synced ${shortWhen(stock.lastSyncAt)}`);
+    return (
+      <div className="flex items-center gap-2 text-sm">
+        <div className="w-2 h-2 rounded-full bg-emerald-400" />
+        <span className="text-emerald-400">{parts[0]}</span>
+        <span className="text-zinc-500">{parts.slice(1).map(p => ` · ${p}`).join('')}</span>
+      </div>
+    );
+  }
+
+  // Problems — red if a sync is stale, amber for everything else
+  const severe = issues.some(i => i.severe);
+  const palette = severe
+    ? { card: 'bg-red-900/20 border-red-900/50', title: 'text-red-400', divider: 'border-red-900/30', link: 'text-red-400/70 hover:text-red-300' }
+    : { card: 'bg-amber-900/20 border-amber-900/50', title: 'text-amber-400', divider: 'border-amber-900/30', link: 'text-amber-400/70 hover:text-amber-300' };
+
+  return (
+    <div className={`${palette.card} border rounded-lg p-6`}>
+      <div className="flex items-center justify-between mb-4">
+        <h3 className={`text-sm font-medium ${palette.title}`}>VendLive Sync Health</h3>
+        <Link to="/support/settings" className={`text-xs ${palette.link}`}>
+          VendLive settings →
+        </Link>
+      </div>
+      <div className="space-y-2">
+        {issues.map((issue, i) => (
+          <Link
+            key={i}
+            to="/support/settings"
+            className={`flex items-center gap-2 py-1.5 border-b ${palette.divider} last:border-0 group`}
+          >
+            <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${issue.severe ? 'bg-red-400' : 'bg-amber-400'}`} />
+            <span className="text-sm text-zinc-300 group-hover:text-white transition-colors">{issue.text}</span>
+          </Link>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function SectionHeading({ children, to }) {
   if (!to) return <h3 className="text-sm font-medium text-zinc-400 mb-4">{children}</h3>;
   return (
@@ -78,12 +239,6 @@ export default function Dashboard() {
   const expiryAlertCount = expiredBatches.length + criticalBatches.length;
 
   // Find low stock at locations
-  // VendLive status
-  const [vlStatus, setVlStatus] = useState(null);
-  useEffect(() => {
-    vendliveService.getSyncStatus().then(setVlStatus).catch(() => {});
-  }, []);
-
   const lowStockLocations = data.locations.map(loc => {
     const locStock = data.locationStock[loc.id] || {};
     const locConfig = data.locationConfig[loc.id] || {};
@@ -116,19 +271,7 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {vlStatus?.connected && (
-        <div className="flex items-center gap-2 text-sm">
-          <div className={`w-2 h-2 rounded-full ${vlStatus.active ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-500'}`} />
-          <span className="text-zinc-400">
-            VendLive {vlStatus.active ? 'Connected' : 'Inactive'}
-          </span>
-          {vlStatus.active && vlStatus.todaySalesCount > 0 && (
-            <span className="text-zinc-500 ml-2">
-              ({vlStatus.todaySalesCount} sales today)
-            </span>
-          )}
-        </div>
-      )}
+      <VendliveSyncHealth />
 
       {/* Expiry Alerts */}
       {(expiredBatches.length > 0 || criticalBatches.length > 0) && (

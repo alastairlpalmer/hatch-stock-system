@@ -202,7 +202,9 @@ router.post('/machine-mappings/auto-detect', asyncHandler(async (req, res) => {
 
   const machines = await vendliveApi.getMachines(config);
   let created = 0;
+  let updated = 0;
   let existing = 0;
+  let conflicts = 0;
 
   for (const machine of machines) {
     const machineId = machine.id || machine.pk;
@@ -217,6 +219,40 @@ router.post('/machine-mappings/auto-detect', asyncHandler(async (req, res) => {
       continue;
     }
 
+    // The sales-feed ingest may have created this machine's row first, keyed
+    // by name with the SALES-namespace id sitting in vendliveMachineId. Adopt
+    // that row — point vendliveMachineId at the /machines/ namespace id —
+    // instead of creating a duplicate. Prefer a location-mapped row when the
+    // old namespace bug left duplicates behind.
+    const byName = await prisma.vendliveMachineMapping.findMany({
+      where: { machineName: name },
+      orderBy: { createdAt: 'asc' },
+    });
+    const adopt = byName.find(m => m.locationId) || byName[0] || null;
+
+    if (adopt) {
+      const data = { vendliveMachineId: machineId };
+      if (adopt.salesMachineId == null && adopt.autoCreated && adopt.vendliveMachineId !== machineId) {
+        // Sales-created row that was never backfilled: its vendliveMachineId
+        // IS the sales-feed id — preserve it before overwriting.
+        data.salesMachineId = adopt.vendliveMachineId;
+      }
+      try {
+        await prisma.vendliveMachineMapping.update({ where: { id: adopt.id }, data });
+        updated++;
+      } catch (err) {
+        if (err.code === 'P2002') {
+          // Another row already holds one of these ids — needs a manual
+          // merge; log and carry on rather than failing the whole detect.
+          console.error(`VendLive auto-detect: id conflict adopting mapping "${name}" (machine ${machineId}): ${err.message}`);
+          conflicts++;
+        } else {
+          throw err;
+        }
+      }
+      continue;
+    }
+
     await prisma.vendliveMachineMapping.create({
       data: {
         vendliveMachineId: machineId,
@@ -227,7 +263,7 @@ router.post('/machine-mappings/auto-detect', asyncHandler(async (req, res) => {
     created++;
   }
 
-  res.json({ created, existing, total: machines.length });
+  res.json({ created, updated, existing, conflicts, total: machines.length });
 }));
 
 // ============ WEBHOOK ============
@@ -254,25 +290,10 @@ router.post('/webhook/sales', async (req, res) => {
     }
 
     const orderData = normalizeWebhookPayload(req.body);
+    // Machine mapping resolution (name-keyed lookup, sales-feed id backfill,
+    // auto-create for brand-new machines — never a second row for a known
+    // name) happens inside processVendliveOrder via resolveSalesMachineMapping.
     const result = await processVendliveOrder(orderData, 'webhook', config);
-
-    // Auto-create machine mapping if we see a new machine. Use upsert to
-    // avoid the findUnique+create race condition when webhooks arrive
-    // concurrently for a new machine.
-    const uniqueMachineIds = [...new Set(orderData.items.map(i => i.machineId).filter(Boolean))];
-    for (const machineId of uniqueMachineIds) {
-      await prisma.vendliveMachineMapping.upsert({
-        where: { vendliveMachineId: machineId },
-        create: {
-          vendliveMachineId: machineId,
-          machineName: orderData.machineName || `Machine ${machineId}`,
-          autoCreated: true,
-        },
-        update: {}, // Existing mappings are left untouched
-      }).catch(err => {
-        console.error(`VendLive webhook: failed to upsert mapping for machine ${machineId}:`, err.message);
-      });
-    }
 
     // Log the sync
     const status = result.errored > 0 ? (result.created > 0 ? 'partial' : 'error') : 'success';
@@ -284,7 +305,11 @@ router.post('/webhook/sales', async (req, res) => {
         salesSkipped: result.skipped,
         salesErrored: result.errored,
         errorMessage: result.errors.length > 0 ? result.errors.slice(0, 5).join('; ') : null,
-        metadata: { orderSaleId: orderData.orderSaleId, itemCount: orderData.items.length },
+        metadata: {
+          orderSaleId: orderData.orderSaleId,
+          itemCount: orderData.items.length,
+          quarantined: result.quarantined,
+        },
       },
     });
   } catch (err) {
@@ -382,6 +407,178 @@ router.get('/sync/status', asyncHandler(async (req, res) => {
     lastSaleAt: lastSale?.timestamp || null,
     todaySalesCount: todaySales._count || 0,
     todaySalesRevenue: todaySales._sum?.charged || 0,
+  });
+}));
+
+// ============ QUARANTINE ============
+
+// GET /api/vendlive/quarantine — quarantined sales, unresolved first (newest
+// first within each group), plus the unresolved count for badges.
+router.get('/quarantine', asyncHandler(async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit) || 100, 500);
+
+  const [unresolvedCount, unresolvedRows] = await Promise.all([
+    prisma.vendliveQuarantinedSale.count({ where: { resolvedAt: null } }),
+    prisma.vendliveQuarantinedSale.findMany({
+      where: { resolvedAt: null },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+    }),
+  ]);
+
+  const remaining = limit - unresolvedRows.length;
+  const resolvedRows = remaining > 0
+    ? await prisma.vendliveQuarantinedSale.findMany({
+        where: { resolvedAt: { not: null } },
+        orderBy: { createdAt: 'desc' },
+        take: remaining,
+      })
+    : [];
+
+  res.json({ unresolved: unresolvedCount, rows: [...unresolvedRows, ...resolvedRows] });
+}));
+
+// POST /api/vendlive/quarantine/replay — book every unresolved quarantined
+// sale whose SKU now exists in the catalog (by sku, with a barcode fallback —
+// both unique columns, so the lookups are cheap). The payload IS the Sale
+// create row, so replay is a plain insert. Deliberately does NOT decrement
+// location stock: the machine already vended the unit long ago, and a later
+// full machine stock sync reflects reality — retro-decrementing now would
+// double-count.
+router.post('/quarantine/replay', asyncHandler(async (req, res) => {
+  const rows = await prisma.vendliveQuarantinedSale.findMany({
+    where: { resolvedAt: null },
+    orderBy: { createdAt: 'asc' },
+  });
+
+  let replayed = 0;
+  let stillUnknown = 0;
+  let alreadyExisted = 0;
+
+  for (const row of rows) {
+    const payload = row.payload;
+    const sku = payload?.sku || row.sku;
+    if (!sku) {
+      stillUnknown++;
+      continue;
+    }
+
+    let product = await prisma.product.findUnique({ where: { sku } });
+    if (!product) {
+      product = await prisma.product.findUnique({ where: { barcode: sku } });
+    }
+    if (!product) {
+      stillUnknown++;
+      continue;
+    }
+
+    try {
+      await prisma.sale.create({
+        data: {
+          ...payload,
+          sku: product.sku, // barcode match: book under the catalog SKU
+          timestamp: new Date(payload.timestamp),
+        },
+      });
+      replayed++;
+    } catch (err) {
+      if (err.code !== 'P2002') {
+        console.error(`VendLive quarantine replay failed for ${row.id}:`, err.message);
+        stillUnknown++;
+        continue;
+      }
+      alreadyExisted++; // duplicate — the sale got in some other way
+    }
+
+    await prisma.vendliveQuarantinedSale.update({
+      where: { id: row.id },
+      data: { resolvedAt: new Date() },
+    });
+  }
+
+  res.json({ replayed, stillUnknown, alreadyExisted });
+}));
+
+// DELETE /api/vendlive/quarantine/:id — discard a quarantined sale for good.
+router.delete('/quarantine/:id', asyncHandler(async (req, res) => {
+  try {
+    await prisma.vendliveQuarantinedSale.delete({ where: { id: req.params.id } });
+  } catch (err) {
+    if (err.code === 'P2025') {
+      return res.status(404).json({ error: 'Quarantined sale not found' });
+    }
+    throw err;
+  }
+  res.json({ deleted: true });
+}));
+
+// ============ HEALTH ============
+
+// GET /api/vendlive/health — one cheap endpoint answering "is the VendLive
+// integration actually working?": sales-sync freshness (counting partials
+// that still created sales — /sync/status ignores those), stock-sync
+// freshness, quarantine backlog, unmapped machines and recent errors.
+router.get('/health', asyncHandler(async (req, res) => {
+  const now = Date.now();
+  const config = await prisma.vendliveConfig.findUnique({ where: { id: 'default' } });
+
+  const [lastSalesSync, lastSale, lastStockSync, quarantineUnresolved, unmappedMachines, errorsLast24h] = await Promise.all([
+    // A 'partial' run with salesCreated > 0 is still a working pipeline —
+    // only counting 'success' would flag a healthy-but-noisy sync as dead.
+    prisma.vendliveSyncLog.findFirst({
+      where: {
+        OR: [
+          { status: 'success' },
+          { status: 'partial', salesCreated: { gt: 0 } },
+        ],
+      },
+      orderBy: { createdAt: 'desc' },
+      select: { createdAt: true },
+    }),
+    prisma.sale.findFirst({
+      where: { syncSource: { in: ['webhook', 'poll'] } },
+      orderBy: { timestamp: 'desc' },
+      select: { timestamp: true },
+    }),
+    prisma.vendliveStockSync.findFirst({
+      where: { status: 'success' },
+      orderBy: { createdAt: 'desc' },
+      select: { createdAt: true },
+    }),
+    prisma.vendliveQuarantinedSale.count({ where: { resolvedAt: null } }),
+    prisma.vendliveMachineMapping.count({ where: { locationId: null } }),
+    prisma.vendliveSyncLog.count({
+      where: { status: 'error', createdAt: { gte: new Date(now - 24 * 60 * 60 * 1000) } },
+    }),
+  ]);
+
+  const salesEnabled = config?.salesSyncEnabled || false;
+  const pollIntervalMin = config?.pollIntervalMin || 15;
+  const salesStaleAfterMs = Math.max(3 * pollIntervalMin, 30) * 60 * 1000;
+  const salesStale = salesEnabled &&
+    (!lastSalesSync || now - lastSalesSync.createdAt.getTime() > salesStaleAfterMs);
+
+  const stockEnabled = config?.stockSyncEnabled || false;
+  const stockStale = stockEnabled &&
+    (!lastStockSync || now - lastStockSync.createdAt.getTime() > 4 * 24 * 60 * 60 * 1000);
+
+  res.json({
+    salesSync: {
+      enabled: salesEnabled,
+      lastSuccessAt: lastSalesSync?.createdAt || null,
+      lastSaleAt: lastSale?.timestamp || null,
+      pollIntervalMin,
+      stale: salesStale,
+    },
+    stockSync: {
+      enabled: stockEnabled,
+      lastSyncAt: lastStockSync?.createdAt || null,
+      stale: stockStale,
+    },
+    quarantine: { unresolved: quarantineUnresolved },
+    unmappedMachines,
+    errorsLast24h,
+    ok: !salesStale && !stockStale && quarantineUnresolved === 0 && unmappedMachines === 0,
   });
 }));
 

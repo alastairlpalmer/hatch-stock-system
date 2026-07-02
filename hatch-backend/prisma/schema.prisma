@@ -508,9 +508,16 @@ model VendliveConfig {
   @@map("vendlive_config")
 }
 
+// VendLive exposes TWO machine-id namespaces: the /machines/ API id
+// (vendliveMachineId, used by stock sync) and the order-sales/webhook feed id
+// (salesMachineId, carried on Sale rows). One physical machine = ONE row here
+// holding both ids; the friendly machineName is the cross-namespace key used
+// to backfill salesMachineId when a sale is first seen. See
+// manual-sql/012_vendlive_trust.sql for the dedupe/backfill migration.
 model VendliveMachineMapping {
   id                String   @id @default(uuid())
   vendliveMachineId Int      @unique @map("vendlive_machine_id")
+  salesMachineId    Int?     @unique @map("sales_machine_id")
   machineName       String   @map("machine_name")
   locationId        String?  @map("location_id")
   autoCreated       Boolean  @default(false) @map("auto_created")
@@ -519,6 +526,28 @@ model VendliveMachineMapping {
   location Location? @relation(fields: [locationId], references: [id])
 
   @@map("vendlive_machine_mappings")
+}
+
+// Sales the ingest could not book because the SKU was unknown (auto-create
+// off). Instead of skipping-and-advancing (permanent data loss), the raw
+// normalized sale is parked here and replayed once the product exists.
+// Replay inserts the Sale row only — it does NOT retro-decrement machine
+// stock (a later full sync already reflects reality).
+model VendliveQuarantinedSale {
+  id                    String    @id // vl-<orderSaleId>-<productSaleId>
+  vendliveOrderSaleId   Int?      @map("vendlive_order_sale_id")
+  vendliveProductSaleId Int?      @map("vendlive_product_sale_id")
+  payload               Json // normalized sale row, ready to insert
+  reason                String // 'unknown_sku' | ...
+  sku                   String?
+  productName           String?   @map("product_name")
+  machineName           String?   @map("machine_name")
+  timestamp             DateTime?
+  createdAt             DateTime  @default(now()) @map("created_at")
+  resolvedAt            DateTime? @map("resolved_at")
+
+  @@index([resolvedAt])
+  @@map("vendlive_quarantined_sales")
 }
 
 model VendliveSyncLog {
