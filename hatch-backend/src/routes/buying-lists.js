@@ -4,18 +4,29 @@ import PDFDocument from 'pdfkit';
 import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { contentDispositionAttachment } from '../utils/http.js';
+import { ensureFreshMealPlaceholders } from '../utils/fresh-meal-placeholders.js';
 
 const router = express.Router();
 
 const MS_PER_DAY = 86_400_000;
 
-// Buying-list items are PLAIN SKUs — the frontend expands fresh-meal groups
-// into member SKUs before saving. Everything beyond sku/quantity (name,
-// supplier, costs, netting figures…) is passed through as display metadata.
+// Buying-list items are either plain SKU lines or fresh-meal GROUP lines
+// ({ isFreshMeal: true, mealType, no sku }). Groups stay at meal-type level
+// because the Frive menu rotates weekly — the flavour SKUs that will arrive
+// aren't known at ordering time. Everything beyond the identity fields
+// (name, supplier, costs, netting figures…) is passed through as display
+// metadata.
 const itemSchema = z.object({
-  sku: z.string().min(1),
+  sku: z.string().min(1).nullish(),
+  isFreshMeal: z.coerce.boolean().optional(),
+  mealType: z.string().min(1).nullish(),
   quantity: z.coerce.number().int().min(0),
-}).passthrough();
+}).passthrough().refine(
+  (i) => (i.sku && i.sku.length > 0) || (i.isFreshMeal === true && i.mealType),
+  { message: 'Each item needs a sku, or isFreshMeal:true with a mealType' },
+);
+
+const isGroupLine = (i) => !i.sku && i.isFreshMeal === true && !!i.mealType;
 
 const dateString = z.string().refine(
   (v) => !isNaN(Date.parse(v)),
@@ -172,10 +183,19 @@ router.post('/:id/create-orders', asyncHandler(async (req, res) => {
   }
 
   const items = (Array.isArray(list.items) ? list.items : [])
-    .filter((i) => i.sku && (i.quantity || 0) > 0);
+    .filter((i) => (i.sku || isGroupLine(i)) && (i.quantity || 0) > 0);
   if (items.length === 0) {
     return res.status(400).json({ error: 'Buying list has no items with quantity > 0' });
   }
+
+  // Fresh-meal group lines order against one placeholder product per meal
+  // type (the rotating menu means real flavour SKUs are unknown until the box
+  // arrives — receiving allocates them to actual SKUs).
+  const groupMealTypes = [...new Set(items.filter(isGroupLine).map((i) => i.mealType))];
+  const placeholderSkus = groupMealTypes.length
+    ? await ensureFreshMealPlaceholders(prisma, groupMealTypes)
+    : {};
+  const orderSkuFor = (item) => (isGroupLine(item) ? placeholderSkus[item.mealType] : item.sku);
 
   const supplierMeta = await supplierMetaFor(items);
   const defaultExpected = list.targetDate
@@ -202,7 +222,7 @@ router.post('/:id/create-orders', asyncHandler(async (req, res) => {
           totalAmount,
           items: {
             create: group.items.map((i) => ({
-              sku: i.sku,
+              sku: orderSkuFor(i),
               quantity: i.quantity,
               unitPrice: i.unitCost ?? null,
             })),
@@ -351,8 +371,8 @@ export function renderBuyingListPdf(list, supplierMeta = {}) {
           subtotal += total;
           grandUnits += item.quantity || 0;
           const cells = {
-            name: ellipsize(doc, item.name || item.sku, COLS[0].w - 10),
-            sku: ellipsize(doc, item.sku, COLS[1].w - 10),
+            name: ellipsize(doc, item.name || item.sku || `${item.mealType} — fresh meals`, COLS[0].w - 10),
+            sku: ellipsize(doc, item.sku || 'rotating menu', COLS[1].w - 10),
             boxes: String(boxesOf(item)),
             units: String(item.quantity || 0),
             unitCost: item.unitCost != null ? money(item.unitCost) : '—',
@@ -444,8 +464,10 @@ publicBuyingListsRouter.get('/:token', asyncHandler(async (req, res) => {
     return {
       supplierName: group.supplierName,
       items: group.items.map((i) => ({
-        name: i.name || i.sku,
-        sku: i.sku,
+        name: i.name || i.sku || `${i.mealType} — fresh meals`,
+        sku: i.sku || null,
+        mealType: i.mealType ?? null,
+        isFreshMeal: i.isFreshMeal === true,
         quantity: i.quantity,
         boxes: boxesOf(i),
         unitsPerBox: i.unitsPerBox ?? 1,

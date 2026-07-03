@@ -21,6 +21,16 @@ Phase D (minus auth, deferred) — suppliers gain ordering config that the buyin
 - New `GET /api/vendlive/predictions?locationId=` wrapping VendLive's `/stock-report/?predictions` (previously dead code) — per mapped machine, best-effort normalised `{name, sku, currentStock, predicted}` rows; upstream failures return 502, not configured 409, no mapped machines 404.
 - Planner gains a collapsible **"VendLive predictions (cross-check)"** panel: per selected location, a Compare button renders VendLive's current/predicted numbers side-by-side — informational only, never merged into the suggestion lines.
 
+## Fresh meals ordered at meal-type level (rotating menu)
+
+The Frive menu changes every week, so expanding a "Meat" suggestion into this week's flavour SKUs produced orders for products that won't exist by delivery. Now, matching how the Location Stock page treats fresh meals:
+
+- **Buying lists keep fresh meals as meal-type lines** ("Meat — fresh meals × 40", tagged *rotating menu*) — no flavour expansion. Same on the PDF, share view and WhatsApp text ("rotating menu" in the SKU column).
+- **POs order against one auto-managed placeholder product per meal type** (`FRIVE-MEAT` etc., category "Fresh Meal Order", excluded from all fresh-meal group aggregation). Both the buying-list path and the direct create-POs path use them.
+- **Receiving allocates the actual flavours**: a placeholder line on the receive screen becomes an "allocate flavours" block — pick each flavour found in the box (dropdown filtered to that meal type), or type a brand-new SKU + name for menu items the catalogue hasn't seen (auto-created as confirmed fresh meals). Units count against the placeholder line (`forSku`), batches + expiry land under the real flavour SKUs — so FEFO pick lists and machine tracking keep working on real products. Over-allocation and arbitrary substitution against non-placeholder lines are rejected server-side.
+
+No DB migration for this part — placeholders are ordinary product rows created on demand.
+
 ## Verification
 
 - Backend: 225/225 vitest tests green (19 files; new: supplier schema validation, stock-report normaliser incl. hostile payload shapes)
