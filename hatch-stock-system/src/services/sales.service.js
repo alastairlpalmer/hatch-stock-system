@@ -43,6 +43,15 @@ export const salesService = {
   },
 
   /**
+   * Get daily sales broken down by category (for the stacked revenue chart)
+   * @param {Object} params - { startDate, endDate, days, locationName }
+   */
+  getDailyByCategory: async (params = {}) => {
+    const response = await api.get('/sales/daily-by-category', { params });
+    return response.data;
+  },
+
+  /**
    * Get product sales breakdown
    * @param {Object} params - { startDate, endDate, limit }
    */
