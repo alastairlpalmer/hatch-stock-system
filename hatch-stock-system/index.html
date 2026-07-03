@@ -3,7 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover makes env(safe-area-inset-bottom) non-zero on
+         notched iPhones so the bottom nav pads above the home indicator. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="description" content="Hatch Stock Management System - Inventory tracking for warehouses and vending locations" />
     <meta name="theme-color" content="#004638" />
     <!-- PWA + iOS "Add to Home Screen" support — improves the on-iPhone

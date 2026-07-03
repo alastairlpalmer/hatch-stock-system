@@ -3,6 +3,8 @@ import { useLocation } from 'react-router-dom';
 import SyncIndicator from '../ui/SyncIndicator';
 
 const labelByPathPrefix = [
+  ['/home', 'Overview'],
+  ['/more', 'More'],
   ['/sales', 'Sales'],
   ['/locations', 'Location Stock'],
   ['/orders', 'Orders'],
@@ -23,7 +25,7 @@ export default function Header({ syncStatus, isMobile, onMenuClick }) {
   return (
     <header className="h-14 md:h-16 border-b border-zinc-800 bg-zinc-900/50 backdrop-blur-sm flex items-center justify-between px-4 md:px-6 flex-shrink-0 sticky top-0 z-30">
       <div className="flex items-center gap-3">
-        {isMobile && (
+        {isMobile && onMenuClick && (
           <button
             onClick={onMenuClick}
             className="p-2 -ml-2 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 active:bg-zinc-700"

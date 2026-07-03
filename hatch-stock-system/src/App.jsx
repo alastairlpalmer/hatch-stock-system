@@ -26,6 +26,9 @@ import PickListDetail from './components/pages/restock/PickListDetail';
 import StockCheck from './components/pages/restock/StockCheck';
 import RestockRun from './components/pages/restock/RestockRun';
 import Account from './components/pages/Account';
+import MobileHome from './components/pages/mobile/MobileHome';
+import MorePage from './components/pages/mobile/MorePage';
+import RestockHub from './components/pages/restock/RestockHub';
 
 // Parent layouts
 import OrdersLayout from './components/pages/orders/OrdersLayout';
@@ -37,8 +40,10 @@ import SupportLayout from './components/pages/support/SupportLayout';
 // Layout components
 import Sidebar from './components/layout/Sidebar';
 import Header from './components/layout/Header';
+import BottomNav from './components/layout/BottomNav';
 import LoadingScreen from './components/ui/LoadingScreen';
 import ErrorBoundary from './components/ErrorBoundary';
+import useIsMobile from './hooks/useIsMobile';
 
 const AUTH_ENABLED = import.meta.env.VITE_AUTH_ENABLED === 'true';
 
@@ -82,11 +87,18 @@ function App() {
   );
 }
 
+// The /restock index is the action hub on phones and the 3-step workflow on
+// desktop. Same URL either way, so the bottom bar and old links both just
+// point at /restock.
+function RestockIndex() {
+  const isMobile = useIsMobile();
+  return isMobile ? <RestockHub /> : <RestockWorkflow />;
+}
+
 function AppLayout() {
   const { loading, syncStatus, error, clearError } = useStock();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [isMobile, setIsMobile] = useState(false);
+  const isMobile = useIsMobile();
   // The backend rejected a request with 401 while this build has
   // VITE_AUTH_ENABLED off — the two env flags disagree. Without this banner
   // the app would just look broken. Fired by the axios interceptor.
@@ -98,49 +110,29 @@ function AppLayout() {
     return () => window.removeEventListener('hatch:auth-config-mismatch', onMismatch);
   }, []);
 
-  useEffect(() => {
-    const checkMobile = () => {
-      setIsMobile(window.innerWidth < 768);
-      if (window.innerWidth < 768) {
-        setSidebarCollapsed(true);
-      }
-    };
-    checkMobile();
-    window.addEventListener('resize', checkMobile);
-    return () => window.removeEventListener('resize', checkMobile);
-  }, []);
-
-  const closeMobileMenu = () => setMobileMenuOpen(false);
-
   if (loading) {
     return <LoadingScreen />;
   }
 
   return (
-    <div className="h-screen bg-zinc-950 text-zinc-100 flex overflow-hidden">
-      {isMobile && mobileMenuOpen && (
-        <div
-          className="fixed inset-0 bg-black/60 z-40 backdrop-blur-sm"
-          onClick={closeMobileMenu}
+    // h-[100dvh] tracks iOS Safari's collapsing toolbar so the bottom nav
+    // always hugs the visible bottom; h-screen stays as the fallback.
+    <div className="h-screen h-[100dvh] bg-zinc-950 text-zinc-100 flex overflow-hidden">
+      {/* Mobile navigation is the bottom bar; the sidebar (and its old drawer
+          mode) is desktop-only chrome. */}
+      {!isMobile && (
+        <Sidebar
+          collapsed={sidebarCollapsed}
+          onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
+          isMobile={false}
+          mobileMenuOpen={false}
+          onCloseMobile={() => {}}
+          syncStatus={syncStatus}
         />
       )}
 
-      <Sidebar
-        collapsed={sidebarCollapsed}
-        onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
-        isMobile={isMobile}
-        mobileMenuOpen={mobileMenuOpen}
-        onCloseMobile={closeMobileMenu}
-        onNavigate={isMobile ? closeMobileMenu : undefined}
-        syncStatus={syncStatus}
-      />
-
       <div className="flex-1 flex flex-col min-w-0">
-        <Header
-          syncStatus={syncStatus}
-          isMobile={isMobile}
-          onMenuClick={() => setMobileMenuOpen(true)}
-        />
+        <Header syncStatus={syncStatus} isMobile={isMobile} />
 
         <main className="flex-1 overflow-auto p-4 md:p-6">
           <div className="max-w-7xl mx-auto">
@@ -168,6 +160,8 @@ function AppLayout() {
             )}
             <Routes>
               <Route path="/" element={<Dashboard />} />
+              <Route path="/home" element={<MobileHome />} />
+              <Route path="/more" element={<MorePage />} />
               <Route path="/sales" element={<SalesOverview />} />
               <Route path="/locations" element={<LocationStock />} />
 
@@ -181,7 +175,7 @@ function AppLayout() {
               </Route>
 
               <Route path="/restock" element={<RestockLayout />}>
-                <Route index element={<RestockWorkflow />} />
+                <Route index element={<RestockIndex />} />
                 <Route path="route" element={<SelectRoute />} />
                 <Route path="picklists" element={<PickLists />} />
                 <Route path="picklists/:id" element={<PickListDetail />} />
@@ -219,6 +213,10 @@ function AppLayout() {
             </Routes>
           </div>
         </main>
+
+        {/* In-flow (not fixed) so <main>'s scrollport ends above it and page
+            sticky action bars stack on top with no offsets. */}
+        {isMobile && <BottomNav />}
       </div>
     </div>
   );
