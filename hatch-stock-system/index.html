@@ -11,7 +11,9 @@
     <!-- PWA + iOS "Add to Home Screen" support — improves the on-iPhone
          scanning experience by going full-screen and hiding the URL bar. -->
     <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="apple-touch-icon" href="/brand/hatch-icon-cream.svg" />
+    <!-- iOS requires a PNG here (SVG is ignored → ugly default tile). Full-bleed
+         square; iOS rounds the corners itself. -->
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Hatch Stock" />
