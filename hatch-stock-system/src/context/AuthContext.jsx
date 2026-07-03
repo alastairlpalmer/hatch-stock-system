@@ -17,7 +17,7 @@ function readStoredUser() {
 }
 
 // A JWT's payload is plain base64url JSON — decode locally to check expiry so
-// an expired 7-day session goes straight back to login instead of rendering a
+// an expired session goes straight back to login instead of rendering a
 // broken app until the first 401. (No signature check here — the server does
 // that; this is purely a UX fast-path.)
 function tokenIsLive(token) {
