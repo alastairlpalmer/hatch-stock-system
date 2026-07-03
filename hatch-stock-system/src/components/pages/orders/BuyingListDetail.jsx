@@ -588,7 +588,73 @@ export default function BuyingListDetail() {
                     </div>
                   )
                 )}
-                <div className="overflow-x-auto">
+                {/* Mobile: stacked line cards */}
+                <div className="md:hidden divide-y divide-zinc-800/60">
+                  {group.rows.map(({ item, idx }) => (
+                    <div key={`${item.sku || item.mealType}-${idx}`} className="px-4 py-3 space-y-2">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <span className="text-sm text-zinc-200">{item.name || item.sku}</span>
+                          {item.sku && <span className="text-xs text-zinc-600 ml-2">{item.sku}</span>}
+                          {!item.sku && item.isFreshMeal && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-teal-500/15 text-teal-300 ml-2" title="Ordered at meal-type level — the weekly menu rotates; actual flavours are allocated at receiving">
+                              rotating menu
+                            </span>
+                          )}
+                        </div>
+                        {isDraft && (
+                          <button
+                            onClick={() => removeLine(idx)}
+                            className="flex-shrink-0 text-zinc-600 hover:text-red-400 text-lg leading-none px-1"
+                            title="Remove line"
+                          >
+                            ×
+                          </button>
+                        )}
+                      </div>
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <div className="flex items-center gap-3">
+                          <span className="text-xs text-zinc-500">Qty</span>
+                          {isDraft ? (
+                            <input
+                              type="number"
+                              min="0"
+                              value={item.quantity}
+                              onChange={e => updateItem(idx, 'quantity', parseInt(e.target.value) || 0)}
+                              className="w-16 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-center text-sm focus:outline-none focus:border-emerald-500"
+                            />
+                          ) : (
+                            <span className="text-sm text-zinc-300">{item.quantity}</span>
+                          )}
+                          <span className="text-xs text-zinc-500 whitespace-nowrap">
+                            {boxesFor(item.quantity, item.unitsPerBox)} box{boxesFor(item.quantity, item.unitsPerBox) === 1 ? '' : 'es'}
+                            {(item.unitsPerBox || 1) > 1 && <span className="text-zinc-600"> × {item.unitsPerBox}</span>}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <span className="text-xs text-zinc-500">Unit £</span>
+                          {isDraft ? (
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0"
+                              value={item.unitCost ?? 0}
+                              onChange={e => updateItem(idx, 'unitCost', parseFloat(e.target.value) || 0)}
+                              className="w-16 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-center text-sm focus:outline-none focus:border-emerald-500"
+                            />
+                          ) : (
+                            <span className="text-sm text-zinc-300">£{(item.unitCost || 0).toFixed(2)}</span>
+                          )}
+                          <span className="text-sm text-zinc-300 whitespace-nowrap">
+                            £{((item.quantity || 0) * (item.unitCost || 0)).toFixed(2)}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                {/* Desktop: line table */}
+                <div className="hidden md:block overflow-x-auto">
                   <table className="w-full text-left">
                     <thead>
                       <tr className="text-xs text-zinc-500 border-b border-zinc-800">

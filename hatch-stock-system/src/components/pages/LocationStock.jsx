@@ -473,6 +473,205 @@ export default function LocationStock() {
     );
   };
 
+  // Mobile (below md) stacked card for one per-SKU product. Same data and
+  // handlers as renderProductRow — layout only.
+  const renderProductCard = (product, { indent = false } = {}) => {
+    const qty = getQty(product.sku);
+    const config = locConfig[product.sku] || {};
+    const { status, color } = getStockStatus(product.sku, qty);
+    const margin = getMargin(product);
+
+    return (
+      <div
+        key={product.sku}
+        className={`border-b border-zinc-800/50 px-4 py-3 space-y-3 ${indent ? 'pl-8 bg-zinc-800/20' : ''}`}
+      >
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <div className="text-zinc-200 text-sm">
+              {product.name}
+              {renderExpiryChip(product.sku)}
+            </div>
+            <div className="text-zinc-500 text-xs font-mono mt-0.5">{product.sku}</div>
+          </div>
+          <span className={`inline-block px-2 py-0.5 rounded text-xs shrink-0 ${
+            color === 'red' ? 'bg-red-500/20 text-red-400' :
+            color === 'yellow' ? 'bg-yellow-500/20 text-yellow-400' :
+            color === 'green' ? 'bg-emerald-500/20 text-emerald-400' :
+            'bg-zinc-700 text-zinc-400'
+          }`}>
+            {status}
+          </span>
+        </div>
+
+        <div className="flex items-center justify-between gap-2 text-sm">
+          <div className="flex items-center gap-2 min-w-0">
+            {product.salePrice ? (
+              <span className="text-zinc-300">£{product.salePrice.toFixed(2)}</span>
+            ) : (
+              <span className="text-xs bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded">No price</span>
+            )}
+            {margin ? (
+              <span className={margin.amount >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                £{margin.amount.toFixed(2)}
+                <span className="text-zinc-500 text-xs ml-1">({margin.pct.toFixed(0)}%)</span>
+              </span>
+            ) : (
+              <span className="text-zinc-600 text-xs" title="Needs both sale price and cost price">—</span>
+            )}
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <span className="text-xs text-zinc-500">{isLive ? 'Stock (VendLive)' : 'Stock'}</span>
+            {isLive ? (
+              // VendLive truth — read-only, same as the desktop row.
+              <span className="text-sm text-zinc-200 font-medium">{qty}</span>
+            ) : (
+              <input
+                type="number"
+                inputMode="numeric"
+                value={qty}
+                onChange={e => updateStock(product.sku, e.target.value)}
+                className="w-20 h-10 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm text-right focus:outline-none focus:border-emerald-500"
+              />
+            )}
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+          {isLive ? (
+            <span className="text-xs text-zinc-600" title="Stock is read from VendLive">via VendLive</span>
+          ) : (
+            <>
+              <button onClick={() => adjustStock(product.sku, -10)} className="flex-1 h-10 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white text-xs">-10</button>
+              <button onClick={() => adjustStock(product.sku, -1)} className="flex-1 h-10 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white">-</button>
+              <button onClick={() => adjustStock(product.sku, 1)} className="flex-1 h-10 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white">+</button>
+              <button onClick={() => adjustStock(product.sku, 10)} className="flex-1 h-10 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white text-xs">+10</button>
+            </>
+          )}
+          {showConfig && hasAssignedItems && (
+            <button
+              onClick={() => removeProductFromLocation(product.sku)}
+              className="h-10 w-10 shrink-0 rounded bg-zinc-800 text-red-400 hover:bg-red-900/50 hover:text-red-300 ml-auto"
+              title="Remove from location"
+            >
+              ×
+            </button>
+          )}
+        </div>
+
+        {showConfig && (
+          <div className="grid grid-cols-2 gap-2">
+            <label className="block">
+              <span className="text-xs text-zinc-500">Min Stock</span>
+              <input
+                type="number"
+                inputMode="numeric"
+                value={config.minStock || ''}
+                onChange={e => handleUpdateConfig(product.sku, 'minStock', e.target.value)}
+                placeholder="0"
+                className="mt-1 w-full h-10 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm text-center focus:outline-none focus:border-emerald-500"
+              />
+            </label>
+            <label className="block">
+              <span className="text-xs text-zinc-500">Max Stock</span>
+              <input
+                type="number"
+                inputMode="numeric"
+                value={config.maxStock || ''}
+                onChange={e => handleUpdateConfig(product.sku, 'maxStock', e.target.value)}
+                placeholder="0"
+                className="mt-1 w-full h-10 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm text-center focus:outline-none focus:border-emerald-500"
+              />
+            </label>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // Mobile (below md) card for one collapsed meal-type group, plus member
+  // flavour cards when expanded. Same handlers as renderMealGroup.
+  const renderMealGroupCard = (group) => {
+    const expanded = !!expandedGroups[group.mealType];
+    const { status, color } = getGroupStockStatus(group.totalQty, group.config);
+    const unclassified = group.mealType === 'Unclassified';
+    const toAdd = group.config.maxStock ? Math.max(0, group.config.maxStock - group.totalQty) : 0;
+
+    return (
+      <React.Fragment key={`meal-${group.mealType}`}>
+        <div className="border-b border-zinc-800/50 bg-teal-500/5 px-4 py-3 space-y-3">
+          <button
+            onClick={() => setExpandedGroups(prev => ({ ...prev, [group.mealType]: !expanded }))}
+            className="flex items-center justify-between gap-2 w-full min-h-[2.5rem] text-left"
+          >
+            <span className="flex items-center gap-2 min-w-0">
+              <span className="text-zinc-500 text-xs w-3 shrink-0">{expanded ? '▾' : '▸'}</span>
+              <span className="text-zinc-100 font-medium">{group.mealType}</span>
+              <span className="text-zinc-500 text-xs">
+                {group.items.length} flavour{group.items.length === 1 ? '' : 's'}
+              </span>
+            </span>
+            {unclassified ? (
+              <span className="inline-block px-2 py-0.5 rounded text-xs bg-zinc-700 text-zinc-400 shrink-0" title="Set a meal type in Admin → Fresh Meals">unclassified</span>
+            ) : (
+              <span className={`inline-block px-2 py-0.5 rounded text-xs shrink-0 ${
+                color === 'red' ? 'bg-red-500/20 text-red-400' :
+                color === 'yellow' ? 'bg-yellow-500/20 text-yellow-400' :
+                color === 'green' ? 'bg-emerald-500/20 text-emerald-400' :
+                'bg-zinc-700 text-zinc-400'
+              }`}>
+                {status}
+              </span>
+            )}
+          </button>
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <span className="text-lg font-semibold text-teal-300">{group.totalQty}</span>
+              <span className="text-zinc-500 text-xs ml-1">units</span>
+              {toAdd > 0 && (
+                <div className="text-amber-400 text-xs mt-0.5">add {toAdd} → {group.config.maxStock}</div>
+              )}
+            </div>
+            <span className="text-zinc-600 text-xs">{expanded ? 'expanded' : 'tap to expand'}</span>
+          </div>
+          {showConfig && (
+            <div className="grid grid-cols-2 gap-2">
+              <label className="block">
+                <span className="text-xs text-zinc-500">Min Stock</span>
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  value={group.config.minStock || ''}
+                  onChange={e => handleUpdateMealConfig(group.mealType, 'minStock', e.target.value)}
+                  placeholder="0"
+                  className="mt-1 w-full h-10 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm text-center focus:outline-none focus:border-emerald-500"
+                />
+              </label>
+              <label className="block">
+                <span className="text-xs text-zinc-500">Max Stock</span>
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  value={group.config.maxStock || ''}
+                  onChange={e => handleUpdateMealConfig(group.mealType, 'maxStock', e.target.value)}
+                  placeholder="0"
+                  className="mt-1 w-full h-10 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm text-center focus:outline-none focus:border-emerald-500"
+                />
+              </label>
+            </div>
+          )}
+        </div>
+        {expanded && (
+          group.items.length === 0 ? (
+            <div className="border-b border-zinc-800/50 px-4 py-3 pl-8 text-zinc-600 text-xs">No flavours stocked this week.</div>
+          ) : (
+            group.items.map(product => renderProductCard(product, { indent: true }))
+          )
+        )}
+      </React.Fragment>
+    );
+  };
+
   // Show message if no locations exist
   if (data.locations.length === 0) {
     return (
@@ -606,6 +805,8 @@ export default function LocationStock() {
           )}
 
           <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg overflow-hidden">
+            {/* Desktop (md+) table — horizontal scroll as fallback at narrow md widths */}
+            <div className="hidden md:block overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-zinc-800">
@@ -666,6 +867,44 @@ export default function LocationStock() {
                 )}
               </tbody>
             </table>
+            </div>
+
+            {/* Mobile (below md) — stacked cards, same data and handlers */}
+            <div className="md:hidden">
+              {rowCount === 0 ? (
+                <div className="px-4 py-8 text-center text-zinc-600">
+                  No products assigned to this location
+                </div>
+              ) : (
+                <>
+                  {/* Frive fresh meals — collapsed into one card per meal type */}
+                  {mealGroups.length > 0 && (
+                    <React.Fragment key="fresh-meals-mobile">
+                      <div className="bg-teal-900/40 px-4 py-2">
+                        <span className="text-teal-300 font-medium text-xs uppercase tracking-wide">Fresh Meals (Frive)</span>
+                        <span className="text-zinc-500 text-xs ml-3">
+                          {mealGroups.length} group{mealGroups.length === 1 ? '' : 's'} · {mealGroups.reduce((acc, g) => acc + g.totalQty, 0)} units here · combined volume per meal type
+                        </span>
+                      </div>
+                      {mealGroups.map(group => renderMealGroupCard(group))}
+                    </React.Fragment>
+                  )}
+
+                  {/* Everything else — per-SKU, grouped by category */}
+                  {groupedProducts.map(group => (
+                    <React.Fragment key={group.category}>
+                      <div className="bg-zinc-800/60 px-4 py-2">
+                        <span className="text-emerald-400 font-medium text-xs uppercase tracking-wide">{group.category}</span>
+                        <span className="text-zinc-500 text-xs ml-3">
+                          {group.items.length} product{group.items.length === 1 ? '' : 's'} · {group.items.reduce((acc, p) => acc + getQty(p.sku), 0)} units here
+                        </span>
+                      </div>
+                      {group.items.map(product => renderProductCard(product))}
+                    </React.Fragment>
+                  ))}
+                </>
+              )}
+            </div>
           </div>
 
           {showConfig && (

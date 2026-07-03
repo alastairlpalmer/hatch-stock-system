@@ -39,6 +39,47 @@ export default function History() {
 
       {tab === 'removals' && (
         <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg overflow-hidden">
+          {/* Mobile cards */}
+          <div className="md:hidden divide-y divide-zinc-800/50">
+            {data.removals.length === 0 ? (
+              <p className="px-4 py-8 text-center text-zinc-600 text-sm">No removals yet</p>
+            ) : (
+              data.removals.slice().reverse().map((r, i) => {
+                const items = r.items || [{ sku: r.sku, quantity: r.quantity }];
+                const timestamp = r.createdAt || r.timestamp;
+                const fromWarehouse = r.warehouseId || r.fromLocation;
+                return (
+                  <div key={i} className="px-4 py-3 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-zinc-500 text-xs">{new Date(timestamp).toLocaleDateString('en-GB')}</span>
+                      {r.isAdhoc ? (
+                        <span className="text-xs bg-purple-500/20 text-purple-400 px-2 py-0.5 rounded">Ad-hoc</span>
+                      ) : (
+                        <span className="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded">Restock</span>
+                      )}
+                    </div>
+                    <div className="text-zinc-400 text-xs">
+                      {getWarehouseName(fromWarehouse)} → {r.routeName || getRouteName(r.routeId || r.toLocation)}
+                    </div>
+                    {r.notes && <div className="text-zinc-600 text-xs">{r.notes}</div>}
+                    <div className="space-y-1">
+                      {items.map((item, j) => (
+                        <div key={j} className="flex items-center justify-between gap-2 text-sm">
+                          <span className="text-zinc-200">{getProductName(item.sku)}</span>
+                          <span className="text-red-400">-{item.quantity}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="text-zinc-500 text-xs">
+                      {items.length} item{items.length === 1 ? '' : 's'}{r.takenBy ? ` · by ${r.takenBy}` : ''}
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+          {/* Desktop table */}
+          <div className="hidden md:block overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-zinc-800">
@@ -83,11 +124,38 @@ export default function History() {
               )}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 
       {tab === 'restocks' && (
         <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg overflow-hidden">
+          {/* Mobile cards */}
+          <div className="md:hidden divide-y divide-zinc-800/50">
+            {(data.restocks || data.restockHistory || []).length === 0 ? (
+              <p className="px-4 py-8 text-center text-zinc-600 text-sm">No restocks yet</p>
+            ) : (
+              (data.restocks || data.restockHistory || []).slice().reverse().map((r, i) => (
+                <div key={i} className="px-4 py-3 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-zinc-500 text-xs">{new Date(r.timestamp).toLocaleDateString('en-GB')}</span>
+                    <span className="text-emerald-400 text-sm font-medium">+{r.quantity}</span>
+                  </div>
+                  <div className="text-zinc-200 text-sm">{getProductName(r.sku)}</div>
+                  <div className="text-zinc-400 text-xs">
+                    {r.routeName && <span className="text-emerald-400">{r.routeName}</span>}
+                    {r.routeName && ' → '}
+                    {getLocationName(r.location || r.locationId)}
+                  </div>
+                  {(r.takenBy || r.performedBy) && (
+                    <div className="text-zinc-500 text-xs">by {r.takenBy || r.performedBy}</div>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+          {/* Desktop table */}
+          <div className="hidden md:block overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-zinc-800">
@@ -118,6 +186,7 @@ export default function History() {
               )}
             </tbody>
           </table>
+          </div>
         </div>
       )}
     </div>

@@ -530,6 +530,7 @@ export default function Shrinkage() {
       {/* By Location Tab */}
       {activeSubTab === 'byLocation' && (
         <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg overflow-hidden">
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-zinc-800">
@@ -560,12 +561,14 @@ export default function Shrinkage() {
               )}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 
       {/* By Product Tab */}
       {activeSubTab === 'byProduct' && (
         <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg overflow-hidden">
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-zinc-800">
@@ -599,6 +602,7 @@ export default function Shrinkage() {
               )}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 
@@ -711,6 +715,7 @@ export default function Shrinkage() {
           </div>
 
           <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg overflow-hidden">
+            <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-zinc-800">
@@ -737,6 +742,7 @@ export default function Shrinkage() {
                 ))}
               </tbody>
             </table>
+            </div>
           </div>
         </div>
       )}

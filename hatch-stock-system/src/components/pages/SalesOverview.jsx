@@ -403,6 +403,7 @@ export default function SalesOverview() {
 
       {activeSubTab === 'products' && (
         <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg overflow-hidden">
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-zinc-800">
@@ -435,11 +436,13 @@ export default function SalesOverview() {
                 })}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 
       {activeSubTab === 'daily' && (
         <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg overflow-hidden">
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-zinc-800">
@@ -462,11 +465,53 @@ export default function SalesOverview() {
                 ))}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 
       {activeSubTab === 'transactions' && (
         <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg overflow-hidden">
+          {/* Mobile: stacked transaction cards */}
+          <div className="md:hidden divide-y divide-zinc-800/50">
+            {filteredSales
+              .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+              .slice(0, 100)
+              .map(sale => (
+                <div key={sale.id} className="px-4 py-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-zinc-200 text-sm truncate">{sale.productName}</div>
+                      <div className="text-zinc-500 text-xs">{sale.category}</div>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <div className="text-emerald-400 text-sm">£{sale.charged.toFixed(2)}</div>
+                      {sale.charged !== sale.price && (
+                        <div className="text-zinc-500 text-xs">Price £{sale.price.toFixed(2)}</div>
+                      )}
+                    </div>
+                  </div>
+                  <div className="mt-2 flex items-center justify-between gap-2">
+                    <span className="text-zinc-400 text-xs">{new Date(sale.timestamp).toLocaleString('en-GB')}</span>
+                    <span className="flex items-center gap-1.5">
+                      {sale.isRefunded ? (
+                        <span className="text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded">Refunded</span>
+                      ) : sale.isFreeVend ? (
+                        <span className="text-xs bg-purple-500/20 text-purple-400 px-2 py-0.5 rounded">Free</span>
+                      ) : (
+                        <span className="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded">Paid</span>
+                      )}
+                      {sale.syncSource === 'webhook' || sale.syncSource === 'poll' ? (
+                        <span className="text-xs bg-teal-500/20 text-teal-400 px-2 py-0.5 rounded">VL</span>
+                      ) : (
+                        <span className="text-xs bg-zinc-700 text-zinc-400 px-2 py-0.5 rounded">CSV</span>
+                      )}
+                    </span>
+                  </div>
+                </div>
+              ))}
+          </div>
+          {/* Desktop: full table */}
+          <div className="hidden md:block overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-zinc-800">
@@ -512,6 +557,7 @@ export default function SalesOverview() {
                 ))}
             </tbody>
           </table>
+          </div>
           {filteredSales.length > 100 && (
             <div className="px-4 py-3 text-center text-zinc-500 text-sm border-t border-zinc-800">
               Showing 100 of {filteredSales.length} transactions
