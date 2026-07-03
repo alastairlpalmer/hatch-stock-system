@@ -3,7 +3,8 @@ import api from './api';
 /**
  * Auth API Service
  * Login/register plus admin-only user management. The token returned by
- * login/register is a 7-day JWT; AuthContext persists it to localStorage.
+ * login/register is a JWT (14 days by default; SESSION_DAYS on the backend
+ * tunes it); AuthContext persists it to localStorage.
  */
 export const authService = {
   /** Sign in. Returns { user, token }. */

@@ -130,7 +130,11 @@ export function rolePolicy(req, res, next) {
   });
 }
 
-// Generate JWT token
+// Generate JWT token. Session length defaults to 14 days and is tunable via
+// SESSION_DAYS (Railway) without a code change — per device, fixed from
+// sign-in (not sliding). Invalid values fall back to the default.
 export function generateToken(userId) {
-  return jwt.sign({ userId }, getJwtSecret(), { expiresIn: '7d' });
+  const days = Number.parseInt(process.env.SESSION_DAYS, 10);
+  const expiresIn = Number.isInteger(days) && days >= 1 && days <= 90 ? `${days}d` : '14d';
+  return jwt.sign({ userId }, getJwtSecret(), { expiresIn });
 }
