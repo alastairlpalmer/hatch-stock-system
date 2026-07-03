@@ -30,6 +30,7 @@ import MobileHome from './components/pages/mobile/MobileHome';
 import MorePage from './components/pages/mobile/MorePage';
 import RestockHub from './components/pages/restock/RestockHub';
 import OrdersHub from './components/pages/orders/OrdersHub';
+import OrdersLanding from './components/pages/orders/OrdersLanding';
 
 // Parent layouts
 import OrdersLayout from './components/pages/orders/OrdersLayout';
@@ -96,11 +97,11 @@ function RestockIndex() {
   return isMobile ? <RestockHub /> : <RestockWorkflow />;
 }
 
-// Same pattern for /orders: action hub on phones, the old redirect to
-// Purchase Orders on desktop.
+// Same pattern for /orders: action hub on phones, an action landing (cards +
+// pending-orders snapshot) on desktop.
 function OrdersIndex() {
   const isMobile = useIsMobile();
-  return isMobile ? <OrdersHub /> : <Navigate to="purchase" replace />;
+  return isMobile ? <OrdersHub /> : <OrdersLanding />;
 }
 
 function AppLayout() {

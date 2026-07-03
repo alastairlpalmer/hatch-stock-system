@@ -1,27 +1,35 @@
-# Mobile table fixes — nothing cut off, cards where it counts
+# Desktop action flows: "Needs attention" rail, Orders landing, live workflow status
 
-Follow-up to #37/#38: inside pages, wide tables were cut off on phones — several sat in `overflow-hidden` cards with no scroll wrapper, so side-scroll didn't work at all (the Location Stock bug reported). Every column's information and every interaction is preserved; desktop rendering is unchanged (all mobile layouts sit behind `md:` breakpoints).
+Brings the mobile action-hub + prioritisation patterns to desktop (per feedback on #37/#38) — not the navigation, the *flows*. Four commits, reviewable independently. Frontend-only.
 
-## Two-tier fix
+## 1. Shared ActionCard (pure refactor)
 
-**Tier 1 — universal guarantee:** every `<table>` in the app now sits inside an `overflow-x-auto` wrapper *inside* its rounded card — nothing is clippable at any width. Swept: Location Stock, Inventory (7 tables), History, Users, Sales Overview (3), Shrinkage (4), Admin (2), Orders planner + predictions, Buying List detail.
+The hub card is extracted to `ui/ActionCard.jsx`; the mobile OrdersHub/RestockHub consume it — pixel-identical — so mobile and desktop surfaces can't drift.
 
-**Tier 2 — real mobile card layouts** (`md:hidden` cards + `hidden md:block` desktop table) for the phone-critical surfaces:
+## 2. Dashboard → mission control
 
-- **Location Stock** (the reported page): per-product cards with the expiry chip, price/margin/status, qty — read-only "via VendLive" in live mode, editable input **plus −10/−1/+1/+10 buttons** otherwise — and min/max config inputs; fresh-meal groups keep their expand/collapse with member flavours as indented cards.
-- **Inventory**: single-warehouse stock (category headers, qty/value, expiry chip, Edit, expandable batch detail), Missing Expiry (date input + Save inline), Items Requiring Attention, and All Batches with **full inline editing** (qty/expiry/damage/save/cancel/delete) in card form.
-- **History**: removal/restock cards with full item lists always visible.
-- **Users**: cards with the two-tap delete confirm and the masked inline password-reset form working in card layout.
-- **Sales Overview → Transactions**: product/amount/time/badge cards.
-- **Buying List detail**: per-line cards inside each supplier section with draft-mode qty/£ inputs, boxes, line totals and remove — the weekly buy is reviewable on a phone.
+A **"Needs attention"** rail now leads the Dashboard (everything else unchanged below): a priority-ordered list — red first — of exactly what needs doing, each row linking to the fix:
 
-Admin tables and low-traffic drill-downs (all-warehouses matrix, missing-cost, By Product/Daily sales) stay as tables with working horizontal scroll — deliberate: they're desktop-first surfaces.
+- red: VendLive sync stale (ranked first — stale sync taints every number below) · machines with sold-out items · expired warehouse batches (units to write off) · machine items expiring ≤2 days · warehouse batches expiring ≤7 days
+- amber: orders to receive (with partial-receipt detail) · draft pick lists due · packed list with shortfalls · machines running low · machine items expiring ≤7 days · VendLive housekeeping (quarantine/unmapped/errors)
 
-No handlers, state or data flow touched — wrapper divs and responsive visibility only.
+Top 6 with a "+N more" expander; emerald "All clear" when empty. Free items render instantly from in-memory data; three independent fail-silent fetches (health, machine expiry, pick lists) merge in — any failure just omits that group, never breaks the page.
+
+## 3. Orders desktop landing
+
+`/orders` no longer dumps you into Purchase Orders. Desktop gets the action landing: card grid (Plan Buy → planner auto-open, Receive with pending badge, Warehouse Stock, Buying Lists) + a **pending-orders snapshot** — top 5 by soonest expected delivery with supplier, line count, receive-progress chip and £ total, each row jumping straight to receiving. Tab strip unchanged; mobile hub untouched.
+
+## 4. Restock workflow — live status
+
+The 3-step cards now show state at a glance: step 1 carries the **route name**, step 2 shows the run's pick list as **Draft / Packed / Packed · N short** (scoped to the active list or selected route via the shared `usePickLists` hook), step 3 shows **Run complete**. A quick-actions row (Stock Check, Log a Restock) sits between the steps and Reporting.
 
 ## Verification
 
-- Production build clean.
-- Preview at 375×812: no horizontal page overflow on the swept pages; Transactions mobile cards + Shrinkage scroll wrappers live-verified in DOM; Location Stock renders with the (empty-state) card container active. Data-populated card layouts verified structurally — worth a 2-minute phone pass after deploy on Location Stock and Inventory with real data.
+- 1280px: rail leads Dashboard with stats identical below; `/orders` renders the landing (no redirect), tabs fine; `/restock` shows workflow + quick actions.
+- 375px regression: both mobile hubs render exactly as before; no page overflow.
+- API-down grace: rail renders (free items / all-clear), workflow badge simply absent, no unhandled rejections.
+- `npm run build` clean.
+
+Known cosmetic quirk (commented in code): the rail fetches health once while the sync-health panel below polls every 5 minutes — they can disagree briefly after a panel refresh.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)

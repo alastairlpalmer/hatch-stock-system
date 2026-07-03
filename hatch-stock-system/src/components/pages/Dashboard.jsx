@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { useStock } from '../../context/StockContext';
 import { vendliveService } from '../../services/vendlive.service';
 import { inventoryService } from '../../services/inventory.service';
+import NeedsAttention from './dashboard/NeedsAttention';
 
 function StatCard({ label, value, accent, to }) {
   const colors = {
@@ -327,6 +328,8 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-8">
+      <NeedsAttention />
+
       <div>
         <div className="text-xs uppercase tracking-wider text-zinc-500 mb-2">Operations</div>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
