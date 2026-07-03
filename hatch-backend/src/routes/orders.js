@@ -3,6 +3,7 @@ import { z } from 'zod';
 import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { batchInputFromReceivedItem, validateReceiptLines } from '../utils/receiving.js';
+import { FRESH_MEAL_PLACEHOLDER_CATEGORY } from '../utils/fresh-meal-placeholders.js';
 import { recomputeWarehouseStock } from '../utils/inventory-stock.js';
 import {
   buildOrderSuggestions,
@@ -326,6 +327,12 @@ export const receiveSchema = z.object({
     ),
     hasDamage: z.boolean().optional(),
     damageNotes: z.string().nullish(),
+    // Fresh-meal allocation: count these units against THIS order line (a
+    // meal-type placeholder) while booking the batch under `sku` (the actual
+    // flavour found in the box). `name` lets receiving auto-create a flavour
+    // product that isn't in the catalogue yet (new weekly menu).
+    forSku: z.string().min(1).nullish(),
+    name: z.string().nullish(),
   })).min(1),
   closeShort: z.boolean().optional(),
   receivedBy: z.string().nullish(),
@@ -336,7 +343,9 @@ router.post('/:id/receive', asyncHandler(async (req, res) => {
 
   const order = await prisma.order.findUnique({
     where: { id: req.params.id },
-    include: { items: true },
+    include: {
+      items: { include: { product: { select: { category: true, mealType: true } } } },
+    },
   });
 
   if (!order) {
@@ -346,14 +355,47 @@ router.post('/:id/receive', asyncHandler(async (req, res) => {
     return res.status(409).json({ error: `Order already ${order.status}` });
   }
 
-  // Received lines must be on the order and, summed per SKU, must not exceed
-  // what is still outstanding (ordered minus previously received).
+  // Received lines must be on the order and, summed per order line, must not
+  // exceed what is still outstanding (ordered minus previously received).
   const { sums, itemBySku, error } = validateReceiptLines(order.items, items);
   if (error) {
     return res.status(400).json({ error });
   }
 
+  // forSku allocation is ONLY valid against fresh-meal placeholder lines —
+  // arbitrary substitution on normal lines would corrupt goods-in truth.
+  for (const line of items) {
+    if (!line.forSku) continue;
+    const target = itemBySku.get(line.forSku);
+    if (target?.product?.category !== FRESH_MEAL_PLACEHOLDER_CATEGORY) {
+      return res.status(400).json({
+        error: `${line.forSku} is not a fresh-meal placeholder line — flavour allocation is not allowed against it`,
+      });
+    }
+  }
+
   const result = await prisma.$transaction(async (tx) => {
+    // Auto-create flavour products the catalogue hasn't seen yet (the weekly
+    // menu rotates, so brand-new flavours arriving is the normal case). They
+    // inherit the placeholder's meal type and join the fresh-meal group.
+    const allocationLines = items.filter((l) => l.forSku);
+    for (const line of allocationLines) {
+      const existing = await tx.product.findUnique({ where: { sku: line.sku } });
+      if (!existing) {
+        const placeholder = itemBySku.get(line.forSku);
+        await tx.product.create({
+          data: {
+            sku: line.sku,
+            name: line.name || line.sku,
+            category: 'Fresh Meals',
+            isFreshMeal: true,
+            mealType: placeholder?.product?.mealType ?? null,
+            mealTypeConfirmed: true,
+            unitsPerBox: 1,
+          },
+        });
+      }
+    }
     // Create one batch per line for expiry tracking (expiryDate null when not
     // provided — surfaced as "missing" by the expiry views, never blocks
     // receiving). Batches are authoritative: the warehouse aggregate is then
@@ -381,8 +423,10 @@ router.post('/:id/receive', asyncHandler(async (req, res) => {
       }
     }
 
-    // Recompute each affected aggregate once, however many lots came in
-    for (const sku of sums.keys()) {
+    // Recompute each affected aggregate once, however many lots came in.
+    // Batches are booked under the line's OWN sku (the actual product), which
+    // differs from the order-line sku for fresh-meal allocations.
+    for (const sku of new Set(items.map((l) => l.sku))) {
       await recomputeWarehouseStock(tx, warehouseId, sku);
     }
 

@@ -19,14 +19,21 @@ export function batchInputFromReceivedItem(item, warehouseId) {
 
 /**
  * Validate a receipt's lines against an order's items and aggregate them per
- * SKU. Lines may repeat a SKU (one line per expiry lot), so the check is on
- * the per-SKU SUM: it must not exceed what is still outstanding on the order
- * (ordered quantity minus what earlier receipts already booked in).
+ * ORDER-LINE sku. Lines may repeat a SKU (one line per expiry lot), so the
+ * check is on the per-line SUM: it must not exceed what is still outstanding
+ * on the order (ordered quantity minus what earlier receipts already booked
+ * in).
+ *
+ * A line may carry `forSku`: the units are counted against THAT order line
+ * while the batch is booked under the line's own (actual) sku. This is how
+ * fresh-meal placeholder lines (ordered at meal-type level because the Frive
+ * menu rotates weekly) get allocated to the real flavour SKUs found in the
+ * box at receiving time.
  *
  * Pure function (no DB) so partial-receiving rules are unit-testable.
- * Returns { sums, itemBySku, error } — sums is a Map of sku → total received
- * in this receipt, itemBySku maps sku → its OrderItem, error is a
- * human-readable message (null when the receipt is valid).
+ * Returns { sums, itemBySku, error } — sums is a Map of ORDER sku → total
+ * received against it in this receipt, itemBySku maps order sku → its
+ * OrderItem, error is a human-readable message (null when valid).
  */
 export function validateReceiptLines(orderItems, lines) {
   const itemBySku = new Map();
@@ -36,10 +43,14 @@ export function validateReceiptLines(orderItems, lines) {
 
   const sums = new Map();
   for (const line of lines) {
-    if (!itemBySku.has(line.sku)) {
-      return { sums, itemBySku, error: `SKU ${line.sku} is not on this order` };
+    const orderSku = line.forSku || line.sku;
+    if (!itemBySku.has(orderSku)) {
+      return { sums, itemBySku, error: `SKU ${orderSku} is not on this order` };
     }
-    sums.set(line.sku, (sums.get(line.sku) || 0) + line.quantity);
+    if (line.forSku && line.forSku === line.sku) {
+      return { sums, itemBySku, error: `forSku must name a different order line than ${line.sku}` };
+    }
+    sums.set(orderSku, (sums.get(orderSku) || 0) + line.quantity);
   }
 
   for (const [sku, sum] of sums) {

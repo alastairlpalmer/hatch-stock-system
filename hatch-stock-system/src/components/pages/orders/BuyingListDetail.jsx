@@ -606,6 +606,11 @@ export default function BuyingListDetail() {
                           <td className="px-4 py-2">
                             <span className="text-sm text-zinc-200">{item.name || item.sku}</span>
                             {item.sku && <span className="text-xs text-zinc-600 ml-2">{item.sku}</span>}
+                            {!item.sku && item.isFreshMeal && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-teal-500/15 text-teal-300 ml-2" title="Ordered at meal-type level — the weekly menu rotates; actual flavours are allocated at receiving">
+                                rotating menu
+                              </span>
+                            )}
                           </td>
                           <td className="px-2 py-2">
                             {isDraft ? (

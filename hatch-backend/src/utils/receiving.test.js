@@ -133,3 +133,67 @@ describe('validateReceiptLines', () => {
     expect(itemBySku.get('SKU-2').id).toBe('oi-2');
   });
 });
+
+describe('fresh-meal flavour allocation (forSku)', () => {
+  const placeholderItem = { id: 'oi-1', sku: 'FRIVE-MEAT', quantity: 40, receivedQty: 0 };
+
+  it('counts allocation lines against the placeholder order line', () => {
+    const { sums, error } = validateReceiptLines([placeholderItem], [
+      { sku: 'CHK-KATSU', quantity: 25, forSku: 'FRIVE-MEAT' },
+      { sku: 'BEEF-CHILLI', quantity: 15, forSku: 'FRIVE-MEAT' },
+    ]);
+    expect(error).toBeNull();
+    expect(sums.get('FRIVE-MEAT')).toBe(40);
+  });
+
+  it('rejects allocations that oversubscribe the placeholder line', () => {
+    const { error } = validateReceiptLines([placeholderItem], [
+      { sku: 'CHK-KATSU', quantity: 30, forSku: 'FRIVE-MEAT' },
+      { sku: 'BEEF-CHILLI', quantity: 15, forSku: 'FRIVE-MEAT' },
+    ]);
+    expect(error).toMatch(/exceeds outstanding/);
+  });
+
+  it('respects prior partial receipts on the placeholder line', () => {
+    const partly = { ...placeholderItem, receivedQty: 30 };
+    const { error } = validateReceiptLines([partly], [
+      { sku: 'CHK-KATSU', quantity: 11, forSku: 'FRIVE-MEAT' },
+    ]);
+    expect(error).toMatch(/exceeds outstanding/);
+  });
+
+  it('rejects forSku pointing at an order line that does not exist', () => {
+    const { error } = validateReceiptLines([placeholderItem], [
+      { sku: 'CHK-KATSU', quantity: 5, forSku: 'FRIVE-VEG' },
+    ]);
+    expect(error).toMatch(/not on this order/);
+  });
+
+  it('rejects a self-referencing forSku', () => {
+    const { error } = validateReceiptLines([placeholderItem], [
+      { sku: 'FRIVE-MEAT', quantity: 5, forSku: 'FRIVE-MEAT' },
+    ]);
+    expect(error).toMatch(/different order line/);
+  });
+
+  it('mixes plain lines and allocations in one receipt', () => {
+    const items = [placeholderItem, { id: 'oi-2', sku: 'COKE-330', quantity: 24, receivedQty: 0 }];
+    const { sums, error } = validateReceiptLines(items, [
+      { sku: 'COKE-330', quantity: 24 },
+      { sku: 'CHK-KATSU', quantity: 40, forSku: 'FRIVE-MEAT' },
+    ]);
+    expect(error).toBeNull();
+    expect(sums.get('COKE-330')).toBe(24);
+    expect(sums.get('FRIVE-MEAT')).toBe(40);
+  });
+
+  it('schema accepts forSku + name and batch input books under the actual sku', () => {
+    const parsed = receiveSchema.parse({
+      warehouseId: 'wh-1',
+      items: [{ sku: 'CHK-KATSU', quantity: 5, forSku: 'FRIVE-MEAT', name: 'Chicken Katsu', expiryDate: '2026-07-10' }],
+    });
+    expect(parsed.items[0].forSku).toBe('FRIVE-MEAT');
+    const batch = batchInputFromReceivedItem(parsed.items[0], 'wh-1');
+    expect(batch.sku).toBe('CHK-KATSU');
+  });
+});

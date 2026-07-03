@@ -2,6 +2,7 @@ import express from 'express';
 import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { guessFreshMeal } from '../services/meal-classifier.js';
+import { ensureFreshMealPlaceholders } from '../utils/fresh-meal-placeholders.js';
 
 const router = express.Router();
 
@@ -124,6 +125,21 @@ router.get('/fresh-meals', asyncHandler(async (req, res) => {
     },
   });
   res.json(products);
+}));
+
+// Ensure one ordering placeholder product exists per fresh-meal type and
+// return { [mealType]: sku }. Used when a buying list / direct PO carries
+// meal-type group lines (the rotating Frive menu means flavour SKUs can't be
+// named at order time). Must be declared BEFORE `/:sku`.
+router.post('/fresh-meal-placeholders', asyncHandler(async (req, res) => {
+  const mealTypes = Array.isArray(req.body?.mealTypes)
+    ? req.body.mealTypes.filter((m) => typeof m === 'string' && m.trim())
+    : [];
+  if (mealTypes.length === 0) {
+    return res.status(400).json({ error: 'mealTypes array required' });
+  }
+  const map = await ensureFreshMealPlaceholders(prisma, mealTypes);
+  res.json(map);
 }));
 
 // Get single product

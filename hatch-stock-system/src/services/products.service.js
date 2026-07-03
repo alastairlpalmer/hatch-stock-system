@@ -111,6 +111,17 @@ export const productsService = {
       throw err;
     }
   },
+
+  /**
+   * Ensure one ordering placeholder product exists per fresh-meal type
+   * (rotating menu — POs order "40 Meat meals", not specific flavours).
+   * @param {string[]} mealTypes
+   * @returns {Promise<Object>} { [mealType]: placeholderSku }
+   */
+  ensureFreshMealPlaceholders: async (mealTypes) => {
+    const response = await api.post('/products/fresh-meal-placeholders', { mealTypes });
+    return response.data;
+  },
 };
 
 export default productsService;
