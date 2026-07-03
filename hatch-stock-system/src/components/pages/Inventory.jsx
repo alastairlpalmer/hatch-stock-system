@@ -5,7 +5,16 @@ import vendliveService from '../../services/vendlive.service';
 
 export default function Inventory() {
   const { data, addProduct, updateProduct, bulkImportProducts, updateWarehouseStock, bulkUpdateWarehouseStock, createBatch, updateBatch, deleteBatch, transferWarehouseStock, refresh } = useStock();
-  const [selectedWarehouse, setSelectedWarehouse] = useState('all');
+  // Single-warehouse installs (the norm today) hide every warehouse selector,
+  // column and per-row warehouse label. Adding a second warehouse in the DB
+  // lights them all back up — nothing is hard-deleted.
+  const multiWarehouse = data.warehouses.length > 1;
+  const [selectedWarehouseState, setSelectedWarehouse] = useState('all');
+  // With exactly one warehouse the view is pinned to it so the richer
+  // per-warehouse table/cards render instead of the all-warehouses matrix.
+  const selectedWarehouse = multiWarehouse
+    ? selectedWarehouseState
+    : (data.warehouses[0]?.id || 'all');
   const [activeSubTab, setActiveSubTab] = useState('stock');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -326,7 +335,7 @@ export default function Inventory() {
                 <tr className="text-zinc-500">
                   <th className="text-left py-1 font-medium">Qty</th>
                   <th className="text-left py-1 font-medium">Expiry</th>
-                  {!warehouseId && <th className="text-left py-1 font-medium">Warehouse</th>}
+                  {!warehouseId && multiWarehouse && <th className="text-left py-1 font-medium">Warehouse</th>}
                   <th className="text-left py-1 font-medium">Received</th>
                   <th className="text-left py-1 font-medium">Condition</th>
                   <th className="text-right py-1 font-medium">Actions</th>
@@ -359,7 +368,7 @@ export default function Inventory() {
                           <span className={`px-2 py-0.5 rounded ${status?.color || ''}`}>{new Date(batch.expiryDate).toLocaleDateString('en-GB')}</span>
                         ) : <span className="text-amber-400">No expiry</span>}
                       </td>
-                      {!warehouseId && <td className="py-1.5 pr-3 text-zinc-400">{wh?.name || batch.warehouseId}</td>}
+                      {!warehouseId && multiWarehouse && <td className="py-1.5 pr-3 text-zinc-400">{wh?.name || batch.warehouseId}</td>}
                       <td className="py-1.5 pr-3 text-zinc-500">{new Date(batch.receivedAt).toLocaleDateString('en-GB')}</td>
                       <td className="py-1.5 pr-3">
                         {editing ? (
@@ -814,14 +823,16 @@ export default function Inventory() {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <h2 className="text-xl font-semibold">Warehouse Inventory</h2>
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:gap-3">
-          <select
-            value={selectedWarehouse}
-            onChange={e => setSelectedWarehouse(e.target.value)}
-            className="bg-zinc-800 border border-zinc-700 rounded px-3 py-2.5 text-sm focus:outline-none focus:border-emerald-500"
-          >
-            <option value="all">All Warehouses</option>
-            {data.warehouses.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
-          </select>
+          {multiWarehouse && (
+            <select
+              value={selectedWarehouse}
+              onChange={e => setSelectedWarehouse(e.target.value)}
+              className="bg-zinc-800 border border-zinc-700 rounded px-3 py-2.5 text-sm focus:outline-none focus:border-emerald-500"
+            >
+              <option value="all">All Warehouses</option>
+              {data.warehouses.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
+            </select>
+          )}
           <div className="flex gap-2">
             <button
               onClick={openAddStock}
@@ -880,16 +891,18 @@ export default function Inventory() {
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs text-zinc-500 mb-1">Warehouse *</label>
-              <select
-                value={addStockForm.warehouseId}
-                onChange={e => setAddStockForm({ ...addStockForm, warehouseId: e.target.value })}
-                className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm"
-              >
-                {data.warehouses.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
-              </select>
-            </div>
+            {multiWarehouse && (
+              <div>
+                <label className="block text-xs text-zinc-500 mb-1">Warehouse *</label>
+                <select
+                  value={addStockForm.warehouseId}
+                  onChange={e => setAddStockForm({ ...addStockForm, warehouseId: e.target.value })}
+                  className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm"
+                >
+                  {data.warehouses.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
+                </select>
+              </div>
+            )}
             <div>
               <label className="block text-xs text-zinc-500 mb-1">Product *</label>
               <select
@@ -1168,10 +1181,12 @@ export default function Inventory() {
               <span className="text-zinc-500">Product:</span>{' '}
               <span className="text-zinc-200">{data.products.find(p => p.sku === editingStock.sku)?.name || editingStock.sku}</span>
             </p>
-            <p className="text-zinc-400 text-sm mt-1">
-              <span className="text-zinc-500">Warehouse:</span>{' '}
-              <span className="text-zinc-200">{data.warehouses.find(w => w.id === editingStock.warehouseId)?.name}</span>
-            </p>
+            {multiWarehouse && (
+              <p className="text-zinc-400 text-sm mt-1">
+                <span className="text-zinc-500">Warehouse:</span>{' '}
+                <span className="text-zinc-200">{data.warehouses.find(w => w.id === editingStock.warehouseId)?.name}</span>
+              </p>
+            )}
             <p className="text-zinc-400 text-sm mt-1">
               <span className="text-zinc-500">Current Stock:</span>{' '}
               <span className="text-emerald-400 font-medium">{editingStock.currentQty}</span>
@@ -1221,12 +1236,14 @@ export default function Inventory() {
           <div className="flex items-center justify-between">
             <div>
               <h3 className="font-medium text-zinc-200">CSV Stock Import</h3>
-              <p className="text-zinc-500 text-sm mt-1">
-                {selectedWarehouse !== 'all'
-                  ? `Importing to: ${data.warehouses.find(w => w.id === selectedWarehouse)?.name}`
-                  : `Importing to: ${data.warehouses[0]?.name || 'Default Warehouse'}`
-                }
-              </p>
+              {multiWarehouse && (
+                <p className="text-zinc-500 text-sm mt-1">
+                  {selectedWarehouse !== 'all'
+                    ? `Importing to: ${data.warehouses.find(w => w.id === selectedWarehouse)?.name}`
+                    : `Importing to: ${data.warehouses[0]?.name || 'Default Warehouse'}`
+                  }
+                </p>
+              )}
             </div>
             <button onClick={() => { setShowCsvUpload(false); setCsvReviewMode(false); setCsvItems([]); }} className="text-zinc-500 hover:text-zinc-300 text-xl">x</button>
           </div>
@@ -1440,7 +1457,7 @@ export default function Inventory() {
               <div className="text-xs text-zinc-500 mt-1">Units in stock</div>
               <div className="text-xs text-zinc-600 mt-1">
                 {stockSummary.products.toLocaleString('en-GB')} product{stockSummary.products === 1 ? '' : 's'}
-                {selectedWarehouse !== 'all' && ` · ${data.warehouses.find(w => w.id === selectedWarehouse)?.name || ''}`}
+                {multiWarehouse && selectedWarehouse !== 'all' && ` · ${data.warehouses.find(w => w.id === selectedWarehouse)?.name || ''}`}
               </div>
             </div>
             <div className="bg-emerald-900/20 border border-emerald-900/50 rounded-lg p-4">
@@ -1691,10 +1708,7 @@ export default function Inventory() {
                             return (
                               <div key={sku} className="border-b border-zinc-800/50 px-4 py-3 space-y-2">
                                 <div className="flex items-start justify-between gap-3">
-                                  <div className="min-w-0">
-                                    <p className="text-zinc-200 text-sm">{product?.name || '-'}</p>
-                                    <p className="text-zinc-500 text-xs">{sku}</p>
-                                  </div>
+                                  <p className="min-w-0 text-zinc-200 text-sm">{product?.name || '-'}</p>
                                   <div className="text-right shrink-0">
                                     <p className="text-emerald-400 font-bold text-lg leading-tight">{qty}</p>
                                     <p className="text-zinc-500 text-xs">£{value.toFixed(2)}</p>
@@ -1913,7 +1927,6 @@ export default function Inventory() {
                               {product?.name || batch.sku}
                               <span className="text-xs bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded">No expiry</span>
                             </div>
-                            <div className="text-zinc-600 text-xs">{batch.sku}</div>
                           </div>
                           <div className="text-right shrink-0">
                             <p className="text-zinc-300 font-bold text-lg leading-tight">{batch.remainingQty}</p>
@@ -1921,7 +1934,7 @@ export default function Inventory() {
                           </div>
                         </div>
                         <div className="text-xs text-zinc-500">
-                          {warehouse?.name || batch.warehouseId} · received {new Date(batch.receivedAt).toLocaleDateString('en-GB')}
+                          {multiWarehouse && `${warehouse?.name || batch.warehouseId} · `}Received {new Date(batch.receivedAt).toLocaleDateString('en-GB')}
                         </div>
                         <div className="flex items-center gap-2">
                           <input
@@ -1948,7 +1961,7 @@ export default function Inventory() {
                 <thead>
                   <tr className="border-b border-zinc-800">
                     <th className="text-left px-4 py-3 text-zinc-500 font-medium">Product</th>
-                    <th className="text-left px-4 py-3 text-zinc-500 font-medium">Warehouse</th>
+                    {multiWarehouse && <th className="text-left px-4 py-3 text-zinc-500 font-medium">Warehouse</th>}
                     <th className="text-right px-4 py-3 text-zinc-500 font-medium">Qty</th>
                     <th className="text-center px-4 py-3 text-zinc-500 font-medium">Received</th>
                     <th className="text-center px-4 py-3 text-zinc-500 font-medium">Set Expiry</th>
@@ -1969,7 +1982,7 @@ export default function Inventory() {
                             </div>
                             <div className="text-zinc-600 text-xs">{batch.sku}</div>
                           </td>
-                          <td className="px-4 py-3 text-zinc-400">{warehouse?.name || batch.warehouseId}</td>
+                          {multiWarehouse && <td className="px-4 py-3 text-zinc-400">{warehouse?.name || batch.warehouseId}</td>}
                           <td className="text-right px-4 py-3 text-zinc-300">{batch.remainingQty}</td>
                           <td className="text-center px-4 py-3 text-zinc-500 text-xs">
                             {new Date(batch.receivedAt).toLocaleDateString('en-GB')}
@@ -2024,16 +2037,13 @@ export default function Inventory() {
                   return (
                     <div key={batch.id} className="border-b border-zinc-800/50 px-4 py-3 space-y-2">
                       <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="text-zinc-200 text-sm">{product?.name || batch.sku}</div>
-                          <div className="text-zinc-600 text-xs">{batch.sku}</div>
-                        </div>
+                        <div className="min-w-0 text-zinc-200 text-sm">{product?.name || batch.sku}</div>
                         <div className="text-right shrink-0">
                           <p className="text-zinc-300 font-bold text-lg leading-tight">{batch.remainingQty}</p>
                           <p className="text-zinc-500 text-xs">units</p>
                         </div>
                       </div>
-                      <div className="text-xs text-zinc-500">{warehouse?.name || batch.warehouseId}</div>
+                      {multiWarehouse && <div className="text-xs text-zinc-500">{warehouse?.name || batch.warehouseId}</div>}
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className={`text-xs px-2 py-0.5 rounded ${expiryStatus?.color || ''}`}>
                           {new Date(batch.expiryDate).toLocaleDateString('en-GB')}
@@ -2053,7 +2063,7 @@ export default function Inventory() {
               <thead>
                 <tr className="border-b border-zinc-800">
                   <th className="text-left px-4 py-3 text-zinc-500 font-medium">Product</th>
-                  <th className="text-left px-4 py-3 text-zinc-500 font-medium">Warehouse</th>
+                  {multiWarehouse && <th className="text-left px-4 py-3 text-zinc-500 font-medium">Warehouse</th>}
                   <th className="text-right px-4 py-3 text-zinc-500 font-medium">Qty</th>
                   <th className="text-center px-4 py-3 text-zinc-500 font-medium">Expiry Date</th>
                   <th className="text-center px-4 py-3 text-zinc-500 font-medium">Status</th>
@@ -2076,7 +2086,7 @@ export default function Inventory() {
                           <div className="text-zinc-200">{product?.name || batch.sku}</div>
                           <div className="text-zinc-600 text-xs">{batch.sku}</div>
                         </td>
-                        <td className="px-4 py-3 text-zinc-400">{warehouse?.name || batch.warehouseId}</td>
+                        {multiWarehouse && <td className="px-4 py-3 text-zinc-400">{warehouse?.name || batch.warehouseId}</td>}
                         <td className="text-right px-4 py-3 text-zinc-300">{batch.remainingQty}</td>
                         <td className="text-center px-4 py-3">
                           <span className={`text-xs px-2 py-0.5 rounded ${expiryStatus?.color || ''}`}>
@@ -2096,7 +2106,7 @@ export default function Inventory() {
                   return status && (status.status === 'expired' || status.status === 'critical' || status.status === 'warning');
                 }).length === 0 && (
                   <tr>
-                    <td colSpan={5} className="px-4 py-8 text-center text-zinc-600">
+                    <td colSpan={multiWarehouse ? 5 : 4} className="px-4 py-8 text-center text-zinc-600">
                       No items expiring soon
                     </td>
                   </tr>
@@ -2142,7 +2152,7 @@ export default function Inventory() {
                   <div className="bg-zinc-800/60 px-4 py-2">
                     <span className="text-emerald-400 font-medium text-xs">{group.name}</span>
                     <span className="text-zinc-500 text-xs ml-3">
-                      {group.sku} · {group.batches.length} batch{group.batches.length === 1 ? '' : 'es'} · {group.batches.reduce((acc, b) => acc + b.remainingQty, 0)} units
+                      {group.batches.length} batch{group.batches.length === 1 ? '' : 'es'} · {group.batches.reduce((acc, b) => acc + b.remainingQty, 0)} units
                     </span>
                   </div>
                   {group.batches.map(batch => {
@@ -2153,8 +2163,7 @@ export default function Inventory() {
                       <div key={batch.id} className="border-b border-zinc-800/50 px-4 py-3 space-y-2">
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
-                            <p className="text-zinc-600 text-xs">{batch.sku}</p>
-                            <p className="text-zinc-400 text-xs">{warehouse?.name || batch.warehouseId}</p>
+                            {multiWarehouse && <p className="text-zinc-400 text-xs">{warehouse?.name || batch.warehouseId}</p>}
                             <p className="text-zinc-500 text-xs">Received {new Date(batch.receivedAt).toLocaleDateString('en-GB')}</p>
                           </div>
                           <div className="text-right shrink-0">
@@ -2241,7 +2250,7 @@ export default function Inventory() {
             <thead>
               <tr className="border-b border-zinc-800">
                 <th className="text-left px-4 py-3 text-zinc-500 font-medium">Product</th>
-                <th className="text-left px-4 py-3 text-zinc-500 font-medium">Warehouse</th>
+                {multiWarehouse && <th className="text-left px-4 py-3 text-zinc-500 font-medium">Warehouse</th>}
                 <th className="text-right px-4 py-3 text-zinc-500 font-medium">Qty</th>
                 <th className="text-center px-4 py-3 text-zinc-500 font-medium">Expiry</th>
                 <th className="text-center px-4 py-3 text-zinc-500 font-medium">Received</th>
@@ -2255,7 +2264,7 @@ export default function Inventory() {
                 if (batches.length === 0) {
                   return (
                     <tr>
-                      <td colSpan={7} className="px-4 py-8 text-center text-zinc-600">No batch records</td>
+                      <td colSpan={multiWarehouse ? 7 : 6} className="px-4 py-8 text-center text-zinc-600">No batch records</td>
                     </tr>
                   );
                 }
@@ -2278,7 +2287,7 @@ export default function Inventory() {
                 return groups.map(group => (
                   <React.Fragment key={group.sku}>
                     <tr className="bg-zinc-800/60">
-                      <td colSpan={7} className="px-4 py-2">
+                      <td colSpan={multiWarehouse ? 7 : 6} className="px-4 py-2">
                         <span className="text-emerald-400 font-medium text-xs">{group.name}</span>
                         <span className="text-zinc-500 text-xs ml-3">
                           {group.sku} · {group.batches.length} batch{group.batches.length === 1 ? '' : 'es'} · {group.batches.reduce((acc, b) => acc + b.remainingQty, 0)} units
@@ -2292,7 +2301,7 @@ export default function Inventory() {
                       return (
                         <tr key={batch.id} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
                           <td className="px-4 py-3 text-zinc-600 text-xs">{batch.sku}</td>
-                          <td className="px-4 py-3 text-zinc-400">{warehouse?.name || batch.warehouseId}</td>
+                          {multiWarehouse && <td className="px-4 py-3 text-zinc-400">{warehouse?.name || batch.warehouseId}</td>}
                           <td className="text-right px-4 py-3 text-zinc-300">
                             {editing ? (
                               <input
