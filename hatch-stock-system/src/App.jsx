@@ -29,6 +29,7 @@ import Account from './components/pages/Account';
 import MobileHome from './components/pages/mobile/MobileHome';
 import MorePage from './components/pages/mobile/MorePage';
 import RestockHub from './components/pages/restock/RestockHub';
+import OrdersHub from './components/pages/orders/OrdersHub';
 
 // Parent layouts
 import OrdersLayout from './components/pages/orders/OrdersLayout';
@@ -93,6 +94,13 @@ function App() {
 function RestockIndex() {
   const isMobile = useIsMobile();
   return isMobile ? <RestockHub /> : <RestockWorkflow />;
+}
+
+// Same pattern for /orders: action hub on phones, the old redirect to
+// Purchase Orders on desktop.
+function OrdersIndex() {
+  const isMobile = useIsMobile();
+  return isMobile ? <OrdersHub /> : <Navigate to="purchase" replace />;
 }
 
 function AppLayout() {
@@ -166,7 +174,7 @@ function AppLayout() {
               <Route path="/locations" element={<LocationStock />} />
 
               <Route path="/orders" element={<OrdersLayout />}>
-                <Route index element={<Navigate to="purchase" replace />} />
+                <Route index element={<OrdersIndex />} />
                 <Route path="warehouse" element={<Inventory />} />
                 <Route path="purchase" element={<Orders />} />
                 <Route path="buying-lists" element={<BuyingLists />} />

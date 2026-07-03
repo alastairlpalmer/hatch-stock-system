@@ -1,25 +1,27 @@
-# Mobile bottom navigation + phone-first reorganisation
+# Orders action hub (mobile) + pick lists live only under Restock
 
-A 4-tab bottom bar on phones — **Locations / Orders / Restock / Other** — with the desktop experience untouched (sidebar, all pages, all routes exactly as before). Frontend-only: no migration, no backend change.
+Replicates the Restock action-hub pattern in the Orders area, per feedback on #37.
 
-## The four tabs
+## Orders hub
 
-- **Locations → `/home` (new composite page)**: headline sales stats (This week / This month toggle, reusing the analytics dashboard's numbers), one card per machine (units / capacity, red "out" + amber "low" counts, "expiring soon" chips), and a recent-transactions digest with "Open full sales →". Each section loads and fails independently — if the analytics API is down, machines and sales digest still render.
-- **Orders**: the existing area (Purchase Orders, Buying Lists, Receive, Warehouse) plus a new **Pick Lists** tab cross-linking to the pick-list pages.
-- **Restock**: a new action hub on mobile — four big tap targets: **Today's Run, Stock Check, Pick Lists, Log a Restock**, plus a current-run pill. Desktop `/restock` still shows the 3-step workflow (same URL, conditional render).
-- **Other → `/more`**: role-gated menu of everything else (Dashboard, Full Sales, Location Stock, Docs, History, Shrinkage, Remove Stock, Select Route, Account/Settings/Users per role) with an identity + sign-out + sync footer.
+On phones, the Orders bottom tab now opens an action hub with three big tap targets (desktop `/orders` still redirects to Purchase Orders as before):
 
-## Architecture notes
+- **Warehouse Stock** → stock on hand, expiry batches, transfers
+- **Plan Buy** → lands with the weekly-buy planner already open (`?generate=1`)
+- **Receive Order** → pending + completed orders and check-in; shows an amber **"N pending"** badge when deliveries are waiting
 
-- The bar is rendered **in normal flow** below the scroll container, not `position:fixed` — so the pages' existing `sticky bottom-0` action bars ("Mark packed", stock-check save) stack above it with zero z-index or offset changes, and content can never be clipped behind it. Verified geometrically in preview (nav bottom = viewport bottom; main ends exactly at nav top).
-- The mobile hamburger/drawer is removed — the Other tab supersedes it (its unique features — identity, logout, sync state — moved to `/more`). Desktop sidebar untouched.
-- iOS support: `h-[100dvh]` (collapsing Safari toolbar), `viewport-fit=cover` + `env(safe-area-inset-bottom)` (home-indicator padding in PWA mode).
-- Active-tab matrix: Restock and Orders own their URL areas; Locations lights for `/home`, `/locations`, `/sales`; Other is the fallback bucket.
+Plus a quiet "Buying lists →" link underneath (part of the buy flow, not one of the three key jobs).
+
+## Pick lists → Restock only
+
+The Pick Lists cross-link tab added to the Orders strip in #37 is removed — pick-list generation now lives solely in the Restock area (Restock hub card + tab strip), where the job belongs.
+
+Frontend-only; no migration, no backend change.
 
 ## Verification
 
-- Preview at 375×812: bar renders with 4 tabs, hamburger gone, `/home` sections render/fail independently, `/restock` shows the hub, `/more` gating correct with auth off, Orders shows the 5th Pick Lists tab, active states match the matrix, nav hugs the viewport bottom with `<main>` ending exactly above it.
-- Desktop 1280×800: bar absent, sidebar intact, `/restock` shows the 3-step workflow.
+- Preview 375×812: `/orders` renders the hub (3 cards + buying-lists link), Pick Lists tab absent from the strip, Plan Buy card lands on the planner already open.
+- Desktop 1280×800: `/orders` redirects to Purchase Orders exactly as before; 4-tab strip unchanged.
 - `npm run build` clean.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)

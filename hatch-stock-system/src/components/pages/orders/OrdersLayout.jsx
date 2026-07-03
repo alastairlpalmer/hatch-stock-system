@@ -6,10 +6,6 @@ const tabs = [
   { to: 'buying-lists', label: 'Buying Lists' },
   { to: 'receive', label: 'Receive' },
   { to: 'warehouse', label: 'Warehouse' },
-  // Cross-link, not a nested route: the pick-list pages navigate with
-  // absolute /restock/... paths throughout, so they live in the Restock area
-  // — this tab is the Orders-side shortcut ("unit list") to them.
-  { to: '/restock/picklists', label: 'Pick Lists' },
 ];
 
 export default function OrdersLayout() {
