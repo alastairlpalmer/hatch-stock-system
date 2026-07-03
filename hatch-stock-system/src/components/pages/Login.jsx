@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
+import { authService } from '../../services/auth.service';
 
 export default function Login() {
   const navigate = useNavigate();
@@ -11,6 +12,19 @@ export default function Login() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
+  // First-time setup is only offered while the server has NO users at all —
+  // afterwards the toggle disappears (new logins are created by the admin in
+  // Support → Users). Defaults to false so the dead-end never shows while the
+  // status is loading or unreachable.
+  const [needsBootstrap, setNeedsBootstrap] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    authService.getSetupStatus()
+      .then(s => { if (!cancelled) setNeedsBootstrap(!!s.needsBootstrap); })
+      .catch(() => { /* unreachable server: keep the plain login form */ });
+    return () => { cancelled = true; };
+  }, []);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -147,15 +161,17 @@ export default function Login() {
             </button>
           </form>
 
-          <button
-            type="button"
-            onClick={toggleMode}
-            className="w-full text-center text-sm text-zinc-500 hover:text-zinc-300 transition-colors"
-          >
-            {mode === 'login'
-              ? 'First-time setup? Create admin account'
-              : 'Already have an account? Sign in'}
-          </button>
+          {(needsBootstrap || mode === 'register') && (
+            <button
+              type="button"
+              onClick={toggleMode}
+              className="w-full text-center text-sm text-zinc-500 hover:text-zinc-300 transition-colors"
+            >
+              {mode === 'login'
+                ? 'First-time setup? Create admin account'
+                : 'Already have an account? Sign in'}
+            </button>
+          )}
         </div>
       </div>
     </div>

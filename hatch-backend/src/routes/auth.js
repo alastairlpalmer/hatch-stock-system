@@ -97,6 +97,39 @@ router.get('/me', authMiddleware, asyncHandler(async (req, res) => {
   res.json(req.user);
 }));
 
+// Public setup status — drives the login page: the "create admin account"
+// bootstrap form is only offered while no user exists. Deliberately exposes
+// nothing beyond a boolean and whether auth is enforced.
+router.get('/setup-status', asyncHandler(async (req, res) => {
+  const userCount = await prisma.user.count();
+  res.json({
+    needsBootstrap: userCount === 0,
+    authEnabled: process.env.AUTH_ENABLED === 'true',
+  });
+}));
+
+// Change your OWN password (any authenticated user — restockers included).
+// Requires the current password so a stolen unlocked phone can't silently
+// take over the account.
+export const changeOwnPasswordSchema = z.object({
+  currentPassword: z.string().min(1),
+  newPassword: z.string().min(8, 'Password must be at least 8 characters'),
+});
+
+router.post('/me/password', authMiddleware, asyncHandler(async (req, res) => {
+  const { currentPassword, newPassword } = changeOwnPasswordSchema.parse(req.body);
+
+  const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+  if (!user) return res.status(401).json({ error: 'User not found' });
+
+  const valid = await bcrypt.compare(currentPassword, user.password);
+  if (!valid) return res.status(403).json({ error: 'Current password is incorrect' });
+
+  const hashedPassword = await bcrypt.hash(newPassword, 10);
+  await prisma.user.update({ where: { id: user.id }, data: { password: hashedPassword } });
+  res.json({ success: true });
+}));
+
 // ============ ADMIN USER MANAGEMENT ============
 // All routes below require an authenticated admin. The real enforcement lives
 // here (the frontend only hides the UI). When AUTH_ENABLED is off, authMiddleware

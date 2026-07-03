@@ -2,21 +2,22 @@ import React from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { useAuth } from '../../../context/AuthContext';
 
-const baseTabs = [
-  { to: 'docs', label: 'Restocking Docs' },
-  { to: 'settings', label: 'Settings' },
-  { to: 'history', label: 'History' },
-];
+const AUTH_ENABLED = import.meta.env.VITE_AUTH_ENABLED === 'true';
 
 export default function SupportLayout() {
   const { isAdmin } = useAuth();
-  const authEnabled = import.meta.env.VITE_AUTH_ENABLED === 'true';
 
-  // The Users tab is admin-only; with auth disabled it stays hidden since
-  // user management is only meaningful once auth is on.
-  const tabs = authEnabled && isAdmin
-    ? [...baseTabs, { to: 'users', label: 'Users' }]
-    : baseTabs;
+  // Settings (the Admin page) is admin-only once auth is on — the server
+  // enforces the same rule; hiding the tab just avoids a dead end. The Users
+  // and Account tabs only appear with auth enabled (they're meaningless
+  // without logins).
+  const tabs = [
+    { to: 'docs', label: 'Restocking Docs' },
+    ...(!AUTH_ENABLED || isAdmin ? [{ to: 'settings', label: 'Settings' }] : []),
+    { to: 'history', label: 'History' },
+    ...(AUTH_ENABLED ? [{ to: 'account', label: 'Account' }] : []),
+    ...(AUTH_ENABLED && isAdmin ? [{ to: 'users', label: 'Users' }] : []),
+  ];
 
   return (
     <div className="space-y-6">

@@ -30,7 +30,7 @@ import authRouter from './routes/auth.js';
 
 // Import middleware
 import { errorHandler } from './middleware/errorHandler.js';
-import { authMiddleware } from './middleware/auth.js';
+import { authMiddleware, rolePolicy } from './middleware/auth.js';
 
 // Import scheduler
 import { startScheduler } from './scheduler.js';
@@ -110,13 +110,25 @@ if (process.env.NODE_ENV !== 'production') {
 // admin-only afterwards), the webhook, which authenticates via HMAC, and the
 // public buying-list share view, where the unguessable share token IS the
 // credential.
-const PUBLIC_API_PATHS = ['/api/auth/login', '/api/auth/register'];
+const PUBLIC_API_PATHS = ['/api/auth/login', '/api/auth/register', '/api/auth/setup-status'];
 app.use((req, res, next) => {
   if (!req.path.startsWith('/api')) return next();
   if (PUBLIC_API_PATHS.includes(req.path)) return next();
   if (req.path.startsWith('/api/vendlive/webhook/')) return next();
   if (req.path.startsWith('/api/public/buying-lists/')) return next();
   return authMiddleware(req, res, next);
+});
+
+// Role enforcement — reads for everyone, writes admin-only except the
+// operational allowlist (stock checks, restocks, removals, pick lists,
+// receiving, location stock sync). No-op while AUTH_ENABLED is off; see
+// middleware/auth.js for the policy table.
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api')) return next();
+  if (PUBLIC_API_PATHS.includes(req.path)) return next();
+  if (req.path.startsWith('/api/vendlive/webhook/')) return next();
+  if (req.path.startsWith('/api/public/buying-lists/')) return next();
+  return rolePolicy(req, res, next);
 });
 
 // ============ ROUTES ============
