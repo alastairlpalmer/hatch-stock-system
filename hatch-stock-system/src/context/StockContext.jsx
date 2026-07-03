@@ -1,8 +1,8 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
-import { 
-  productsService, 
-  inventoryService, 
-  ordersService, 
+import {
+  productsService,
+  inventoryService,
+  ordersService,
   locationsService,
   warehousesService,
   suppliersService,
@@ -10,6 +10,9 @@ import {
   salesService,
   mealTypesService
 } from '../services';
+import { useAuth } from './AuthContext';
+
+const AUTH_ENABLED = import.meta.env.VITE_AUTH_ENABLED === 'true';
 
 // Initial state structure
 const INITIAL_STATE = {
@@ -40,19 +43,34 @@ const StockContext = createContext(null);
  * Manages application state and provides API integration
  */
 export function StockProvider({ children }) {
+  const { isAuthenticated } = useAuth();
   const [data, setData] = useState(INITIAL_STATE);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [syncStatus, setSyncStatus] = useState({ status: 'idle', lastSaved: null });
-  
+
   // Determine if we're in offline/demo mode (no backend)
   const [isOfflineMode, setIsOfflineMode] = useState(false);
 
   // ========== INITIALIZATION ==========
 
+  // With auth ON, the provider mounts on the LOGIN page — firing the initial
+  // load there would 401 twelve times and strand the app in offline/cached
+  // mode after sign-in (nothing re-fetched). So: don't load until there's a
+  // session, and re-load whenever sign-in completes.
   useEffect(() => {
+    if (AUTH_ENABLED && !isAuthenticated) {
+      // Signed out: clear in-memory data (restocker phones can be shared)
+      // and skip loading until a session exists.
+      setData(INITIAL_STATE);
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    setError(null);
     initializeData();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthenticated]);
 
   const initializeData = async () => {
     try {

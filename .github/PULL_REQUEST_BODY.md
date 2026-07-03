@@ -1,16 +1,20 @@
-# Case-insensitive login emails
+# Fix: app stuck in "server not connected" after signing in
 
-`Alastair@x.com` and `alastair@x.com` were two different accounts — emails were stored as typed and matched exactly (Postgres text equality is case-sensitive). Now every entry point normalises to lowercase: **register**, **login**, and **admin user creation** — so case (and stray spaces) no longer matter when signing in.
+With auth enabled, the app loaded all its data **once, on first mount — which is now the login page, before any token exists**. All twelve startup requests got 401, the app dropped into offline/cached mode ("Could not reach the server — showing locally cached data"), and after signing in nothing ever re-fetched — so the app looked disconnected even though the backend was healthy (verified: `/health`, `/health/db`, and authenticated endpoints all fine in production).
 
-## ⚠️ Deploy steps (order matters)
+## Fix
 
-1. **Run `hatch-backend/manual-sql/016_lowercase_emails.sql` in the Supabase SQL editor first** — lowercases the accounts already created. (If two accounts differ only by case, it fails loudly on the unique constraint — delete the duplicate in Support → Users, re-run.)
-2. Deploy backend (Railway). Frontend unchanged.
+The initial data load now waits for a session and re-runs the moment sign-in completes:
 
-After deploy, everyone signs in with their email in any casing. Passwords remain case-sensitive (as they should be).
+- Auth on + signed out → no doomed requests; in-memory data is also cleared (restocker phones can be shared — the previous user's cached view must not flash at the next person).
+- Auth on + signed in (or the flip at login) → full data load, loading screen, live data.
+- **Auth off → identical to before** (loads on mount), so local dev and the `AUTH_ENABLED=false` escape hatch behave exactly as they always did.
+
+Frontend only — no migration, no backend change. Deploy: merge → Vercel redeploys.
 
 ## Verification
 
-- Backend: 241/241 vitest tests green (2 new: schema lowercasing, normaliser trim/lowercase/null tolerance)
+- Production build clean; flags-off behaviour verified unchanged in preview.
+- After deploy: sign out, sign back in — dashboard should populate immediately without a manual refresh.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
