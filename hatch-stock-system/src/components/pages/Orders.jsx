@@ -27,6 +27,104 @@ function formatDay(iso) {
   return Number.isNaN(d.getTime()) ? iso : format(d, 'd MMM');
 }
 
+// VendLive's own restock predictions, per selected location — an informational
+// side-by-side sanity check on the engine's numbers, never merged into the
+// suggestion lines. Fetched on demand per location and cached for the panel's
+// lifetime.
+function PredictionsPanel({ selectedLocationIds, locations }) {
+  const [open, setOpen] = useState(false);
+  // { [locationId]: { loading, error, machines } }
+  const [byLocation, setByLocation] = useState({});
+
+  const compare = async (locationId) => {
+    setByLocation(prev => ({ ...prev, [locationId]: { loading: true } }));
+    try {
+      const res = await vendliveService.getPredictions(locationId);
+      setByLocation(prev => ({ ...prev, [locationId]: { machines: res.machines || [] } }));
+    } catch (err) {
+      const status = err.response?.status;
+      const message = status === 404 ? 'No machines mapped to this location'
+        : status === 409 ? 'VendLive not configured — see Support → Settings'
+        : status === 502 ? 'VendLive unreachable — try again later'
+        : err.response?.data?.error || 'Failed to load predictions';
+      setByLocation(prev => ({ ...prev, [locationId]: { error: message } }));
+    }
+  };
+
+  const selected = selectedLocationIds
+    .map(id => locations.find(l => l.id === id))
+    .filter(Boolean);
+  if (selected.length === 0) return null;
+
+  return (
+    <div className="bg-zinc-800/40 border border-zinc-700 rounded-lg">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center justify-between px-3 py-2 text-left"
+      >
+        <span className="text-xs font-medium text-zinc-300">VendLive predictions (cross-check)</span>
+        {open ? <ChevronDown size={14} className="text-zinc-500" /> : <ChevronRight size={14} className="text-zinc-500" />}
+      </button>
+      {open && (
+        <div className="px-3 pb-3 space-y-3">
+          <p className="text-[11px] text-zinc-600">
+            VendLive's own restock suggestions per machine — a second opinion on the plan above, not merged into it.
+          </p>
+          {selected.map(loc => {
+            const state = byLocation[loc.id];
+            return (
+              <div key={loc.id} className="border border-zinc-700/60 rounded-lg p-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs text-zinc-300">{loc.name}</span>
+                  {!state?.machines && (
+                    <button
+                      onClick={() => compare(loc.id)}
+                      disabled={state?.loading}
+                      className="px-2 py-1 text-[11px] bg-zinc-700 text-zinc-200 rounded hover:bg-zinc-600 disabled:opacity-50"
+                    >
+                      {state?.loading ? 'Loading…' : 'Compare'}
+                    </button>
+                  )}
+                </div>
+                {state?.error && <p className="mt-1.5 text-[11px] text-amber-400">{state.error}</p>}
+                {state?.machines && (
+                  state.machines.length === 0 ? (
+                    <p className="mt-1.5 text-[11px] text-zinc-500">No prediction data returned.</p>
+                  ) : (
+                    state.machines.map(m => (
+                      <div key={m.machineId} className="mt-2">
+                        <p className="text-[11px] text-zinc-500 mb-1">{m.machineName}</p>
+                        <table className="w-full text-[11px]">
+                          <thead>
+                            <tr className="text-zinc-600">
+                              <th className="text-left font-medium pb-0.5">Product</th>
+                              <th className="text-right font-medium pb-0.5">Current</th>
+                              <th className="text-right font-medium pb-0.5">Predicted need</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {(m.products || []).filter(p => p.predicted != null || p.currentStock != null).map((p, i) => (
+                              <tr key={`${p.sku || p.name}-${i}`} className="text-zinc-400 border-t border-zinc-800">
+                                <td className="py-0.5 pr-2 truncate max-w-[180px]">{p.name}</td>
+                                <td className="py-0.5 text-right">{p.currentStock ?? '—'}</td>
+                                <td className="py-0.5 text-right">{p.predicted ?? '—'}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ))
+                  )
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function OrderCard({ order, data, onEdit, onDelete }) {
   const [expanded, setExpanded] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -1014,6 +1112,9 @@ export default function Orders() {
             </div>
           </div>
 
+          {/* VendLive prediction cross-check */}
+          <PredictionsPanel selectedLocationIds={selectedLocationIds} locations={data.locations} />
+
           {/* Summary stats */}
           <div className="grid grid-cols-4 gap-4">
             <div className="bg-zinc-800/50 rounded-lg p-3 text-center">
@@ -1072,14 +1173,35 @@ export default function Orders() {
                   {supplierGroups().map(group => {
                     const selectedInGroup = group.items.filter(i => i.selected && i.orderQty > 0);
                     const subtotal = selectedInGroup.reduce((a, i) => a + i.orderQty * i.unitPrice, 0);
+                    // Ordering config from shared supplier state: order-day
+                    // chips + minimum-order shortfall as quantities change.
+                    const supplier = group.supplierId
+                      ? data.suppliers.find(s => s.id === group.supplierId)
+                      : null;
+                    const orderDays = Array.isArray(supplier?.orderDays) && supplier.orderDays.length
+                      ? supplier.orderDays.map(d => ({ mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' }[d] || d)).join(' · ')
+                      : null;
+                    const minShort = supplier?.minOrderValue != null && subtotal < supplier.minOrderValue
+                      ? supplier.minOrderValue - subtotal
+                      : null;
                     return (
                       <React.Fragment key={group.supplierId || '__none__'}>
                         <tr className="bg-zinc-800/60">
                           <td colSpan={11} className="px-2 py-1.5">
-                            <div className="flex items-center justify-between">
-                              <span className="text-sm font-medium text-teal-400">{group.supplierName}</span>
+                            <div className="flex items-center justify-between gap-2 flex-wrap">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="text-sm font-medium text-teal-400">{group.supplierName}</span>
+                                {orderDays && (
+                                  <span className="text-[11px] px-2 py-0.5 rounded bg-zinc-700/60 text-zinc-300">Orders {orderDays}</span>
+                                )}
+                              </div>
                               <span className="text-xs text-zinc-500">
                                 {selectedInGroup.length} selected · £{subtotal.toFixed(2)}
+                                {minShort != null && (
+                                  <span className="ml-2 text-amber-400">
+                                    £{minShort.toFixed(2)} short of £{supplier.minOrderValue.toFixed(2)} min
+                                  </span>
+                                )}
                               </span>
                             </div>
                           </td>

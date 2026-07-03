@@ -210,6 +210,35 @@ export async function getChannels(config, { machineId } = {}) {
 }
 
 /**
+ * Best-effort normalisation of a VendLive stock-report payload into
+ * per-product rows. The exact upstream shape is not contractual, so this maps
+ * commonly-seen key names and passes through what it finds — it must never
+ * throw on missing keys. Pure; unit-tested.
+ */
+export function normalizeStockReport(data) {
+  const rows = Array.isArray(data) ? data
+    : Array.isArray(data?.results) ? data.results
+    : Array.isArray(data?.products) ? data.products
+    : Array.isArray(data?.items) ? data.items
+    : [];
+
+  const num = (v) =>
+    typeof v === 'number' && Number.isFinite(v)
+      ? v
+      : v != null && v !== '' && !isNaN(Number(v)) ? Number(v) : null;
+
+  return rows.map((r) => {
+    const product = (r && typeof r.product === 'object' && r.product) || r || {};
+    return {
+      name: product.productName ?? product.name ?? r?.productName ?? r?.name ?? 'Unknown product',
+      sku: product.externalId ?? r?.externalId ?? (product.id != null ? String(product.id) : null),
+      currentStock: num(r?.currentStock ?? r?.stockLevel ?? r?.stock ?? product.currentStock),
+      predicted: num(r?.prediction ?? r?.predicted ?? r?.suggestedRestock ?? r?.predictedDemand ?? r?.restockAmount),
+    };
+  });
+}
+
+/**
  * Fetch stock report with optional predictions.
  */
 export async function getStockReport(config, { machineId, predictions, restockDay } = {}) {

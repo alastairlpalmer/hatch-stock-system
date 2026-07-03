@@ -112,6 +112,16 @@ export const vendliveService = {
     const response = await api.get('/vendlive/stock/syncs', { params: { limit } });
     return response.data;
   },
+
+  // VendLive's own restock predictions for a location's machines — an
+  // informational cross-check against our ordering engine.
+  // Returns { locationId, machines: [{ machineId, machineName, products:
+  // [{ name, sku, currentStock, predicted }] }] }.
+  // 404 = no mapped machines, 409 = VendLive not configured, 502 = upstream down.
+  getPredictions: async (locationId) => {
+    const response = await api.get('/vendlive/predictions', { params: { locationId } });
+    return response.data;
+  },
 };
 
 export default vendliveService;
