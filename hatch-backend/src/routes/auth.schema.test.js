@@ -132,3 +132,17 @@ describe('rolePolicy (route-level role enforcement)', async () => {
     expect(run('POST', '/api/inventory/restocks?x=1', 'user').passed).toBe(true);
   }));
 });
+
+describe('email case-insensitivity', async () => {
+  const { createUserSchema, normalizeEmail } = await import('./auth.js');
+
+  it('createUserSchema lowercases emails', () => {
+    const parsed = createUserSchema.parse({ email: 'Driver.One@Example.COM', password: 'password123' });
+    expect(parsed.email).toBe('driver.one@example.com');
+  });
+
+  it('normalizeEmail trims and lowercases, tolerating null', () => {
+    expect(normalizeEmail('  Alastair@Hatch.CO ')).toBe('alastair@hatch.co');
+    expect(normalizeEmail(null)).toBe('');
+  });
+});
