@@ -1,8 +1,38 @@
 import express from 'express';
+import { z } from 'zod';
 import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 
 const router = express.Router();
+
+// Ordering config lives on the supplier so the buying list can warn about
+// order-day windows and minimum-order shortfalls, and PO expectedDate can be
+// derived from the supplier's lead time.
+const WEEKDAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+
+const supplierFieldsSchema = z.object({
+  name: z.string().min(1),
+  contact: z.string().nullish(),
+  email: z.string().nullish(),
+  phone: z.string().nullish(),
+  address: z.string().nullish(),
+  // Weekdays the supplier accepts orders; null/empty = any day.
+  orderDays: z.array(z.enum(WEEKDAYS)).nullish(),
+  leadTimeDays: z.coerce.number().int().min(0).max(30).nullish(),
+  minOrderValue: z.coerce.number().min(0).nullish(),
+});
+
+export const supplierCreateSchema = supplierFieldsSchema;
+export const supplierUpdateSchema = supplierFieldsSchema.partial();
+
+// Normalise empty orderDays arrays to null so "no restriction" has one shape.
+function normalizeConfig(data) {
+  const out = { ...data };
+  if (Array.isArray(out.orderDays) && out.orderDays.length === 0) {
+    out.orderDays = null;
+  }
+  return out;
+}
 
 // Get all suppliers
 router.get('/', asyncHandler(async (req, res) => {
@@ -27,32 +57,27 @@ router.get('/:id', asyncHandler(async (req, res) => {
 
 // Create supplier
 router.post('/', asyncHandler(async (req, res) => {
-  const { name, contact, email, phone, address } = req.body;
+  const data = normalizeConfig(supplierCreateSchema.parse(req.body));
 
-  if (!name) {
-    return res.status(400).json({ error: 'Name is required' });
-  }
-
-  const supplier = await prisma.supplier.create({
-    data: { name, contact, email, phone, address },
-  });
+  const supplier = await prisma.supplier.create({ data });
 
   res.status(201).json(supplier);
 }));
 
 // Update supplier
 router.put('/:id', asyncHandler(async (req, res) => {
-  const { name, contact, email, phone, address } = req.body;
+  const parsed = normalizeConfig(supplierUpdateSchema.parse(req.body));
+
+  // Only touch fields that were present in the payload; explicit nulls clear.
+  const data = {};
+  for (const key of ['name', 'contact', 'email', 'phone', 'address', 'orderDays', 'leadTimeDays', 'minOrderValue']) {
+    if (key in req.body) data[key] = parsed[key] ?? null;
+  }
+  if (data.name === null) delete data.name; // name is required — ignore null
 
   const supplier = await prisma.supplier.update({
     where: { id: req.params.id },
-    data: {
-      ...(name && { name }),
-      ...(contact !== undefined && { contact }),
-      ...(email !== undefined && { email }),
-      ...(phone !== undefined && { phone }),
-      ...(address !== undefined && { address }),
-    },
+    data,
   });
 
   res.json(supplier);

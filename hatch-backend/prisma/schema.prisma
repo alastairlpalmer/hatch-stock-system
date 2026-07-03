@@ -209,6 +209,14 @@ model Supplier {
   email     String?
   phone     String?
   address   String?
+  // Ordering config (see manual-sql/015_supplier_config.sql):
+  // orderDays — weekdays this supplier accepts orders, lowercase short names
+  // e.g. ["wed","thu"]; null = any day. minOrderValue — order minimum in £;
+  // buying lists warn when a supplier group falls short. leadTimeDays — days
+  // from placing the order to delivery; drives PO expectedDate.
+  orderDays     Json?  @map("order_days")
+  leadTimeDays  Int?   @map("lead_time_days")
+  minOrderValue Float? @map("min_order_value")
   createdAt DateTime @default(now()) @map("created_at")
 
   // Relations

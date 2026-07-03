@@ -1074,27 +1074,66 @@ function AdminRoutes() {
   );
 }
 
+const SUPPLIER_WEEKDAYS = [
+  { key: 'mon', label: 'Mon' },
+  { key: 'tue', label: 'Tue' },
+  { key: 'wed', label: 'Wed' },
+  { key: 'thu', label: 'Thu' },
+  { key: 'fri', label: 'Fri' },
+  { key: 'sat', label: 'Sat' },
+  { key: 'sun', label: 'Sun' },
+];
+
+// One-line summary of a supplier's ordering config for the table row.
+function supplierConfigSummary(s) {
+  const parts = [];
+  if (Array.isArray(s.orderDays) && s.orderDays.length) {
+    parts.push(s.orderDays.map(d => SUPPLIER_WEEKDAYS.find(w => w.key === d)?.label || d).join(' '));
+  }
+  if (s.leadTimeDays != null) parts.push(`${s.leadTimeDays}d lead`);
+  if (s.minOrderValue != null) parts.push(`£${Number(s.minOrderValue).toFixed(0)} min`);
+  return parts.join(' · ');
+}
+
 function AdminSuppliers() {
   const { data, addSupplier, updateSupplier, deleteSupplier } = useStock();
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState(null);
-  const [form, setForm] = useState({ name: '', contact: '', email: '', phone: '' });
+  const emptyForm = { name: '', contact: '', email: '', phone: '', orderDays: [], leadTimeDays: '', minOrderValue: '' };
+  const [form, setForm] = useState(emptyForm);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   // Two-click delete: first click arms the confirmation for this supplier
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
 
   const resetForm = () => {
-    setForm({ name: '', contact: '', email: '', phone: '' });
+    setForm(emptyForm);
     setEditingId(null);
     setShowForm(false);
     setError(null);
   };
 
   const editSupplierItem = (sup) => {
-    setForm({ name: sup.name, contact: sup.contact || '', email: sup.email || '', phone: sup.phone || '' });
+    setForm({
+      name: sup.name,
+      contact: sup.contact || '',
+      email: sup.email || '',
+      phone: sup.phone || '',
+      orderDays: Array.isArray(sup.orderDays) ? sup.orderDays : [],
+      leadTimeDays: sup.leadTimeDays != null ? String(sup.leadTimeDays) : '',
+      minOrderValue: sup.minOrderValue != null ? String(sup.minOrderValue) : '',
+    });
     setEditingId(sup.id);
     setShowForm(true);
+  };
+
+  const toggleOrderDay = (day) => {
+    setForm(f => ({
+      ...f,
+      orderDays: f.orderDays.includes(day)
+        ? f.orderDays.filter(d => d !== day)
+        : [...f.orderDays, day],
+    }));
   };
 
   const submit = async () => {
@@ -1108,7 +1147,11 @@ function AdminSuppliers() {
         name: form.name.trim(),
         contact: form.contact.trim(),
         email: form.email.trim(),
-        phone: form.phone.trim()
+        phone: form.phone.trim(),
+        // Empty selection / blank inputs mean "no restriction" → null.
+        orderDays: form.orderDays.length ? form.orderDays : null,
+        leadTimeDays: form.leadTimeDays !== '' ? parseInt(form.leadTimeDays, 10) : null,
+        minOrderValue: form.minOrderValue !== '' ? parseFloat(form.minOrderValue) : null,
       };
 
       if (editingId) {
@@ -1171,6 +1214,38 @@ function AdminSuppliers() {
               <input type="text" value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm" />
             </div>
           </div>
+          <div className="border-t border-zinc-800 pt-4 space-y-4">
+            <p className="text-xs text-zinc-500">Ordering config — drives order-day reminders, minimum-order warnings and PO delivery dates on buying lists.</p>
+            <div>
+              <label className="block text-xs text-zinc-500 mb-2">Order days (none selected = any day)</label>
+              <div className="flex flex-wrap gap-2">
+                {SUPPLIER_WEEKDAYS.map(({ key, label }) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => toggleOrderDay(key)}
+                    className={`px-3 py-1.5 rounded text-xs font-medium transition-colors ${
+                      form.orderDays.includes(key)
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-zinc-800 text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs text-zinc-500 mb-1">Lead time (days from order to delivery)</label>
+                <input type="number" min="0" max="30" value={form.leadTimeDays} onChange={e => setForm({ ...form, leadTimeDays: e.target.value })} placeholder="—" className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm" />
+              </div>
+              <div>
+                <label className="block text-xs text-zinc-500 mb-1">Minimum order (£)</label>
+                <input type="number" min="0" step="0.01" value={form.minOrderValue} onChange={e => setForm({ ...form, minOrderValue: e.target.value })} placeholder="—" className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm" />
+              </div>
+            </div>
+          </div>
           <button onClick={submit} disabled={loading} className="px-4 py-2 bg-emerald-600 text-white rounded text-sm font-medium hover:bg-emerald-500 disabled:opacity-50">
             {loading ? 'Saving...' : editingId ? 'Update' : 'Add'} Supplier
           </button>
@@ -1185,12 +1260,13 @@ function AdminSuppliers() {
               <th className="text-left px-4 py-3 text-zinc-500 font-medium">Contact</th>
               <th className="text-left px-4 py-3 text-zinc-500 font-medium">Email</th>
               <th className="text-left px-4 py-3 text-zinc-500 font-medium">Phone</th>
+              <th className="text-left px-4 py-3 text-zinc-500 font-medium">Ordering</th>
               <th className="text-right px-4 py-3 text-zinc-500 font-medium">Actions</th>
             </tr>
           </thead>
           <tbody>
             {data.suppliers.length === 0 ? (
-              <tr><td colSpan={5} className="px-4 py-8 text-center text-zinc-600">No suppliers yet</td></tr>
+              <tr><td colSpan={6} className="px-4 py-8 text-center text-zinc-600">No suppliers yet</td></tr>
             ) : (
               data.suppliers.map(s => (
                 <tr key={s.id} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
@@ -1198,6 +1274,7 @@ function AdminSuppliers() {
                   <td className="px-4 py-3 text-zinc-400">{s.contact || '-'}</td>
                   <td className="px-4 py-3 text-zinc-400">{s.email || '-'}</td>
                   <td className="px-4 py-3 text-zinc-400">{s.phone || '-'}</td>
+                  <td className="px-4 py-3 text-zinc-400">{supplierConfigSummary(s) || '-'}</td>
                   <td className="text-right px-4 py-3 whitespace-nowrap">
                     {confirmDeleteId === s.id ? (
                       <>

@@ -244,7 +244,8 @@ export default function BuyingListDetail() {
         notes: list.notes || '',
       });
       const res = await buyingListsService.createOrders(list.id);
-      if (res.buyingList) setList(res.buyingList);
+      // Server responses here don't carry supplierMeta — keep the loaded copy.
+      if (res.buyingList) setList(prev => ({ ...res.buyingList, supplierMeta: prev?.supplierMeta }));
       else setList(prev => ({ ...prev, status: 'ordered', orderIds: (res.orders || []).map(o => o.id) }));
       setCreatedOrders(res.orders || []);
       setSaveState('idle');
@@ -267,7 +268,7 @@ export default function BuyingListDetail() {
     setBanner(null);
     try {
       const updated = await buyingListsService.update(list.id, { status: 'archived' });
-      setList(updated || { ...list, status: 'archived' });
+      setList(prev => (updated ? { ...updated, supplierMeta: prev?.supplierMeta } : { ...prev, status: 'archived' }));
       setBanner({ type: 'success', message: 'Buying list archived.' });
     } catch (err) {
       console.error('Archive failed:', err);
@@ -542,14 +543,51 @@ export default function BuyingListDetail() {
         <div className="space-y-4">
           {groups.map(group => {
             const subtotal = group.rows.reduce((a, { item }) => a + (item.quantity || 0) * (item.unitCost || 0), 0);
+            // Ordering config from the backend's supplierMeta map (order days,
+            // lead time, minimum order) — recomputed live as quantities change.
+            const meta = group.supplierId ? list.supplierMeta?.[group.supplierId] : null;
+            const orderDays = Array.isArray(meta?.orderDays) && meta.orderDays.length
+              ? meta.orderDays.map(d => ({ mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' }[d] || d)).join(' · ')
+              : null;
+            const minShort = meta?.minOrderValue != null && subtotal < meta.minOrderValue
+              ? meta.minOrderValue - subtotal
+              : null;
             return (
               <div key={group.supplierId || '__none__'} className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
-                <div className="flex items-center justify-between px-4 py-3 bg-zinc-800/60">
-                  <span className="text-sm font-medium text-teal-400">{group.supplierName}</span>
+                <div className="flex items-center justify-between gap-3 px-4 py-3 bg-zinc-800/60 flex-wrap">
+                  <div className="flex items-center gap-2 flex-wrap min-w-0">
+                    <span className="text-sm font-medium text-teal-400">{group.supplierName}</span>
+                    {orderDays && (
+                      <span className="text-[11px] px-2 py-0.5 rounded bg-zinc-700/60 text-zinc-300">Orders {orderDays}</span>
+                    )}
+                    {meta?.leadTimeDays != null && (
+                      <span className="text-[11px] px-2 py-0.5 rounded bg-zinc-700/60 text-zinc-300">{meta.leadTimeDays}d lead</span>
+                    )}
+                  </div>
                   <span className="text-xs text-zinc-500">
                     {group.rows.length} line{group.rows.length === 1 ? '' : 's'} · £{subtotal.toFixed(2)}
                   </span>
                 </div>
+                {meta?.minOrderValue != null && (
+                  minShort != null ? (
+                    <div className="px-4 py-2 bg-amber-500/10 border-b border-amber-500/20">
+                      <div className="flex items-center justify-between text-xs text-amber-300">
+                        <span>£{minShort.toFixed(2)} short of £{meta.minOrderValue.toFixed(2)} minimum</span>
+                        <span>£{subtotal.toFixed(2)} / £{meta.minOrderValue.toFixed(2)}</span>
+                      </div>
+                      <div className="mt-1 h-1 rounded bg-zinc-800 overflow-hidden">
+                        <div
+                          className="h-full bg-amber-500"
+                          style={{ width: `${Math.min(100, (subtotal / meta.minOrderValue) * 100)}%` }}
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="px-4 py-1.5 border-b border-zinc-800 text-[11px] text-emerald-500/80">
+                      £{meta.minOrderValue.toFixed(2)} minimum met ✓
+                    </div>
+                  )
+                )}
                 <div className="overflow-x-auto">
                   <table className="w-full text-left">
                     <thead>

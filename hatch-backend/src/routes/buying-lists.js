@@ -63,6 +63,27 @@ const boxesOf = (item) => {
   return Math.ceil((item.quantity || 0) / box);
 };
 
+// Ordering config for the suppliers referenced by a list's items, keyed by
+// supplier id — lets the UI render order-day chips and minimum-order warnings
+// without extra round-trips.
+async function supplierMetaFor(items) {
+  const ids = [...new Set(
+    (Array.isArray(items) ? items : []).map((i) => i.supplierId).filter(Boolean)
+  )];
+  if (ids.length === 0) return {};
+  const suppliers = await prisma.supplier.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, name: true, orderDays: true, leadTimeDays: true, minOrderValue: true },
+  });
+  return Object.fromEntries(suppliers.map((s) => [s.id, s]));
+}
+
+const WEEKDAY_LABELS = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
+const orderDaysLabel = (orderDays) =>
+  Array.isArray(orderDays) && orderDays.length
+    ? orderDays.map((d) => WEEKDAY_LABELS[d] || d).join(', ')
+    : null;
+
 // List buying lists, newest first
 router.get('/', asyncHandler(async (req, res) => {
   const { status } = req.query;
@@ -77,11 +98,12 @@ router.get('/', asyncHandler(async (req, res) => {
   res.json(lists);
 }));
 
-// Get single buying list
+// Get single buying list (+ ordering config for its suppliers)
 router.get('/:id', asyncHandler(async (req, res) => {
   const list = await prisma.buyingList.findUnique({ where: { id: req.params.id } });
   if (!list) return res.status(404).json({ error: 'Buying list not found' });
-  res.json(list);
+  const supplierMeta = await supplierMetaFor(list.items);
+  res.json({ ...list, supplierMeta });
 }));
 
 // Create buying list (share token comes from the schema's uuid default)
@@ -139,8 +161,9 @@ router.delete('/:id', asyncHandler(async (req, res) => {
 }));
 
 // Turn a draft buying list into purchase orders — ONE pending PO per supplier
-// (items with no supplier form their own PO). expectedDate is two days before
-// the target restock Monday, i.e. the Saturday of the weekend delivery window.
+// (items with no supplier form their own PO). expectedDate: when the supplier
+// has a configured lead time, order date + lead time; otherwise two days
+// before the target restock Monday (the Saturday of the weekend delivery).
 router.post('/:id/create-orders', asyncHandler(async (req, res) => {
   const list = await prisma.buyingList.findUnique({ where: { id: req.params.id } });
   if (!list) return res.status(404).json({ error: 'Buying list not found' });
@@ -154,9 +177,16 @@ router.post('/:id/create-orders', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'Buying list has no items with quantity > 0' });
   }
 
-  const expectedDate = list.targetDate
+  const supplierMeta = await supplierMetaFor(items);
+  const defaultExpected = list.targetDate
     ? new Date(new Date(list.targetDate).getTime() - 2 * MS_PER_DAY)
     : null;
+  const expectedFor = (supplierId) => {
+    const lead = supplierId ? supplierMeta[supplierId]?.leadTimeDays : null;
+    return lead != null
+      ? new Date(Date.now() + lead * MS_PER_DAY)
+      : defaultExpected;
+  };
 
   const result = await prisma.$transaction(async (tx) => {
     const orders = [];
@@ -167,7 +197,7 @@ router.post('/:id/create-orders', asyncHandler(async (req, res) => {
           supplierId: group.supplierId,
           status: 'pending',
           buyingListId: list.id,
-          expectedDate,
+          expectedDate: expectedFor(group.supplierId),
           notes: `From buying list "${list.name}"`,
           totalAmount,
           items: {
@@ -235,7 +265,7 @@ function ellipsize(doc, text, maxWidth, font = 'Helvetica', size = 9) {
 }
 
 /** Render a buying list to a one-or-more-page A4 PDF Buffer. */
-export function renderBuyingListPdf(list) {
+export function renderBuyingListPdf(list, supplierMeta = {}) {
   return new Promise((resolve, reject) => {
     try {
       const doc = new PDFDocument({ size: 'A4', margin: MARGIN });
@@ -301,6 +331,17 @@ export function renderBuyingListPdf(list) {
         doc.save().moveTo(MARGIN, y).lineTo(MARGIN + 34, y).lineWidth(2).strokeColor(BRAND.green).stroke().restore();
         y += 10;
 
+        // Ordering config line: order days + lead time (when configured).
+        const meta = group.supplierId ? supplierMeta[group.supplierId] : null;
+        const metaParts = [];
+        const days = meta && orderDaysLabel(meta.orderDays);
+        if (days) metaParts.push(`Orders: ${days}`);
+        if (meta?.leadTimeDays != null) metaParts.push(`Lead time: ${meta.leadTimeDays} day${meta.leadTimeDays === 1 ? '' : 's'}`);
+        if (metaParts.length) {
+          doc.fillColor(BRAND.sub).font('Helvetica').fontSize(8).text(metaParts.join('   ·   '), MARGIN, y);
+          y = doc.y + 6;
+        }
+
         drawHeaderRow();
 
         let subtotal = 0;
@@ -331,7 +372,20 @@ export function renderBuyingListPdf(list) {
         doc.save().moveTo(MARGIN, y).lineTo(MARGIN + W, y).lineWidth(0.5).strokeColor(BRAND.line).stroke().restore();
         doc.font('Helvetica-Bold').fontSize(9).fillColor(BRAND.dark)
           .text(`${group.supplierName} total: ${money(subtotal)}`, MARGIN, y + 5, { width: W, align: 'right' });
-        y += 26;
+        y += 20;
+
+        // Minimum-order shortfall warning ("!" — the Helvetica core font has
+        // no ⚠ glyph).
+        if (meta?.minOrderValue != null && subtotal < meta.minOrderValue) {
+          ensureRoom(14);
+          doc.font('Helvetica-Bold').fontSize(8).fillColor('#B45309').text(
+            `! ${money(meta.minOrderValue - subtotal)} below the ${money(meta.minOrderValue)} minimum order`,
+            MARGIN, y, { width: W, align: 'right' },
+          );
+          y = doc.y + 8;
+        } else {
+          y += 6;
+        }
       }
 
       // ---- Grand total ----
@@ -357,7 +411,8 @@ router.get('/:id/pdf', asyncHandler(async (req, res) => {
   const list = await prisma.buyingList.findUnique({ where: { id: req.params.id } });
   if (!list) return res.status(404).json({ error: 'Buying list not found' });
 
-  const pdf = await renderBuyingListPdf(list);
+  const supplierMeta = await supplierMetaFor(list.items);
+  const pdf = await renderBuyingListPdf(list, supplierMeta);
   const slug = (s) => String(s || '').normalize('NFKD').replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase();
   const fileName = `buying-list-${slug(list.name) || list.id}.pdf`;
 

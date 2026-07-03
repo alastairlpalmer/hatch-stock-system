@@ -582,4 +582,48 @@ router.get('/health', asyncHandler(async (req, res) => {
   });
 }));
 
+// ============ PREDICTIONS ============
+
+// VendLive's own restock predictions for a location's machines — an
+// informational cross-check against our ordering engine, never merged into
+// suggestion lines. Wraps /stock-report/?predictions (previously dead code in
+// services/vendlive.js). Upstream failures surface as 502, not 500: the
+// feature is best-effort by design.
+router.get('/predictions', asyncHandler(async (req, res) => {
+  const { locationId } = req.query;
+  if (!locationId) {
+    return res.status(400).json({ error: 'locationId required' });
+  }
+
+  const config = await prisma.vendliveConfig.findUnique({ where: { id: 'default' } });
+  if (!config?.apiToken) {
+    return res.status(409).json({ error: 'VendLive not configured' });
+  }
+
+  const mappings = await prisma.vendliveMachineMapping.findMany({
+    where: { locationId },
+  });
+  if (mappings.length === 0) {
+    return res.status(404).json({ error: 'No machines mapped to this location' });
+  }
+
+  try {
+    const machines = [];
+    for (const mapping of mappings) {
+      const data = await vendliveApi.getStockReport(config, {
+        machineId: mapping.vendliveMachineId,
+        predictions: true,
+      });
+      machines.push({
+        machineId: mapping.vendliveMachineId,
+        machineName: mapping.machineName,
+        products: vendliveApi.normalizeStockReport(data),
+      });
+    }
+    res.json({ locationId, machines });
+  } catch (err) {
+    res.status(502).json({ error: 'VendLive predictions unavailable', detail: err.message });
+  }
+}));
+
 export default router;
