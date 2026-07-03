@@ -25,6 +25,7 @@ import PickLists from './components/pages/restock/PickLists';
 import PickListDetail from './components/pages/restock/PickListDetail';
 import StockCheck from './components/pages/restock/StockCheck';
 import RestockRun from './components/pages/restock/RestockRun';
+import Account from './components/pages/Account';
 
 // Parent layouts
 import OrdersLayout from './components/pages/orders/OrdersLayout';
@@ -86,6 +87,16 @@ function AppLayout() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
+  // The backend rejected a request with 401 while this build has
+  // VITE_AUTH_ENABLED off — the two env flags disagree. Without this banner
+  // the app would just look broken. Fired by the axios interceptor.
+  const [authConfigMismatch, setAuthConfigMismatch] = useState(false);
+
+  useEffect(() => {
+    const onMismatch = () => setAuthConfigMismatch(true);
+    window.addEventListener('hatch:auth-config-mismatch', onMismatch);
+    return () => window.removeEventListener('hatch:auth-config-mismatch', onMismatch);
+  }, []);
 
   useEffect(() => {
     const checkMobile = () => {
@@ -133,6 +144,16 @@ function AppLayout() {
 
         <main className="flex-1 overflow-auto p-4 md:p-6">
           <div className="max-w-7xl mx-auto">
+            {authConfigMismatch && (
+              <div className="mb-4 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+                <p className="font-medium">Login is required by the server but disabled in this build.</p>
+                <p className="mt-1 text-red-300/80">
+                  The backend has AUTH_ENABLED=true but this frontend was deployed without
+                  VITE_AUTH_ENABLED=true. Set it in Vercel and redeploy — or set AUTH_ENABLED=false
+                  in Railway to switch login off everywhere.
+                </p>
+              </div>
+            )}
             {error && (
               <div className="mb-4 flex items-start justify-between gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
                 <p className="min-w-0">{error}</p>
@@ -174,7 +195,15 @@ function AppLayout() {
               <Route path="/support" element={<SupportLayout />}>
                 <Route index element={<Navigate to="docs" replace />} />
                 <Route path="docs" element={<RestockingDocs />} />
-                <Route path="settings" element={<Admin />} />
+                <Route
+                  path="settings"
+                  element={
+                    <AdminOnly>
+                      <Admin />
+                    </AdminOnly>
+                  }
+                />
+                <Route path="account" element={<Account />} />
                 <Route path="history" element={<History />} />
                 <Route
                   path="users"

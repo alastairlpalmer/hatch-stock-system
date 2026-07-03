@@ -24,6 +24,18 @@ export const authService = {
     return response.data;
   },
 
+  /** Public: does the server still need its first (admin) account? */
+  getSetupStatus: async () => {
+    const response = await api.get('/auth/setup-status');
+    return response.data; // { needsBootstrap, authEnabled }
+  },
+
+  /** Change your own password (requires the current one). */
+  changeOwnPassword: async (currentPassword, newPassword) => {
+    const response = await api.post('/auth/me/password', { currentPassword, newPassword });
+    return response.data;
+  },
+
   // --- Admin user management (require an admin token) ---
 
   /** List all user logins. */

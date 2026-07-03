@@ -64,3 +64,71 @@ describe('resetPasswordSchema (POST /auth/users/:id/reset-password)', () => {
     expect(() => resetPasswordSchema.parse({})).toThrow();
   });
 });
+
+describe('rolePolicy (route-level role enforcement)', async () => {
+  const { rolePolicy } = await import('../middleware/auth.js');
+
+  const run = (method, url, role) => {
+    const req = { method, originalUrl: url, path: url.split('?')[0], user: role ? { role } : undefined };
+    let statusCode = null;
+    const res = { status: (c) => { statusCode = c; return res; }, json: () => res };
+    let passed = false;
+    rolePolicy(req, res, () => { passed = true; });
+    return { passed, statusCode };
+  };
+
+  const withAuthOn = (fn) => {
+    const prev = process.env.AUTH_ENABLED;
+    process.env.AUTH_ENABLED = 'true';
+    try { fn(); } finally {
+      if (prev === undefined) delete process.env.AUTH_ENABLED;
+      else process.env.AUTH_ENABLED = prev;
+    }
+  };
+
+  it('is a no-op while AUTH_ENABLED is off (deploy-safe)', () => {
+    const prev = process.env.AUTH_ENABLED;
+    delete process.env.AUTH_ENABLED;
+    try {
+      expect(run('DELETE', '/api/products/X', undefined).passed).toBe(true);
+    } finally {
+      if (prev !== undefined) process.env.AUTH_ENABLED = prev;
+    }
+  });
+
+  it('lets any role read', () => withAuthOn(() => {
+    expect(run('GET', '/api/products', 'user').passed).toBe(true);
+  }));
+
+  it('lets admins write anything', () => withAuthOn(() => {
+    expect(run('DELETE', '/api/products/X', 'admin').passed).toBe(true);
+  }));
+
+  it('blocks non-admin master-data writes with 403', () => withAuthOn(() => {
+    expect(run('DELETE', '/api/products/X', 'user').statusCode).toBe(403);
+    expect(run('POST', '/api/buying-lists', 'user').statusCode).toBe(403);
+    expect(run('PUT', '/api/vendlive/config', 'user').statusCode).toBe(403);
+    expect(run('POST', '/api/orders', 'user').statusCode).toBe(403);
+  }));
+
+  it('allows the operational writes a restocker needs', () => withAuthOn(() => {
+    expect(run('POST', '/api/inventory/stock-checks', 'user').passed).toBe(true);
+    expect(run('POST', '/api/inventory/restocks', 'user').passed).toBe(true);
+    expect(run('POST', '/api/inventory/removals', 'user').passed).toBe(true);
+    expect(run('POST', '/api/pick-lists/generate', 'user').passed).toBe(true);
+    expect(run('PUT', '/api/pick-lists/abc123', 'user').passed).toBe(true);
+    expect(run('POST', '/api/pick-lists/abc123/complete', 'user').passed).toBe(true);
+    expect(run('POST', '/api/orders/ord-1/receive', 'user').passed).toBe(true);
+    expect(run('POST', '/api/vendlive/stock/sync-location/loc-1', 'user').passed).toBe(true);
+    expect(run('POST', '/api/auth/me/password', 'user').passed).toBe(true);
+  }));
+
+  it('does not let the receive pattern leak to other order writes', () => withAuthOn(() => {
+    expect(run('DELETE', '/api/orders/ord-1', 'user').statusCode).toBe(403);
+    expect(run('PUT', '/api/orders/ord-1', 'user').statusCode).toBe(403);
+  }));
+
+  it('ignores query strings when matching', () => withAuthOn(() => {
+    expect(run('POST', '/api/inventory/restocks?x=1', 'user').passed).toBe(true);
+  }));
+});

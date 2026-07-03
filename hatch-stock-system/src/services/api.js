@@ -39,6 +39,11 @@ api.interceptors.response.use(
             window.location.pathname !== '/login'
           ) {
             window.location.href = '/login';
+          } else if (import.meta.env.VITE_AUTH_ENABLED !== 'true') {
+            // The SERVER requires login but this build was deployed with
+            // VITE_AUTH_ENABLED off — without this signal the app would just
+            // sit broken. The app shell listens and shows a config banner.
+            window.dispatchEvent(new CustomEvent('hatch:auth-config-mismatch'));
           }
           break;
         case 403:

@@ -11,6 +11,12 @@ export default function Users() {
   const [form, setForm] = useState({ name: '', email: '', password: '' });
   const [creating, setCreating] = useState(false);
   const [actionId, setActionId] = useState(null); // id mid-delete/reset
+  // Inline flows replacing window.prompt/confirm: which row has the reset
+  // form open (+ its masked input), and which row has an armed delete.
+  const [resetId, setResetId] = useState(null);
+  const [resetPassword, setResetPassword] = useState('');
+  const [resetDone, setResetDone] = useState(null); // email of last reset
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
 
   const load = async () => {
     setLoading(true);
@@ -42,7 +48,7 @@ export default function Users() {
   };
 
   const handleDelete = async (u) => {
-    if (!window.confirm(`Delete the login for ${u.email}? This cannot be undone.`)) return;
+    setConfirmDeleteId(null);
     setError(null);
     setActionId(u.id);
     try {
@@ -55,18 +61,18 @@ export default function Users() {
     }
   };
 
-  const handleReset = async (u) => {
-    const password = window.prompt(`New password for ${u.email} (min 8 characters):`);
-    if (password == null) return;
-    if (password.length < 8) {
+  const submitReset = async (u) => {
+    if (resetPassword.length < 8) {
       setError('Password must be at least 8 characters');
       return;
     }
     setError(null);
     setActionId(u.id);
     try {
-      await authService.resetPassword(u.id, password);
-      window.alert('Password updated.');
+      await authService.resetPassword(u.id, resetPassword);
+      setResetId(null);
+      setResetPassword('');
+      setResetDone(u.email);
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to reset password');
     } finally {
@@ -86,6 +92,13 @@ export default function Users() {
       {error && (
         <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 text-red-400 text-sm">
           {error}
+        </div>
+      )}
+
+      {resetDone && (
+        <div className="flex items-center justify-between bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-3 text-emerald-400 text-sm">
+          <span>Password updated for {resetDone}.</span>
+          <button onClick={() => setResetDone(null)} className="text-emerald-300 hover:text-emerald-100 ml-3">Dismiss</button>
         </div>
       )}
 
@@ -155,36 +168,90 @@ export default function Users() {
               <tr><td colSpan={4} className="px-4 py-8 text-center text-zinc-600">No users yet</td></tr>
             ) : (
               users.map(u => (
-                <tr key={u.id} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
-                  <td className="px-4 py-3 text-zinc-200">
-                    {u.name || '-'}
-                    {u.id === currentUser?.id && (
-                      <span className="ml-2 text-xs text-zinc-500">(you)</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-3 text-zinc-300">{u.email}</td>
-                  <td className="px-4 py-3">
-                    <span className={u.role === 'admin' ? 'text-emerald-400' : 'text-zinc-400'}>
-                      {u.role === 'admin' ? 'Administrator' : 'Member'}
-                    </span>
-                  </td>
-                  <td className="text-right px-4 py-3 whitespace-nowrap">
-                    <button
-                      onClick={() => handleReset(u)}
-                      disabled={actionId === u.id}
-                      className="text-zinc-400 hover:text-white mr-3 disabled:opacity-50"
-                    >
-                      Reset password
-                    </button>
-                    <button
-                      onClick={() => handleDelete(u)}
-                      disabled={actionId === u.id || u.id === currentUser?.id}
-                      className="text-zinc-500 hover:text-red-400 disabled:opacity-30 disabled:hover:text-zinc-500"
-                    >
-                      Delete
-                    </button>
-                  </td>
-                </tr>
+                <React.Fragment key={u.id}>
+                  <tr className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
+                    <td className="px-4 py-3 text-zinc-200">
+                      {u.name || '-'}
+                      {u.id === currentUser?.id && (
+                        <span className="ml-2 text-xs text-zinc-500">(you)</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-zinc-300">{u.email}</td>
+                    <td className="px-4 py-3">
+                      <span className={u.role === 'admin' ? 'text-emerald-400' : 'text-zinc-400'}>
+                        {u.role === 'admin' ? 'Administrator' : 'Member'}
+                      </span>
+                    </td>
+                    <td className="text-right px-4 py-3 whitespace-nowrap">
+                      {confirmDeleteId === u.id ? (
+                        <>
+                          <button
+                            onClick={() => handleDelete(u)}
+                            disabled={actionId === u.id}
+                            className="text-red-400 hover:text-red-300 font-medium mr-3 disabled:opacity-50"
+                          >
+                            Confirm delete?
+                          </button>
+                          <button onClick={() => setConfirmDeleteId(null)} className="text-zinc-500 hover:text-white">
+                            Cancel
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            onClick={() => {
+                              setResetId(resetId === u.id ? null : u.id);
+                              setResetPassword('');
+                              setConfirmDeleteId(null);
+                            }}
+                            disabled={actionId === u.id}
+                            className="text-zinc-400 hover:text-white mr-3 disabled:opacity-50"
+                          >
+                            {resetId === u.id ? 'Cancel reset' : 'Reset password'}
+                          </button>
+                          <button
+                            onClick={() => { setConfirmDeleteId(u.id); setResetId(null); }}
+                            disabled={actionId === u.id || u.id === currentUser?.id}
+                            className="text-zinc-500 hover:text-red-400 disabled:opacity-30 disabled:hover:text-zinc-500"
+                          >
+                            Delete
+                          </button>
+                        </>
+                      )}
+                    </td>
+                  </tr>
+                  {resetId === u.id && (
+                    <tr className="border-b border-zinc-800/50 bg-zinc-800/20">
+                      <td colSpan={4} className="px-4 py-3">
+                        <form
+                          onSubmit={(e) => { e.preventDefault(); submitReset(u); }}
+                          className="flex flex-col sm:flex-row sm:items-center gap-2"
+                        >
+                          <label className="text-xs text-zinc-500 sm:w-56">
+                            New password for {u.email} (min 8):
+                          </label>
+                          <input
+                            type="password"
+                            value={resetPassword}
+                            onChange={e => setResetPassword(e.target.value)}
+                            minLength={8}
+                            required
+                            autoComplete="new-password"
+                            autoFocus
+                            className="flex-1 bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-emerald-500"
+                          />
+                          <button
+                            type="submit"
+                            disabled={actionId === u.id || resetPassword.length < 8}
+                            className="px-3 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-500 disabled:opacity-50"
+                          >
+                            {actionId === u.id ? 'Saving…' : 'Set password'}
+                          </button>
+                        </form>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
               ))
             )}
           </tbody>
