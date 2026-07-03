@@ -8,8 +8,14 @@ import { generateToken, authMiddleware, optionalAuth, adminOnly } from '../middl
 const router = express.Router();
 
 // Shared validation. Exported so the schema tests can exercise them directly.
+// Emails are CASE-INSENSITIVE by normalisation: lowercased at every entry
+// point (register, login, admin create) so "Alastair@x.com" and
+// "alastair@x.com" are the same account. Existing rows were lowercased by
+// manual-sql/016_lowercase_emails.sql.
+export const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
+
 export const createUserSchema = z.object({
-  email: z.string().trim().min(1).email(),
+  email: z.string().trim().min(1).email().transform((v) => v.toLowerCase()),
   password: z.string().min(8, 'Password must be at least 8 characters'),
   name: z.string().trim().min(1).optional(),
 });
@@ -23,7 +29,8 @@ export const resetPasswordSchema = z.object({
 // and auth is enabled, only admins may register further accounts — otherwise
 // the open endpoint would let anyone mint themselves access.
 router.post('/register', optionalAuth, asyncHandler(async (req, res) => {
-  const { email, password, name } = req.body;
+  const { password, name } = req.body;
+  const email = normalizeEmail(req.body.email);
 
   if (!email || !password) {
     return res.status(400).json({ error: 'Email and password required' });
@@ -66,7 +73,8 @@ router.post('/register', optionalAuth, asyncHandler(async (req, res) => {
 
 // Login
 router.post('/login', asyncHandler(async (req, res) => {
-  const { email, password } = req.body;
+  const { password } = req.body;
+  const email = normalizeEmail(req.body.email);
 
   if (!email || !password) {
     return res.status(400).json({ error: 'Email and password required' });
