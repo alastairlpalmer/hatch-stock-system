@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { ClipboardCheck, PackagePlus } from 'lucide-react';
+import { Truck, ClipboardCheck, ListChecks, PackagePlus } from 'lucide-react';
 import { useStock } from '../../../context/StockContext';
 import { useRestockRun } from '../../../context/RestockRunContext';
 import usePickLists from '../../../hooks/usePickLists';
@@ -156,7 +156,49 @@ export default function RestockWorkflow() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      {/* Action tiles — the four restock jobs, one click each, with live
+          state. The guided 3-step sequence below stays for anyone following
+          the full run flow. */}
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+        <ActionCard
+          to="/restock/run"
+          icon={Truck}
+          title="Today's Run"
+          description="Check and restock each machine on the route, then reconcile the van."
+          badge={
+            completedSteps.machine
+              ? 'Run complete'
+              : completedSteps.remove
+                ? 'Ready to run'
+                : null
+          }
+          badgeTone={completedSteps.machine ? 'emerald' : 'amber'}
+        />
+        <ActionCard
+          to="/restock/picklists"
+          icon={ListChecks}
+          title="Pick Lists"
+          description="Generate what to pack, with the batch (soonest expiry) to pull."
+          badge={step2Badge?.label}
+          badgeTone={step2Badge?.tone}
+        />
+        <ActionCard
+          to="/restock/check"
+          icon={ClipboardCheck}
+          title="Stock Check"
+          description="Audit a machine — tick what matches, count what doesn’t."
+        />
+        <ActionCard
+          to="/restock/machine"
+          icon={PackagePlus}
+          title="Log a Restock"
+          description="Record what went into a machine."
+        />
+      </div>
+
+      <div>
+        <h3 className="text-sm font-medium text-zinc-400 mb-3">Run flow</h3>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <StepCard
           number={1}
           title="Select Route"
@@ -186,23 +228,6 @@ export default function RestockWorkflow() {
           disabled={!completedSteps.remove}
           badge={completedSteps.machine ? { label: 'Run complete', tone: 'emerald' } : null}
         />
-      </div>
-
-      <div>
-        <h3 className="text-sm font-medium text-zinc-400 mb-3">Quick actions</h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <ActionCard
-            to="/restock/check"
-            icon={ClipboardCheck}
-            title="Stock Check"
-            description="Audit a machine — tick what matches, count what doesn’t."
-          />
-          <ActionCard
-            to="/restock/machine"
-            icon={PackagePlus}
-            title="Log a Restock"
-            description="Record what went into a machine."
-          />
         </div>
       </div>
 
