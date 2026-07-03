@@ -51,7 +51,7 @@ export default function HeadlineStats({ headline, period }) {
   ];
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
       {tiles.map((t) => (
         <div key={t.label} className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4">
           <div className="text-2xl font-bold text-zinc-100">{t.value}</div>

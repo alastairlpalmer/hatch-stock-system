@@ -1,9 +1,25 @@
-# Fix: make migration 012 pooler-safe (no temp table)
+# Mobile bottom navigation + phone-first reorganisation
 
-Running `manual-sql/012_vendlive_trust.sql` in the Supabase SQL editor failed with `42P01: relation "_vmm_dups" does not exist` — the editor runs through the transaction pooler, where each statement can land on a different session, so the TEMP TABLE created in one statement was gone by the next.
+A 4-tab bottom bar on phones — **Locations / Orders / Restock / Other** — with the desktop experience untouched (sidebar, all pages, all routes exactly as before). Frontend-only: no migration, no backend change.
 
-The duplicate-mapping merge is rewritten as a **single statement** using data-modifying CTEs (delete the sales-namespace duplicate and carry its id onto the keeper's `sales_machine_id` in one snapshot). Result is identical; still idempotent.
+## The four tabs
 
-Docs-only change to a migration file — no code, no deploy behaviour. The corrected SQL has already been run in production (sales poll recovered); this PR just makes the repo copy the version that works, for anyone re-running it.
+- **Locations → `/home` (new composite page)**: headline sales stats (This week / This month toggle, reusing the analytics dashboard's numbers), one card per machine (units / capacity, red "out" + amber "low" counts, "expiring soon" chips), and a recent-transactions digest with "Open full sales →". Each section loads and fails independently — if the analytics API is down, machines and sales digest still render.
+- **Orders**: the existing area (Purchase Orders, Buying Lists, Receive, Warehouse) plus a new **Pick Lists** tab cross-linking to the pick-list pages.
+- **Restock**: a new action hub on mobile — four big tap targets: **Today's Run, Stock Check, Pick Lists, Log a Restock**, plus a current-run pill. Desktop `/restock` still shows the 3-step workflow (same URL, conditional render).
+- **Other → `/more`**: role-gated menu of everything else (Dashboard, Full Sales, Location Stock, Docs, History, Shrinkage, Remove Stock, Select Route, Account/Settings/Users per role) with an identity + sign-out + sync footer.
+
+## Architecture notes
+
+- The bar is rendered **in normal flow** below the scroll container, not `position:fixed` — so the pages' existing `sticky bottom-0` action bars ("Mark packed", stock-check save) stack above it with zero z-index or offset changes, and content can never be clipped behind it. Verified geometrically in preview (nav bottom = viewport bottom; main ends exactly at nav top).
+- The mobile hamburger/drawer is removed — the Other tab supersedes it (its unique features — identity, logout, sync state — moved to `/more`). Desktop sidebar untouched.
+- iOS support: `h-[100dvh]` (collapsing Safari toolbar), `viewport-fit=cover` + `env(safe-area-inset-bottom)` (home-indicator padding in PWA mode).
+- Active-tab matrix: Restock and Orders own their URL areas; Locations lights for `/home`, `/locations`, `/sales`; Other is the fallback bucket.
+
+## Verification
+
+- Preview at 375×812: bar renders with 4 tabs, hamburger gone, `/home` sections render/fail independently, `/restock` shows the hub, `/more` gating correct with auth off, Orders shows the 5th Pick Lists tab, active states match the matrix, nav hugs the viewport bottom with `<main>` ending exactly above it.
+- Desktop 1280×800: bar absent, sidebar intact, `/restock` shows the 3-step workflow.
+- `npm run build` clean.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
