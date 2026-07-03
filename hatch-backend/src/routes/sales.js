@@ -428,6 +428,40 @@ router.get('/daily', asyncHandler(async (req, res) => {
   res.json(rows);
 }));
 
+// Get daily sales split by category -- aggregated in the database, refunds
+// excluded. Powers the stacked "revenue by category per day" chart. Same
+// date/location scoping and effective-category rollup (Frive fresh meals) as
+// /daily and /by-category so the figures reconcile exactly.
+router.get('/daily-by-category', asyncHandler(async (req, res) => {
+  const { startDate, endDate, days = 30 } = req.query;
+
+  let start;
+  if (startDate) {
+    start = new Date(startDate);
+  } else {
+    start = new Date();
+    start.setDate(start.getDate() - parseInt(days));
+  }
+  const end = endDate ? new Date(endDate) : new Date();
+
+  const where = analyticsWhere({ startDate: start, endDate: end, locationName: req.query.locationName });
+
+  const rows = await prisma.$queryRaw`
+    SELECT
+      to_char(s."timestamp", 'YYYY-MM-DD')  AS date,
+      ${EFFECTIVE_CATEGORY}                 AS category,
+      COALESCE(SUM(s.charged), 0)::float    AS revenue,
+      COALESCE(SUM(s.quantity), 0)::int     AS units
+    FROM sales s
+    LEFT JOIN products p ON p.sku = s.sku
+    WHERE ${where}
+    GROUP BY 1, 2
+    ORDER BY 1 ASC
+  `;
+
+  res.json(rows);
+}));
+
 // Get sales by product -- aggregated in the database, refunds excluded
 router.get('/by-product', asyncHandler(async (req, res) => {
   const { limit = 50 } = req.query;

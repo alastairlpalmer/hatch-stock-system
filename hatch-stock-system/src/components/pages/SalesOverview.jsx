@@ -4,6 +4,7 @@ import { vendliveService } from '../../services/vendlive.service';
 import { salesService } from '../../services/sales.service';
 import AnalyticsDashboard from './analytics/AnalyticsDashboard';
 import ClientReports from './reports/ClientReports';
+import SalesCharts from './SalesCharts';
 
 // Small hoverable (i) marker with an explanatory tooltip
 function InfoTip({ text }) {
@@ -51,8 +52,10 @@ export default function SalesOverview() {
       // effectively-all history to match the unfiltered view
       salesService.getDailySales(dateFilter.start ? params : { ...params, days: 3650 }),
       salesService.getByProduct({ ...params, limit: 500 }),
+      salesService.getDailyByCategory(dateFilter.start ? params : { ...params, days: 3650 }),
     ])
-      .then(([analytics, daily, byProduct]) => setServerStats({ analytics, daily, byProduct }))
+      .then(([analytics, daily, byProduct, dailyByCategory]) =>
+        setServerStats({ analytics, daily, byProduct, dailyByCategory }))
       .catch(() => setServerStats(null)); // offline mode → client-side fallback
   }, [dateFilter.start, dateFilter.end, locationFilter]);
 
@@ -118,12 +121,27 @@ export default function SalesOverview() {
 
   const clientByDay = settledSales.reduce((acc, s) => {
     const day = new Date(s.timestamp).toISOString().split('T')[0];
-    if (!acc[day]) acc[day] = { date: day, units: 0, revenue: 0, transactions: 0 };
+    if (!acc[day]) acc[day] = { date: day, units: 0, revenue: 0, profit: 0, transactions: 0 };
     acc[day].units += s.quantity;
     acc[day].revenue += s.charged;
+    acc[day].profit += s.charged - s.costPrice * s.quantity;
     acc[day].transactions++;
     return acc;
   }, {});
+
+  // Offline fallback for the stacked category chart: flat {date, category,
+  // revenue} rows, mirroring the /sales/daily-by-category server shape.
+  const clientDailyByCategory = Object.values(
+    settledSales.reduce((acc, s) => {
+      const day = new Date(s.timestamp).toISOString().split('T')[0];
+      const cat = s.category || 'Other';
+      const key = `${day}|${cat}`;
+      if (!acc[key]) acc[key] = { date: day, category: cat, revenue: 0, units: 0 };
+      acc[key].revenue += s.charged;
+      acc[key].units += s.quantity;
+      return acc;
+    }, {})
+  );
 
   const clientByCategory = settledSales.reduce((acc, s) => {
     const cat = s.category || 'Other';
@@ -161,6 +179,11 @@ export default function SalesOverview() {
   const dailyRows = serverStats
     ? serverStats.daily
     : Object.values(clientByDay);
+
+  // Chart-feeding data: authoritative server aggregates when online, client
+  // fallback otherwise.
+  const chartDaily = serverStats ? serverStats.daily : Object.values(clientByDay);
+  const chartDailyByCategory = serverStats ? serverStats.dailyByCategory : clientDailyByCategory;
 
   return (
     <div className="space-y-6">
@@ -357,6 +380,9 @@ export default function SalesOverview() {
               from these figures.
             </p>
           )}
+
+          {/* Revenue/profit trend + revenue-by-category charts */}
+          <SalesCharts daily={chartDaily} dailyByCategory={chartDailyByCategory} />
 
           {/* Category breakdown */}
           <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-6">
