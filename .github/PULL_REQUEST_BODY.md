@@ -1,27 +1,27 @@
-# Orders action hub (mobile) + pick lists live only under Restock
+# Mobile table fixes — nothing cut off, cards where it counts
 
-Replicates the Restock action-hub pattern in the Orders area, per feedback on #37.
+Follow-up to #37/#38: inside pages, wide tables were cut off on phones — several sat in `overflow-hidden` cards with no scroll wrapper, so side-scroll didn't work at all (the Location Stock bug reported). Every column's information and every interaction is preserved; desktop rendering is unchanged (all mobile layouts sit behind `md:` breakpoints).
 
-## Orders hub
+## Two-tier fix
 
-On phones, the Orders bottom tab now opens an action hub with three big tap targets (desktop `/orders` still redirects to Purchase Orders as before):
+**Tier 1 — universal guarantee:** every `<table>` in the app now sits inside an `overflow-x-auto` wrapper *inside* its rounded card — nothing is clippable at any width. Swept: Location Stock, Inventory (7 tables), History, Users, Sales Overview (3), Shrinkage (4), Admin (2), Orders planner + predictions, Buying List detail.
 
-- **Warehouse Stock** → stock on hand, expiry batches, transfers
-- **Plan Buy** → lands with the weekly-buy planner already open (`?generate=1`)
-- **Receive Order** → pending + completed orders and check-in; shows an amber **"N pending"** badge when deliveries are waiting
+**Tier 2 — real mobile card layouts** (`md:hidden` cards + `hidden md:block` desktop table) for the phone-critical surfaces:
 
-Plus a quiet "Buying lists →" link underneath (part of the buy flow, not one of the three key jobs).
+- **Location Stock** (the reported page): per-product cards with the expiry chip, price/margin/status, qty — read-only "via VendLive" in live mode, editable input **plus −10/−1/+1/+10 buttons** otherwise — and min/max config inputs; fresh-meal groups keep their expand/collapse with member flavours as indented cards.
+- **Inventory**: single-warehouse stock (category headers, qty/value, expiry chip, Edit, expandable batch detail), Missing Expiry (date input + Save inline), Items Requiring Attention, and All Batches with **full inline editing** (qty/expiry/damage/save/cancel/delete) in card form.
+- **History**: removal/restock cards with full item lists always visible.
+- **Users**: cards with the two-tap delete confirm and the masked inline password-reset form working in card layout.
+- **Sales Overview → Transactions**: product/amount/time/badge cards.
+- **Buying List detail**: per-line cards inside each supplier section with draft-mode qty/£ inputs, boxes, line totals and remove — the weekly buy is reviewable on a phone.
 
-## Pick lists → Restock only
+Admin tables and low-traffic drill-downs (all-warehouses matrix, missing-cost, By Product/Daily sales) stay as tables with working horizontal scroll — deliberate: they're desktop-first surfaces.
 
-The Pick Lists cross-link tab added to the Orders strip in #37 is removed — pick-list generation now lives solely in the Restock area (Restock hub card + tab strip), where the job belongs.
-
-Frontend-only; no migration, no backend change.
+No handlers, state or data flow touched — wrapper divs and responsive visibility only.
 
 ## Verification
 
-- Preview 375×812: `/orders` renders the hub (3 cards + buying-lists link), Pick Lists tab absent from the strip, Plan Buy card lands on the planner already open.
-- Desktop 1280×800: `/orders` redirects to Purchase Orders exactly as before; 4-tab strip unchanged.
-- `npm run build` clean.
+- Production build clean.
+- Preview at 375×812: no horizontal page overflow on the swept pages; Transactions mobile cards + Shrinkage scroll wrappers live-verified in DOM; Location Stock renders with the (empty-state) card container active. Data-populated card layouts verified structurally — worth a 2-minute phone pass after deploy on Location Stock and Inventory with real data.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)

@@ -152,6 +152,102 @@ export default function Users() {
 
       {/* User list */}
       <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg overflow-hidden">
+        {/* Mobile cards */}
+        <div className="md:hidden divide-y divide-zinc-800/50">
+          {loading ? (
+            <p className="px-4 py-8 text-center text-zinc-600 text-sm">Loading...</p>
+          ) : users.length === 0 ? (
+            <p className="px-4 py-8 text-center text-zinc-600 text-sm">No users yet</p>
+          ) : (
+            users.map(u => (
+              <div key={u.id} className="px-4 py-3 space-y-2">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-zinc-200 text-sm font-medium">
+                      {u.name || '-'}
+                      {u.id === currentUser?.id && (
+                        <span className="ml-2 text-xs text-zinc-500">(you)</span>
+                      )}
+                    </p>
+                    <p className="text-zinc-300 text-xs mt-0.5 break-all">{u.email}</p>
+                  </div>
+                  <span className={`text-xs shrink-0 ${u.role === 'admin' ? 'text-emerald-400' : 'text-zinc-400'}`}>
+                    {u.role === 'admin' ? 'Administrator' : 'Member'}
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {confirmDeleteId === u.id ? (
+                    <>
+                      <button
+                        onClick={() => handleDelete(u)}
+                        disabled={actionId === u.id}
+                        className="px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-red-400 hover:text-red-300 text-sm font-medium disabled:opacity-50"
+                      >
+                        Confirm delete?
+                      </button>
+                      <button
+                        onClick={() => setConfirmDeleteId(null)}
+                        className="px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-zinc-500 hover:text-white text-sm"
+                      >
+                        Cancel
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        onClick={() => {
+                          setResetId(resetId === u.id ? null : u.id);
+                          setResetPassword('');
+                          setConfirmDeleteId(null);
+                        }}
+                        disabled={actionId === u.id}
+                        className="px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-zinc-400 hover:text-white text-sm disabled:opacity-50"
+                      >
+                        {resetId === u.id ? 'Cancel reset' : 'Reset password'}
+                      </button>
+                      <button
+                        onClick={() => { setConfirmDeleteId(u.id); setResetId(null); }}
+                        disabled={actionId === u.id || u.id === currentUser?.id}
+                        className="px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-zinc-500 hover:text-red-400 text-sm disabled:opacity-30 disabled:hover:text-zinc-500"
+                      >
+                        Delete
+                      </button>
+                    </>
+                  )}
+                </div>
+                {resetId === u.id && (
+                  <form
+                    onSubmit={(e) => { e.preventDefault(); submitReset(u); }}
+                    className="flex flex-col gap-2 bg-zinc-800/20 rounded-lg p-3"
+                  >
+                    <label className="text-xs text-zinc-500">
+                      New password for {u.email} (min 8):
+                    </label>
+                    <input
+                      type="password"
+                      value={resetPassword}
+                      onChange={e => setResetPassword(e.target.value)}
+                      minLength={8}
+                      required
+                      autoComplete="new-password"
+                      autoFocus
+                      className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-emerald-500"
+                    />
+                    <button
+                      type="submit"
+                      disabled={actionId === u.id || resetPassword.length < 8}
+                      className="px-3 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-500 disabled:opacity-50"
+                    >
+                      {actionId === u.id ? 'Saving…' : 'Set password'}
+                    </button>
+                  </form>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+        {/* Desktop table */}
+        <div className="hidden md:block overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-zinc-800">
@@ -256,6 +352,7 @@ export default function Users() {
             )}
           </tbody>
         </table>
+        </div>
       </div>
     </div>
   );

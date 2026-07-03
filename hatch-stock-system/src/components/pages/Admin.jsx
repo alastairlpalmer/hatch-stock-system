@@ -411,6 +411,7 @@ function AdminProducts() {
       )}
 
       <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg overflow-hidden">
+        <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-zinc-800">
@@ -453,6 +454,7 @@ function AdminProducts() {
             )}
           </tbody>
         </table>
+        </div>
       </div>
     </div>
   );
@@ -1253,6 +1255,7 @@ function AdminSuppliers() {
       )}
 
       <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg overflow-hidden">
+        <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-zinc-800">
@@ -1293,6 +1296,7 @@ function AdminSuppliers() {
             )}
           </tbody>
         </table>
+        </div>
       </div>
     </div>
   );

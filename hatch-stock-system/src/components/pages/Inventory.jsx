@@ -320,6 +320,7 @@ export default function Inventory() {
           {batches.length === 0 ? (
             <div className="text-zinc-600 text-sm">No batches with remaining stock.</div>
           ) : (
+            <div className="overflow-x-auto">
             <table className="w-full text-xs">
               <thead>
                 <tr className="text-zinc-500">
@@ -399,6 +400,7 @@ export default function Inventory() {
                 })}
               </tbody>
             </table>
+            </div>
           )}
         </td>
       </tr>
@@ -1491,6 +1493,7 @@ export default function Inventory() {
                 <h3 className="text-sm font-medium text-amber-400">Products Missing Cost Price</h3>
                 <span className="text-xs text-zinc-500">— largest holdings first; set a cost and it leaves this list</span>
               </div>
+              <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-zinc-800">
@@ -1531,6 +1534,7 @@ export default function Inventory() {
                   ))}
                 </tbody>
               </table>
+              </div>
             </div>
           )}
 
@@ -1650,6 +1654,84 @@ export default function Inventory() {
             </div>
           ) : (
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg overflow-hidden">
+              {/* Mobile stacked cards */}
+              <div className="md:hidden">
+                {(() => {
+                  const whRows = Object.entries(getStockForWarehouse(selectedWarehouse)).map(([sku, qty]) => ({
+                    sku,
+                    total: qty,
+                  }));
+                  if (whRows.length === 0) {
+                    return (
+                      <p className="px-4 py-8 text-center text-zinc-600 text-sm">
+                        No stock in this warehouse. Use "Add Stock" or "Upload CSV" to add inventory.
+                      </p>
+                    );
+                  }
+                  const { groups, hiddenCount } = groupStockRows(whRows);
+                  if (groups.length === 0) {
+                    return (
+                      <p className="px-4 py-8 text-center text-zinc-600 text-sm">
+                        {isStockSearching ? 'No stock items match your search.' : `All ${hiddenCount} item(s) are out of stock in this warehouse.`}
+                      </p>
+                    );
+                  }
+                  return (
+                    <>
+                      {groups.map(group => (
+                        <React.Fragment key={group.category}>
+                          <div className="bg-zinc-800/60 px-4 py-2">
+                            <span className="text-emerald-400 font-medium text-xs uppercase tracking-wide">{group.category}</span>
+                            <span className="text-zinc-500 text-xs ml-3">
+                              {group.items.length} product{group.items.length === 1 ? '' : 's'} · {group.items.reduce((acc, r) => acc + r.total, 0)} units
+                            </span>
+                          </div>
+                          {group.items.map(({ sku, total: qty, product }) => {
+                            const value = (product?.unitCost || 0) * qty;
+                            return (
+                              <div key={sku} className="border-b border-zinc-800/50 px-4 py-3 space-y-2">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <p className="text-zinc-200 text-sm">{product?.name || '-'}</p>
+                                    <p className="text-zinc-500 text-xs">{sku}</p>
+                                  </div>
+                                  <div className="text-right shrink-0">
+                                    <p className="text-emerald-400 font-bold text-lg leading-tight">{qty}</p>
+                                    <p className="text-zinc-500 text-xs">£{value.toFixed(2)}</p>
+                                  </div>
+                                </div>
+                                <div className="flex items-center justify-between gap-2">
+                                  {renderBatchSummaryCell(sku, selectedWarehouse)}
+                                  <button
+                                    onClick={() => openEditStock(selectedWarehouse, sku, qty)}
+                                    className="px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-emerald-400 hover:text-emerald-300 text-sm"
+                                  >
+                                    Edit
+                                  </button>
+                                </div>
+                                {expandedBatchKey === `${sku}|${selectedWarehouse}` && (
+                                  <div className="overflow-x-auto">
+                                    <table className="w-full">
+                                      <tbody>{renderBatchDetailRow(sku, selectedWarehouse, 1)}</tbody>
+                                    </table>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </React.Fragment>
+                      ))}
+                      {hiddenCount > 0 && (
+                        <p className="px-4 py-2 text-center text-zinc-600 text-xs">
+                          {hiddenCount} out-of-stock item{hiddenCount === 1 ? '' : 's'} hidden
+                        </p>
+                      )}
+                    </>
+                  );
+                })()}
+              </div>
+              {/* Desktop table */}
+              <div className="hidden md:block overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-zinc-800">
@@ -1735,6 +1817,7 @@ export default function Inventory() {
                   })()}
                 </tbody>
               </table>
+              </div>
             </div>
           )}
 
@@ -1815,6 +1898,52 @@ export default function Inventory() {
                 <h3 className="text-sm font-medium text-amber-400">Missing Expiry Date</h3>
                 <span className="text-xs text-zinc-500">— signed in without an expiry; set one below</span>
               </div>
+              {/* Mobile cards */}
+              <div className="md:hidden">
+                {missingExpiryBatches
+                  .sort((a, b) => new Date(b.receivedAt) - new Date(a.receivedAt))
+                  .map(batch => {
+                    const product = data.products.find(p => p.sku === batch.sku);
+                    const warehouse = data.warehouses.find(w => w.id === batch.warehouseId);
+                    return (
+                      <div key={batch.id} className="border-b border-zinc-800/50 px-4 py-3 space-y-2">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-zinc-200 text-sm flex items-center gap-2 flex-wrap">
+                              {product?.name || batch.sku}
+                              <span className="text-xs bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded">No expiry</span>
+                            </div>
+                            <div className="text-zinc-600 text-xs">{batch.sku}</div>
+                          </div>
+                          <div className="text-right shrink-0">
+                            <p className="text-zinc-300 font-bold text-lg leading-tight">{batch.remainingQty}</p>
+                            <p className="text-zinc-500 text-xs">units</p>
+                          </div>
+                        </div>
+                        <div className="text-xs text-zinc-500">
+                          {warehouse?.name || batch.warehouseId} · received {new Date(batch.receivedAt).toLocaleDateString('en-GB')}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="date"
+                            value={expiryEdits[batch.id] || ''}
+                            onChange={e => setExpiryEdits(prev => ({ ...prev, [batch.id]: e.target.value }))}
+                            className="flex-1 bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-sm focus:outline-none focus:border-amber-500"
+                          />
+                          <button
+                            onClick={() => saveBatchExpiry(batch.id)}
+                            disabled={!expiryEdits[batch.id] || savingExpiryId === batch.id}
+                            className="px-3 py-2 bg-amber-600 text-white rounded text-xs font-medium hover:bg-amber-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {savingExpiryId === batch.id ? 'Saving...' : 'Save'}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+              {/* Desktop table */}
+              <div className="hidden md:block overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-zinc-800">
@@ -1867,6 +1996,7 @@ export default function Inventory() {
                     })}
                 </tbody>
               </table>
+              </div>
             </div>
           )}
 
@@ -1875,6 +2005,50 @@ export default function Inventory() {
             <div className="px-4 py-3 border-b border-zinc-800">
               <h3 className="text-sm font-medium text-zinc-400">Items Requiring Attention</h3>
             </div>
+            {/* Mobile cards */}
+            <div className="md:hidden">
+              {(() => {
+                const attention = getBatches()
+                  .filter(b => {
+                    const status = getExpiryStatus(b.expiryDate);
+                    return status && (status.status === 'expired' || status.status === 'critical' || status.status === 'warning');
+                  })
+                  .sort((a, b) => new Date(a.expiryDate) - new Date(b.expiryDate));
+                if (attention.length === 0) {
+                  return <p className="px-4 py-8 text-center text-zinc-600 text-sm">No items expiring soon</p>;
+                }
+                return attention.map(batch => {
+                  const product = data.products.find(p => p.sku === batch.sku);
+                  const warehouse = data.warehouses.find(w => w.id === batch.warehouseId);
+                  const expiryStatus = getExpiryStatus(batch.expiryDate);
+                  return (
+                    <div key={batch.id} className="border-b border-zinc-800/50 px-4 py-3 space-y-2">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-zinc-200 text-sm">{product?.name || batch.sku}</div>
+                          <div className="text-zinc-600 text-xs">{batch.sku}</div>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <p className="text-zinc-300 font-bold text-lg leading-tight">{batch.remainingQty}</p>
+                          <p className="text-zinc-500 text-xs">units</p>
+                        </div>
+                      </div>
+                      <div className="text-xs text-zinc-500">{warehouse?.name || batch.warehouseId}</div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className={`text-xs px-2 py-0.5 rounded ${expiryStatus?.color || ''}`}>
+                          {new Date(batch.expiryDate).toLocaleDateString('en-GB')}
+                        </span>
+                        <span className={`text-xs px-2 py-0.5 rounded ${expiryStatus?.color || ''}`}>
+                          {expiryStatus?.status === 'expired' ? 'EXPIRED' : expiryStatus?.label}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                });
+              })()}
+            </div>
+            {/* Desktop table */}
+            <div className="hidden md:block overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-zinc-800">
@@ -1929,6 +2103,7 @@ export default function Inventory() {
                 )}
               </tbody>
             </table>
+            </div>
           </div>
         </div>
       )}
@@ -1939,6 +2114,129 @@ export default function Inventory() {
             <h3 className="text-sm font-medium text-zinc-400">All Batches</h3>
             <span className="text-xs text-zinc-500">— grouped by product, earliest expiry first. Edit volume / expiry or delete a mistaken batch.</span>
           </div>
+          {/* Mobile cards */}
+          <div className="md:hidden">
+            {(() => {
+              const batches = getBatches();
+              if (batches.length === 0) {
+                return <p className="px-4 py-8 text-center text-zinc-600 text-sm">No batch records</p>;
+              }
+              // Group by SKU, products alphabetical, batches earliest-expiry first
+              const bySku = {};
+              batches.forEach(b => { (bySku[b.sku] ||= []).push(b); });
+              const groups = Object.keys(bySku)
+                .map(sku => ({
+                  sku,
+                  name: data.products.find(p => p.sku === sku)?.name || sku,
+                  batches: bySku[sku].sort((a, b) => {
+                    if (!a.expiryDate && !b.expiryDate) return new Date(a.receivedAt) - new Date(b.receivedAt);
+                    if (!a.expiryDate) return 1;
+                    if (!b.expiryDate) return -1;
+                    return new Date(a.expiryDate) - new Date(b.expiryDate);
+                  }),
+                }))
+                .sort((a, b) => a.name.localeCompare(b.name));
+
+              return groups.map(group => (
+                <React.Fragment key={group.sku}>
+                  <div className="bg-zinc-800/60 px-4 py-2">
+                    <span className="text-emerald-400 font-medium text-xs">{group.name}</span>
+                    <span className="text-zinc-500 text-xs ml-3">
+                      {group.sku} · {group.batches.length} batch{group.batches.length === 1 ? '' : 'es'} · {group.batches.reduce((acc, b) => acc + b.remainingQty, 0)} units
+                    </span>
+                  </div>
+                  {group.batches.map(batch => {
+                    const warehouse = data.warehouses.find(w => w.id === batch.warehouseId);
+                    const expiryStatus = getExpiryStatus(batch.expiryDate);
+                    const editing = batchEdits[batch.id];
+                    return (
+                      <div key={batch.id} className="border-b border-zinc-800/50 px-4 py-3 space-y-2">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="text-zinc-600 text-xs">{batch.sku}</p>
+                            <p className="text-zinc-400 text-xs">{warehouse?.name || batch.warehouseId}</p>
+                            <p className="text-zinc-500 text-xs">Received {new Date(batch.receivedAt).toLocaleDateString('en-GB')}</p>
+                          </div>
+                          <div className="text-right shrink-0">
+                            {editing ? (
+                              <input
+                                type="number" min="0" value={editing.remainingQty}
+                                onChange={e => setBatchEdits(p => ({ ...p, [batch.id]: { ...p[batch.id], remainingQty: e.target.value } }))}
+                                className="w-16 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-right"
+                              />
+                            ) : (
+                              <p className="text-zinc-200 font-bold text-lg leading-tight">{batch.remainingQty}</p>
+                            )}
+                            <p className="text-zinc-500 text-xs">units</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          {editing ? (
+                            <input
+                              type="date" value={editing.expiryDate}
+                              onChange={e => setBatchEdits(p => ({ ...p, [batch.id]: { ...p[batch.id], expiryDate: e.target.value } }))}
+                              className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs"
+                            />
+                          ) : batch.expiryDate ? (
+                            <span className={`text-xs px-2 py-0.5 rounded ${expiryStatus?.color || ''}`}>
+                              {new Date(batch.expiryDate).toLocaleDateString('en-GB')}
+                            </span>
+                          ) : (
+                            <span className="text-xs bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded" title="No expiry recorded">
+                              No expiry
+                            </span>
+                          )}
+                          {editing ? (
+                            <label className="flex items-center gap-1 text-zinc-400 text-xs">
+                              <input
+                                type="checkbox" checked={editing.hasDamage}
+                                onChange={e => setBatchEdits(p => ({ ...p, [batch.id]: { ...p[batch.id], hasDamage: e.target.checked } }))}
+                              />
+                              Damaged
+                            </label>
+                          ) : batch.hasDamage ? (
+                            <span className="text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded" title={batch.damageNotes}>Damaged</span>
+                          ) : (
+                            <span className="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded">OK</span>
+                          )}
+                        </div>
+                        <div className="flex gap-2 text-xs">
+                          {editing ? (
+                            <>
+                              <button
+                                onClick={() => saveBatchEditRow(batch.id)} disabled={savingBatchId === batch.id}
+                                className="px-3 py-2 bg-emerald-600 text-white rounded disabled:opacity-50"
+                              >
+                                {savingBatchId === batch.id ? '...' : 'Save'}
+                              </button>
+                              <button onClick={() => cancelBatchEdit(batch.id)} className="px-3 py-2 bg-zinc-700 text-zinc-300 rounded">Cancel</button>
+                            </>
+                          ) : (
+                            <>
+                              <button
+                                onClick={() => startBatchEdit(batch)}
+                                className="px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-emerald-400 hover:text-emerald-300"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                onClick={() => deleteBatchRow(batch.id)} disabled={deletingBatchId === batch.id}
+                                className="px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-red-400 hover:text-red-300 disabled:opacity-50"
+                              >
+                                {deletingBatchId === batch.id ? '...' : 'Delete'}
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </React.Fragment>
+              ));
+            })()}
+          </div>
+          {/* Desktop table */}
+          <div className="hidden md:block overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-zinc-800">
@@ -2070,6 +2368,7 @@ export default function Inventory() {
               })()}
             </tbody>
           </table>
+          </div>
         </div>
       )}
     </div>

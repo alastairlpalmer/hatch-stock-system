@@ -95,6 +95,7 @@ function PredictionsPanel({ selectedLocationIds, locations }) {
                     state.machines.map(m => (
                       <div key={m.machineId} className="mt-2">
                         <p className="text-[11px] text-zinc-500 mb-1">{m.machineName}</p>
+                        <div className="overflow-x-auto">
                         <table className="w-full text-[11px]">
                           <thead>
                             <tr className="text-zinc-600">
@@ -113,6 +114,7 @@ function PredictionsPanel({ selectedLocationIds, locations }) {
                             ))}
                           </tbody>
                         </table>
+                        </div>
                       </div>
                     ))
                   )
