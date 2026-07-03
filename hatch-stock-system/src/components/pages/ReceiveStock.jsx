@@ -19,6 +19,19 @@ const getRemaining = (item) => Math.max(0, (item.quantity || 0) - (item.received
 
 const lotSum = (lots) => (lots || []).reduce((sum, lot) => sum + (lot.quantity || 0), 0);
 
+// Fresh-meal ORDER placeholder lines ("40 × Meat — rotating menu"). The
+// weekly menu means the PO couldn't name flavours; at receiving the operator
+// allocates the placeholder's quantity to the ACTUAL flavour SKUs in the box
+// (each with its own expiry), sent to the backend as `forSku` lines.
+const FRESH_MEAL_PLACEHOLDER_CATEGORY = 'Fresh Meal Order';
+
+const emptyFlavourLot = (quantity = 0) => ({
+  ...emptyLot(quantity),
+  actualSku: '',
+  actualName: '',
+  isNew: false,
+});
+
 export default function ReceiveStock() {
   const { data, receiveOrder } = useStock();
   const [activeSubTab, setActiveSubTab] = useState('receive');
@@ -76,14 +89,32 @@ export default function ReceiveStock() {
     return () => { cancelled = true; };
   }, [activeSubTab]);
 
+  // Placeholder detection uses the order item's included product category,
+  // falling back to the shared catalogue.
+  const isPlaceholderItem = (item) =>
+    (item.product?.category || data.products.find(p => p.sku === item.sku)?.category)
+      === FRESH_MEAL_PLACEHOLDER_CATEGORY;
+
+  const placeholderMealType = (sku) =>
+    data.products.find(p => p.sku === sku)?.mealType || null;
+
+  // Flavour choices for an allocation: fresh meals of the placeholder's meal
+  // type (all fresh meals when the type is unknown).
+  const flavourOptions = (orderSku) => {
+    const mealType = placeholderMealType(orderSku);
+    return data.products.filter(p => p.isFreshMeal && (!mealType || p.mealType === mealType));
+  };
+
   const selectOrder = (order) => {
     setSelectedOrder(order);
     // For orders with a warehouse, pre-select it. For custom address, user must choose
     setReceiveWarehouseId(order.warehouseId || '');
     const items = {};
     order.items.forEach(item => {
-      // Default "receiving now" to what's still outstanding on the line
-      items[item.sku] = [emptyLot(getRemaining(item))];
+      // Default "receiving now" to what's still outstanding on the line.
+      // Placeholder lines start EMPTY — nothing is booked until the operator
+      // allocates the flavours actually found in the box.
+      items[item.sku] = isPlaceholderItem(item) ? [] : [emptyLot(getRemaining(item))];
     });
     setReceivedItems(items);
     setBulkExpiry('');
@@ -97,6 +128,13 @@ export default function ReceiveStock() {
     setReceivedItems(prev => ({
       ...prev,
       [sku]: (prev[sku] || []).map((lot, i) => i === lotIdx ? { ...lot, [field]: value } : lot),
+    }));
+  };
+
+  const updateLotFields = (sku, lotIdx, patch) => {
+    setReceivedItems(prev => ({
+      ...prev,
+      [sku]: (prev[sku] || []).map((lot, i) => i === lotIdx ? { ...lot, ...patch } : lot),
     }));
   };
 
@@ -116,6 +154,17 @@ export default function ReceiveStock() {
       ...prev,
       [sku]: (prev[sku] || []).filter((_, i) => i !== lotIdx),
     }));
+  };
+
+  // Add a flavour allocation row against a placeholder order line.
+  const addFlavourLot = (sku) => {
+    const orderItem = selectedOrder?.items.find(i => i.sku === sku);
+    const remaining = orderItem ? getRemaining(orderItem) : 0;
+    setReceivedItems(prev => {
+      const lots = prev[sku] || [];
+      const leftover = Math.max(0, remaining - lotSum(lots));
+      return { ...prev, [sku]: [...lots, emptyFlavourLot(leftover)] };
+    });
   };
 
   // Fill every currently-empty expiry field (all lots) with the bulk date
@@ -235,16 +284,25 @@ export default function ReceiveStock() {
     const remaining = getRemaining(item);
     const lots = receivedItems[item.sku] || [];
     const receivingNow = lotSum(lots);
+    const placeholder = isPlaceholderItem(item);
     return {
       item,
       remaining,
       lots,
       receivingNow,
+      placeholder,
+      // A flavour allocation with units needs a flavour: picked from the
+      // catalogue, or a new sku (+ name) typed for a menu item we've not seen.
+      allocationIncomplete: placeholder && lots.some(lot =>
+        (lot.quantity || 0) > 0 &&
+        (!lot.actualSku?.trim() || (lot.isNew && !lot.actualName?.trim()))
+      ),
       over: receivingNow > remaining,
       short: remaining > 0 && receivingNow < remaining,
     };
   }) : [];
 
+  const hasAllocationError = orderLineState.some(l => l.allocationIncomplete);
   const hasOverError = orderLineState.some(l => l.over);
   const anyShort = orderLineState.some(l => l.short);
   const totalReceivingNow = orderLineState.reduce((sum, l) => sum + l.receivingNow, 0);
@@ -258,25 +316,38 @@ export default function ReceiveStock() {
   const needsExpiryAck = missingExpiryLines > 0 && !noExpiryAck;
 
   const confirmReceive = async () => {
-    if (!selectedOrder || !receiveWarehouseId || hasOverError || totalReceivingNow <= 0 || needsExpiryAck) return;
+    if (!selectedOrder || !receiveWarehouseId || hasOverError || hasAllocationError
+      || totalReceivingNow <= 0 || needsExpiryAck) return;
 
     setLoading(true);
     setError(null);
 
     try {
       // One line per lot with qty > 0 (multiple lines per SKU allowed —
-      // one per expiry lot)
+      // one per expiry lot). Placeholder allocations book under the ACTUAL
+      // flavour sku while counting against the placeholder line via forSku.
       const lines = [];
       selectedOrder.items.forEach(item => {
+        const placeholder = isPlaceholderItem(item);
         (receivedItems[item.sku] || []).forEach(lot => {
           if ((lot.quantity || 0) > 0) {
-            lines.push({
-              sku: item.sku,
-              quantity: lot.quantity,
-              expiryDate: lot.expiryDate || null,
-              hasDamage: !!lot.hasDamage,
-              damageNotes: lot.damageNotes || '',
-            });
+            lines.push(placeholder
+              ? {
+                sku: lot.actualSku.trim(),
+                forSku: item.sku,
+                ...(lot.isNew && lot.actualName?.trim() ? { name: lot.actualName.trim() } : {}),
+                quantity: lot.quantity,
+                expiryDate: lot.expiryDate || null,
+                hasDamage: !!lot.hasDamage,
+                damageNotes: lot.damageNotes || '',
+              }
+              : {
+                sku: item.sku,
+                quantity: lot.quantity,
+                expiryDate: lot.expiryDate || null,
+                hasDamage: !!lot.hasDamage,
+                damageNotes: lot.damageNotes || '',
+              });
           }
         });
       });
@@ -523,8 +594,141 @@ export default function ReceiveStock() {
                   <div className="col-span-2">Damage Notes</div>
                 </div>
 
-                {orderLineState.map(({ item, remaining, lots, receivingNow, over }) => {
+                {orderLineState.map(({ item, remaining, lots, receivingNow, over, placeholder, allocationIncomplete }) => {
                   const product = data.products.find(p => p.sku === item.sku);
+
+                  // Fresh-meal placeholder line: allocate the ordered quantity
+                  // to the ACTUAL flavours found in the box.
+                  if (placeholder) {
+                    const options = flavourOptions(item.sku);
+                    return (
+                      <div key={item.sku} className="py-3 border-b border-zinc-800 last:border-0 space-y-2">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <div>
+                            <span className="text-zinc-200">{product?.name || item.sku}</span>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-teal-500/15 text-teal-300 ml-2">rotating menu</span>
+                            <div className="text-zinc-600 text-xs">
+                              Ordered {item.quantity} · already received {item.receivedQty || 0}
+                            </div>
+                          </div>
+                          {remaining === 0 ? (
+                            <span className="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded">Fully received</span>
+                          ) : (
+                            <span className={`text-xs px-2 py-0.5 rounded ${receivingNow === remaining ? 'bg-emerald-500/20 text-emerald-400' : 'bg-zinc-800 text-zinc-400'}`}>
+                              {receivingNow} of {remaining} allocated to flavours
+                            </span>
+                          )}
+                        </div>
+
+                        {remaining > 0 && lots.map((lot, lotIdx) => (
+                          <div key={lotIdx} className="bg-zinc-800/30 rounded p-2 space-y-2">
+                            <div className="grid grid-cols-2 gap-2 md:grid-cols-12 md:items-center">
+                              <div className="col-span-2 md:col-span-4">
+                                <div className="text-[10px] uppercase tracking-wide text-zinc-500 md:hidden">Flavour</div>
+                                <select
+                                  value={lot.isNew ? '__new__' : (lot.actualSku || '')}
+                                  onChange={e => {
+                                    const v = e.target.value;
+                                    if (v === '__new__') {
+                                      updateLotFields(item.sku, lotIdx, { isNew: true, actualSku: '', actualName: '' });
+                                    } else {
+                                      const chosen = options.find(o => o.sku === v);
+                                      updateLotFields(item.sku, lotIdx, { isNew: false, actualSku: v, actualName: chosen?.name || '' });
+                                    }
+                                  }}
+                                  className={`${inputClass} ${(lot.quantity || 0) > 0 && !lot.actualSku && !lot.isNew ? 'border-amber-500' : ''}`}
+                                >
+                                  <option value="">Choose flavour…</option>
+                                  {options.map(o => (
+                                    <option key={o.sku} value={o.sku}>{o.name}</option>
+                                  ))}
+                                  <option value="__new__">+ New flavour (not in catalogue yet)</option>
+                                </select>
+                              </div>
+                              <div className="md:col-span-2">
+                                <div className="text-[10px] uppercase tracking-wide text-zinc-500 md:hidden">Qty</div>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  value={lot.quantity || ''}
+                                  onChange={e => {
+                                    const parsed = parseInt(e.target.value, 10) || 0;
+                                    updateLot(item.sku, lotIdx, 'quantity', Math.max(parsed, 0));
+                                  }}
+                                  className={`${inputClass} text-center ${over ? 'border-red-500 focus:border-red-500' : ''}`}
+                                />
+                              </div>
+                              <div className="md:col-span-2">
+                                <div className="text-[10px] uppercase tracking-wide text-zinc-500 md:hidden">Expiry</div>
+                                <input
+                                  type="date"
+                                  value={lot.expiryDate || ''}
+                                  onChange={e => updateLot(item.sku, lotIdx, 'expiryDate', e.target.value)}
+                                  className={inputClass}
+                                />
+                              </div>
+                              <div className="md:col-span-1 flex md:justify-center items-center gap-2">
+                                <div className="text-[10px] uppercase tracking-wide text-zinc-500 md:hidden">Damage?</div>
+                                {renderDamageToggle(item.sku, lotIdx, lot)}
+                              </div>
+                              <div className="md:col-span-2">
+                                <div className="text-[10px] uppercase tracking-wide text-zinc-500 md:hidden">Damage notes</div>
+                                {renderDamageNotes(item.sku, lotIdx, lot)}
+                              </div>
+                              <div className="md:col-span-1 md:text-right">
+                                <button
+                                  onClick={() => removeLot(item.sku, lotIdx)}
+                                  className="text-xs text-zinc-500 hover:text-red-400"
+                                >
+                                  remove
+                                </button>
+                              </div>
+                            </div>
+                            {lot.isNew && (
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                <input
+                                  type="text"
+                                  placeholder="New SKU (from the label)"
+                                  value={lot.actualSku}
+                                  onChange={e => updateLot(item.sku, lotIdx, 'actualSku', e.target.value)}
+                                  className={`${inputClass} ${(lot.quantity || 0) > 0 && !lot.actualSku?.trim() ? 'border-amber-500' : ''}`}
+                                />
+                                <input
+                                  type="text"
+                                  placeholder="Flavour name"
+                                  value={lot.actualName}
+                                  onChange={e => updateLot(item.sku, lotIdx, 'actualName', e.target.value)}
+                                  className={`${inputClass} ${(lot.quantity || 0) > 0 && !lot.actualName?.trim() ? 'border-amber-500' : ''}`}
+                                />
+                              </div>
+                            )}
+                          </div>
+                        ))}
+
+                        {remaining > 0 && (
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <button
+                              onClick={() => addFlavourLot(item.sku)}
+                              className="text-xs text-emerald-400 hover:text-emerald-300"
+                            >
+                              + Add flavour
+                            </button>
+                            {over && (
+                              <div className="text-xs text-red-400 bg-red-500/10 px-2 py-1 rounded">
+                                Allocated {receivingNow} exceeds the {remaining} remaining on this line.
+                              </div>
+                            )}
+                            {allocationIncomplete && (
+                              <div className="text-xs text-amber-400 bg-amber-500/10 px-2 py-1 rounded">
+                                Every allocation with units needs a flavour (and a name for new ones).
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  }
+
                   const mainLot = lots[0] || emptyLot(0);
                   return (
                     <div key={item.sku} className="py-3 border-b border-zinc-800 last:border-0 space-y-2">
@@ -742,7 +946,7 @@ export default function ReceiveStock() {
 
               <button
                 onClick={confirmReceive}
-                disabled={!receiveWarehouseId || loading || hasOverError || totalReceivingNow <= 0 || needsExpiryAck}
+                disabled={!receiveWarehouseId || loading || hasOverError || hasAllocationError || totalReceivingNow <= 0 || needsExpiryAck}
                 className="w-full sm:w-auto px-4 py-2 bg-emerald-600 text-white rounded text-sm font-medium hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed"
                 title={
                   hasOverError

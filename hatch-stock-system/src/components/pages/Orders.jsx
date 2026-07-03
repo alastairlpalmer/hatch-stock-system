@@ -6,6 +6,7 @@ import { useStock } from '../../context/StockContext';
 import ordersService from '../../services/orders.service';
 import buyingListsService from '../../services/buyingLists.service';
 import vendliveService from '../../services/vendlive.service';
+import productsService from '../../services/products.service';
 
 // Compact "2h ago" / "just now" formatter for sync timestamps.
 function formatRelativeTime(ts) {
@@ -516,35 +517,10 @@ export default function Orders() {
     .filter(i => i.selected)
     .reduce((acc, i) => acc + (i.orderQty * i.unitPrice), 0);
 
-  // Buying lists and POs carry concrete SKUs, but a Frive suggestion is a
-  // meal-type group. Split a group's quantity across its flavour SKUs by recent
-  // sell-through (even split if there's no sales signal), assigning any rounding
-  // remainder to the strongest sellers. Non-group lines pass through unchanged.
-  const splitGroupQuantities = (item) => {
-    const members = item.members || [];
-    if (members.length === 0) return [];
-    const totalVel = members.reduce((a, m) => a + (m.velocityLong || m.blendedVelocity || 0), 0);
-    const shares = members.map(m => ({
-      member: m,
-      raw: totalVel > 0
-        ? item.orderQty * ((m.velocityLong || m.blendedVelocity || 0) / totalVel)
-        : item.orderQty / members.length,
-    }));
-    let assigned = 0;
-    const lines = shares.map(s => {
-      const q = Math.floor(s.raw);
-      assigned += q;
-      return { member: s.member, quantity: q, frac: s.raw - q };
-    });
-    let remainder = item.orderQty - assigned;
-    lines.sort((a, b) => b.frac - a.frac);
-    for (let i = 0; remainder > 0; i++, remainder--) lines[i % lines.length].quantity += 1;
-    return lines.filter(l => l.quantity > 0);
-  };
-
-  // Expand a suggestion line into buying-list item lines. Fresh-meal groups
-  // become one line per member SKU; each member inherits the group's supplier
-  // and netting fields and carries the group's perLocation breakdown.
+  // Map a suggestion line to buying-list item lines. Fresh-meal groups stay
+  // as ONE meal-type line (like the Location Stock page) — the Frive menu
+  // rotates weekly, so this week's flavour SKUs would be wrong by delivery.
+  // The actual flavours are allocated at RECEIVING, once the box arrives.
   const expandToListLines = (item) => {
     const upb = item.unitsPerBox || 1;
     const baseFields = {
@@ -570,26 +546,27 @@ export default function Orders() {
         boxes: upb > 1 ? Math.ceil(item.orderQty / upb) : item.orderQty,
       }];
     }
-    return splitGroupQuantities(item).map(({ member, quantity }) => ({
+    return [{
       ...baseFields,
-      sku: member.sku,
-      name: member.name || `${item.name} (${member.sku})`,
+      sku: null,
+      isFreshMeal: true,
       mealType: item.mealType,
-      quantity,
-      boxes: upb > 1 ? Math.ceil(quantity / upb) : quantity,
-    }));
+      name: item.name || `${item.mealType} — fresh meals`,
+      quantity: item.orderQty,
+      boxes: upb > 1 ? Math.ceil(item.orderQty / upb) : item.orderQty,
+    }];
   };
 
-  // Same expansion, but shaped as PO order lines.
-  const expandToOrderLines = (item) => {
+  // PO order lines for the direct create-POs path. Fresh-meal groups order
+  // against a meal-type placeholder product (resolved via `placeholderSkus`,
+  // ensured server-side just before creation).
+  const expandToOrderLines = (item, placeholderSkus = {}) => {
     if (!isFreshMealGroup(item)) {
       return [{ sku: item.sku, quantity: item.orderQty, unitPrice: item.unitPrice }];
     }
-    return splitGroupQuantities(item).map(({ member, quantity }) => ({
-      sku: member.sku,
-      quantity,
-      unitPrice: item.unitPrice,
-    }));
+    const sku = placeholderSkus[item.mealType];
+    if (!sku) return [];
+    return [{ sku, quantity: item.orderQty, unitPrice: item.unitPrice }];
   };
 
   // Primary CTA: persist the plan as a draft buying list and jump to it.
@@ -640,6 +617,23 @@ export default function Orders() {
     setCreatingOrders(true);
     setPanelBanner(null);
 
+    // Fresh-meal groups need their meal-type placeholder products to exist
+    // before PO lines can reference them.
+    let placeholderSkus = {};
+    const groupMealTypes = [...new Set(selected.filter(isFreshMealGroup).map(i => i.mealType))];
+    if (groupMealTypes.length > 0) {
+      try {
+        placeholderSkus = await productsService.ensureFreshMealPlaceholders(groupMealTypes);
+      } catch (err) {
+        setPanelBanner({
+          type: 'error',
+          message: `Could not prepare fresh-meal order lines: ${err.response?.data?.error || err.message}`,
+        });
+        setCreatingOrders(false);
+        return;
+      }
+    }
+
     const warehouseId = data.warehouses[0]?.id || null;
     const bySupplier = new Map();
     for (const item of selected) {
@@ -656,7 +650,7 @@ export default function Orders() {
     let idx = 0;
     for (const [supplierId, items] of bySupplier.entries()) {
       const supplierName = items[0]?.supplierName || 'No preferred supplier';
-      const lines = items.flatMap(expandToOrderLines).filter(l => l.quantity > 0);
+      const lines = items.flatMap(i => expandToOrderLines(i, placeholderSkus)).filter(l => l.quantity > 0);
       if (lines.length === 0) { idx++; continue; }
       const subtotal = lines.reduce((a, l) => a + l.quantity * l.unitPrice, 0);
       try {

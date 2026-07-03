@@ -1,29 +1,28 @@
-# Supplier ordering config + VendLive prediction cross-check
+# Fresh meals ordered at meal-type level (rotating weekly menu)
 
-Phase D (minus auth, deferred) — suppliers gain ordering config that the buying flow actually uses, and the planner gets VendLive's own predictions as a sanity check.
+The Frive menu changes every week, so expanding a "Meat" suggestion into this week's flavour SKUs produced orders for products that won't exist by delivery. Fresh meals are now ordered the way the Location Stock page treats them — as **Meat / Veg + Vegan buckets** — with actual flavours resolved only at receiving, when the box is in hand.
 
-## ⚠️ Deploy steps (order matters)
+**No DB migration** — placeholders are ordinary product rows created on demand. Deploy backend then frontend as usual.
 
-1. **Run `hatch-backend/manual-sql/015_supplier_config.sql` in the Supabase SQL editor first** (idempotent; three nullable supplier columns).
-2. Deploy backend (Railway), then frontend (Vercel).
+## Buying lists
 
-## Supplier ordering config
+- Fresh-meal groups stay as ONE meal-type line ("Meat — fresh meals × 40", tagged *rotating menu*) — no flavour expansion at save time.
+- Same on the PDF, public share view and copy-as-WhatsApp text ("rotating menu" in the SKU column).
 
-- Suppliers now carry **order days** (e.g. Wed/Thu), **lead time** (days to delivery) and **minimum order value** — edited in Admin → Suppliers (weekday toggle chips, two number fields, config summary in the table).
-- **Buying list detail**: each supplier section shows order-day and lead-time chips plus a live minimum-order indicator — amber "£38 short of £150 minimum" with a progress bar while under, "minimum met ✓" once over; recomputes as quantities are edited.
-- **Weekly-buy planner**: same order-day chips and shortfall warning on each supplier group header.
-- **PO creation from a buying list**: expectedDate now uses the supplier's lead time (order date + lead days) when configured, falling back to the Saturday before the target restock Monday.
-- **PDF**: supplier sections print their order days/lead time and a shortfall warning line when under minimum.
-- Suppliers route gains zod validation (previously none).
+## Purchase orders
 
-## VendLive prediction cross-check
+- POs order against one **auto-managed placeholder product per meal type** (`FRIVE-MEAT`, `FRIVE-VEG-VEGAN`…, category "Fresh Meal Order"). Placeholders are deliberately not `isFreshMeal`, so they never join fresh-meal group aggregation in suggestions or pick lists.
+- Both the buying-list → create-orders path and the planner's direct create-POs path resolve placeholders (new `POST /api/products/fresh-meal-placeholders`).
 
-- New `GET /api/vendlive/predictions?locationId=` wrapping VendLive's `/stock-report/?predictions` (previously dead code) — per mapped machine, best-effort normalised `{name, sku, currentStock, predicted}` rows; upstream failures return 502, not configured 409, no mapped machines 404.
-- Planner gains a collapsible **"VendLive predictions (cross-check)"** panel: per selected location, a Compare button renders VendLive's current/predicted numbers side-by-side — informational only, never merged into the suggestion lines.
+## Receiving — flavour allocation
+
+- A placeholder line on the receive screen becomes an **"allocate flavours"** block with an "N of M allocated" counter: per-flavour rows with a dropdown filtered to that meal type, or "+ New flavour" (SKU + name typed from the label — auto-created as a confirmed fresh meal inheriting the meal type), each with its own qty, expiry and damage fields.
+- New `forSku` receive-line field: units count against the placeholder ORDER line while the batch is booked under the **real flavour SKU** — so expiry tracking, FEFO pick lists and machine stock all keep working on real products.
+- Server-side rules: per-line sums validated against outstanding quantity, over-allocation rejected, and `forSku` allocation is only allowed against placeholder lines (no arbitrary substitution on normal lines). Works with partial receiving / close-short as usual.
 
 ## Verification
 
-- Backend: 225/225 vitest tests green (19 files; new: supplier schema validation, stock-report normaliser incl. hostile payload shapes)
-- Frontend: production build clean; supplier form, planner chips and predictions panel verified in preview
+- Backend: 232/232 vitest tests green (7 new allocation cases: multi-flavour split, oversubscription, prior partial receipts, self-reference, mixed receipts)
+- Frontend: production build clean
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
