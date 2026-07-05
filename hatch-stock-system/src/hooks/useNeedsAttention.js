@@ -1,7 +1,8 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useStock } from '../context/StockContext';
 import { vendliveService } from '../services/vendlive.service';
 import { inventoryService } from '../services/inventory.service';
+import { attentionService } from '../services/attention.service';
 import usePickLists from './usePickLists';
 
 // Builds the Dashboard's prioritised "Needs attention" list. Free items come
@@ -34,6 +35,9 @@ export default function useNeedsAttention() {
   const [healthDone, setHealthDone] = useState(false);
   const [expiryRows, setExpiryRows] = useState([]);
   const [expiryDone, setExpiryDone] = useState(false);
+  // Admin dismissals (server-shared). Fail-soft like the other fetches: if
+  // the endpoint is unreachable nothing is hidden.
+  const [dismissals, setDismissals] = useState([]);
   const { lists: pickLists, loading: pickListsLoading } = usePickLists({ limit: 20 });
 
   useEffect(() => {
@@ -46,6 +50,9 @@ export default function useNeedsAttention() {
       .then((res) => { if (!cancelled) setExpiryRows(res.rows || []); })
       .catch(() => {})
       .finally(() => { if (!cancelled) setExpiryDone(true); });
+    attentionService.getDismissals()
+      .then((res) => { if (!cancelled) setDismissals(Array.isArray(res) ? res : []); })
+      .catch(() => {});
     return () => { cancelled = true; };
   }, []);
 
@@ -222,7 +229,56 @@ export default function useNeedsAttention() {
     return [...out.filter((i) => i.severity === 'red'), ...out.filter((i) => i.severity === 'amber')];
   }, [data, health, expiryRows, pickLists]);
 
+  // A dismissal hides an item only while its SIGNATURE (rendered title, which
+  // carries the counts) still matches and it is under 7 days old — a changed
+  // signal or a week's silence resurfaces it.
+  const DISMISSAL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+  const { visibleItems, dismissedItems } = useMemo(() => {
+    const active = new Map(
+      dismissals
+        .filter((d) => Date.now() - new Date(d.createdAt).getTime() < DISMISSAL_TTL_MS)
+        .map((d) => [d.itemId, d.signature])
+    );
+    const visible = [];
+    const hidden = [];
+    items.forEach((item) => {
+      if (active.get(item.id) === item.title) hidden.push(item);
+      else visible.push(item);
+    });
+    return { visibleItems: visible, dismissedItems: hidden };
+  }, [items, dismissals]);
+
+  // Optimistic dismiss/restore; server errors roll the local state back by
+  // refetching (simplest correct recovery).
+  const dismiss = useCallback(async (item) => {
+    setDismissals((prev) => [
+      ...prev.filter((d) => d.itemId !== item.id),
+      { itemId: item.id, signature: item.title, createdAt: new Date().toISOString() },
+    ]);
+    try {
+      await attentionService.dismiss(item.id, item.title);
+    } catch {
+      attentionService.getDismissals().then((res) => setDismissals(Array.isArray(res) ? res : [])).catch(() => {});
+    }
+  }, []);
+
+  const restore = useCallback(async (itemId) => {
+    setDismissals((prev) => prev.filter((d) => d.itemId !== itemId));
+    try {
+      await attentionService.restore(itemId);
+    } catch {
+      attentionService.getDismissals().then((res) => setDismissals(Array.isArray(res) ? res : [])).catch(() => {});
+    }
+  }, []);
+
   const loading = !healthDone || !expiryDone || pickListsLoading;
 
-  return { items, allClear: !loading && items.length === 0, loading };
+  return {
+    items: visibleItems,
+    dismissedItems,
+    allClear: !loading && visibleItems.length === 0,
+    loading,
+    dismiss,
+    restore,
+  };
 }
