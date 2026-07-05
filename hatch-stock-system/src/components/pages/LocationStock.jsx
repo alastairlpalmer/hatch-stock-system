@@ -269,6 +269,11 @@ export default function LocationStock() {
   const rowCount = regularProducts.length + mealGroups.length;
 
   const hasAssignedItems = location?.assignedItems?.length > 0;
+  // Mapped locations mirror their product list from the VendLive planogram on
+  // every stock sync — manual add/remove would be silently reverted, so the
+  // controls are hidden and a banner points at VendLive instead. Unmapped
+  // locations keep the manual workflow.
+  const planogramManaged = locationMachines.length > 0;
   const colSpan = showConfig ? 9 : 7;
 
   // One per-SKU stock row. Reused for regular products and for the expanded
@@ -356,7 +361,7 @@ export default function LocationStock() {
           {isLive ? (
             <div className="flex items-center justify-center gap-1">
               <span className="text-xs text-zinc-600" title="Stock is read from VendLive">via VendLive</span>
-              {showConfig && hasAssignedItems && (
+              {showConfig && hasAssignedItems && !planogramManaged && (
                 <button
                   onClick={() => removeProductFromLocation(product.sku)}
                   className="w-8 h-8 rounded bg-zinc-800 text-red-400 hover:bg-red-900/50 hover:text-red-300 ml-2"
@@ -372,7 +377,7 @@ export default function LocationStock() {
               <button onClick={() => adjustStock(product.sku, -1)} className="w-8 h-8 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white">-</button>
               <button onClick={() => adjustStock(product.sku, 1)} className="w-8 h-8 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white">+</button>
               <button onClick={() => adjustStock(product.sku, 10)} className="w-8 h-8 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white text-xs">+10</button>
-              {showConfig && hasAssignedItems && (
+              {showConfig && hasAssignedItems && !planogramManaged && (
                 <button
                   onClick={() => removeProductFromLocation(product.sku)}
                   className="w-8 h-8 rounded bg-zinc-800 text-red-400 hover:bg-red-900/50 hover:text-red-300 ml-2"
@@ -548,7 +553,7 @@ export default function LocationStock() {
               <button onClick={() => adjustStock(product.sku, 10)} className="flex-1 h-10 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white text-xs">+10</button>
             </>
           )}
-          {showConfig && hasAssignedItems && (
+          {showConfig && hasAssignedItems && !planogramManaged && (
             <button
               onClick={() => removeProductFromLocation(product.sku)}
               className="h-10 w-10 shrink-0 rounded bg-zinc-800 text-red-400 hover:bg-red-900/50 hover:text-red-300 ml-auto"
@@ -766,16 +771,18 @@ export default function LocationStock() {
 
           {showConfig && (
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4">
-              <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
                 <div>
                   <h4 className="text-sm font-medium text-zinc-300">Assigned Products</h4>
                   <p className="text-xs text-zinc-500 mt-1">
-                    {hasAssignedItems
-                      ? `${products.length} products assigned to this location`
-                      : 'All products allowed (no specific assignments)'}
+                    {planogramManaged
+                      ? `${products.length} products — synced from the VendLive planogram`
+                      : hasAssignedItems
+                        ? `${products.length} products assigned to this location`
+                        : 'All products allowed (no specific assignments)'}
                   </p>
                 </div>
-                {unassignedProducts.length > 0 && (
+                {!planogramManaged && unassignedProducts.length > 0 && (
                   <button
                     onClick={() => setShowAddProduct(!showAddProduct)}
                     className="px-3 py-1.5 bg-emerald-600 text-white rounded text-sm hover:bg-emerald-500"
@@ -785,7 +792,14 @@ export default function LocationStock() {
                 )}
               </div>
 
-              {showAddProduct && unassignedProducts.length > 0 && (
+              {planogramManaged && (
+                <div className="mb-3 px-3 py-2 rounded-lg bg-teal-500/10 border border-teal-500/30 text-xs text-teal-300">
+                  This machine's product list syncs from its VendLive planogram on every stock
+                  sync — add or remove products in VendLive and they'll appear here automatically.
+                </div>
+              )}
+
+              {!planogramManaged && showAddProduct && unassignedProducts.length > 0 && (
                 <div className="mb-4 p-3 bg-zinc-800/50 rounded-lg">
                   <p className="text-xs text-zinc-400 mb-2">Select products to add:</p>
                   <div className="flex flex-wrap gap-2 max-h-32 overflow-y-auto">
