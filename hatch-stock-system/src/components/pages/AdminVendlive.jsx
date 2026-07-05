@@ -951,6 +951,14 @@ function StockSyncHistory() {
                     </td>
                     <td className="px-4 py-3">
                       <span className="text-xs px-2 py-0.5 rounded bg-blue-500/20 text-blue-400">{sync.syncType}</span>
+                      {sync.metadata?.planogram?.mirrored && (sync.metadata.planogram.added > 0 || sync.metadata.planogram.removed > 0) && (
+                        <span
+                          className="text-xs px-2 py-0.5 rounded bg-teal-500/15 text-teal-300 ml-1.5"
+                          title={`Planogram mirror: ${sync.metadata.planogram.assigned} assigned · ${sync.metadata.planogram.maxFilled} max levels filled`}
+                        >
+                          +{sync.metadata.planogram.added} / −{sync.metadata.planogram.removed} items
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-right text-zinc-200">{sync.productsUpdated ?? 0}</td>
                     <td className="px-4 py-3 text-right">

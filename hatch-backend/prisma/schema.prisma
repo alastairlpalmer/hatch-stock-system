@@ -545,6 +545,14 @@ model VendliveMachineMapping {
   machineName       String   @map("machine_name")
   locationId        String?  @map("location_id")
   autoCreated       Boolean  @default(false) @map("auto_created")
+  // Last-seen planogram for THIS machine: [{ sku, idealCapacity }]. Written on
+  // every successful stock sync; a location's assignments are recomputed as
+  // the UNION across all its machines' stored planograms, so syncing one
+  // machine never wipes a sibling's products. Capacity is stored so
+  // cross-machine maxStock sums never need sibling API calls. See
+  // manual-sql/018_planogram_mirror.sql and services/planogram-mirror.js.
+  planogramSkus     Json?     @map("planogram_skus")
+  planogramSyncedAt DateTime? @map("planogram_synced_at")
   createdAt         DateTime @default(now()) @map("created_at")
 
   location Location? @relation(fields: [locationId], references: [id])

@@ -1,6 +1,7 @@
 import prisma from '../utils/db.js';
 import * as vendliveApi from './vendlive.js';
 import { guessFreshMeal } from './meal-classifier.js';
+import { buildPlanogramEntries, mirrorPlanogramToLocation } from './planogram-mirror.js';
 
 /**
  * Aggregate channel data into per-product stock totals.
@@ -192,6 +193,25 @@ export async function syncMachineStock(vendliveMachineId, locationId, config, sy
     }
   }
 
+  // 5b. Mirror the planogram into LocationAssignment (+ blank maxStock fills
+  // from channel idealCapacity). Isolated: stock levels are the primary
+  // product of this sync — a mirror failure is recorded in metadata and never
+  // fails the sync; assignments self-heal on the next run.
+  let planogram;
+  try {
+    const { entries, unknownSkuCount } = buildPlanogramEntries(vendliveStock, existingSkuSet);
+    planogram = await mirrorPlanogramToLocation({
+      vendliveMachineId,
+      locationId,
+      entries,
+      rawSkuCount: allSkus.length,
+      unknownSkuCount,
+    });
+  } catch (err) {
+    console.error(`Stock sync: planogram mirror failed for machine ${vendliveMachineId}: ${err.message}`);
+    planogram = { mirrored: false, error: err.message };
+  }
+
   // 5. If auto shrinkage calc is enabled and there's variance, create a StockCheck
   const hasVariance = items.some(i => i.variance !== 0);
   let stockCheckId = null;
@@ -209,6 +229,7 @@ export async function syncMachineStock(vendliveMachineId, locationId, config, sy
       metadata: {
         channelCount: channels.length,
         productCount: Object.keys(vendliveStock).length,
+        planogram,
         items: items.filter(i => i.variance !== 0), // Only store variance items in metadata
       },
     },
