@@ -149,7 +149,9 @@ router.put('/:id', asyncHandler(async (req, res) => {
   });
 }));
 
-// Update assigned items
+// Update assigned items. Replace-in-one-transaction: a crash between the
+// delete and the create must not leave the location with no assignments
+// (suggestions/stock checks silently widen to ALL products in that state).
 router.put('/:id/assigned-items', asyncHandler(async (req, res) => {
   const { skus } = req.body;
 
@@ -157,20 +159,20 @@ router.put('/:id/assigned-items', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'SKUs array required' });
   }
 
-  // Delete existing assignments
-  await prisma.locationAssignment.deleteMany({
-    where: { locationId: req.params.id },
-  });
-
-  // Create new assignments
-  if (skus.length > 0) {
-    await prisma.locationAssignment.createMany({
-      data: skus.map(sku => ({
-        locationId: req.params.id,
-        sku,
-      })),
-    });
-  }
+  await prisma.$transaction([
+    prisma.locationAssignment.deleteMany({
+      where: { locationId: req.params.id },
+    }),
+    ...(skus.length > 0
+      ? [prisma.locationAssignment.createMany({
+        data: skus.map(sku => ({
+          locationId: req.params.id,
+          sku,
+        })),
+        skipDuplicates: true,
+      })]
+      : []),
+  ]);
 
   res.json({ success: true, assignedItems: skus });
 }));
