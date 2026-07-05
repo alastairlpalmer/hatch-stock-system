@@ -619,6 +619,22 @@ model VendliveMovementTracker {
   @@map("vendlive_movement_trackers")
 }
 
+// ============ ATTENTION DISMISSALS ============
+
+// Admin dismissals of Dashboard "Needs attention" items. One active dismissal
+// per itemId (upserted). The signature is the item's rendered title — counts
+// live in the title, so when the underlying signal changes the signature no
+// longer matches and the item reappears. The frontend also expires dismissals
+// after 7 days so nothing stays buried. See manual-sql/017_attention_dismissals.sql.
+model AttentionDismissal {
+  itemId      String   @id @map("item_id")
+  signature   String
+  dismissedBy String?  @map("dismissed_by")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@map("attention_dismissals")
+}
+
 // ============ USERS (Optional Auth) ============
 
 model User {
