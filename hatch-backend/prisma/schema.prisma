@@ -104,8 +104,59 @@ model Location {
   assignedItems      LocationAssignment[]
   machineMappings    VendliveMachineMapping[]
   vendliveStockSyncs VendliveStockSync[]
+  machineLayout      MachineLayout?
 
   @@map("locations")
+}
+
+// Visual planogram: manually configured fridge layout for a location.
+// shelves Json: [{ shelf: 1, slots: 6 }, ...] — shelf 1 = top of the fridge,
+// slots = equal-width facings (1..26, lettered A..Z left to right).
+// One layout per location in V1 (every site has a single fridge; a
+// two-fridge site would need a machineId on this model — future).
+// See manual-sql/019_visual_planogram.sql.
+model MachineLayout {
+  id         String   @id @default(uuid())
+  locationId String   @unique @map("location_id")
+  shelves    Json
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  location    Location         @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  assignments SlotAssignment[]
+
+  @@map("machine_layouts")
+}
+
+// Temporal slot assignments — the source of truth for what is IN the fridge
+// this week (the location's mirrored product list is a superset; assigning a
+// slot is the act of declaring a product in-machine). Append-only: the
+// current planogram is the rows WHERE valid_to IS NULL, enforced by a partial
+// unique index on (layout_id, shelf, position) — created in the manual SQL,
+// not expressible in Prisma. Saves close changed rows and open new ones, so
+// sales can later join (location_id, sku, timestamp) -> slot position for the
+// shelf heatmap. sku has NO FK (matches LocationAssignment) so history
+// survives product churn. A slot targets either a concrete SKU or a
+// fresh-meal bucket (targetType 'mealType') — Frive flavours rotate weekly
+// inside a stable group slot.
+model SlotAssignment {
+  id         String    @id @default(uuid())
+  layoutId   String    @map("layout_id")
+  locationId String    @map("location_id") // denormalised for heatmap joins
+  shelf      Int // 1 = top
+  position   Int // 0-based within shelf; A = 0
+  slotCode   String    @map("slot_code") // "1A" — denormalised for restock sheets
+  targetType String    @map("target_type") // 'sku' | 'mealType'
+  sku        String?
+  mealType   String?   @map("meal_type")
+  validFrom  DateTime  @default(now()) @map("valid_from")
+  validTo    DateTime? @map("valid_to")
+
+  layout MachineLayout @relation(fields: [layoutId], references: [id], onDelete: Cascade)
+
+  @@index([locationId, validTo])
+  @@index([layoutId, validTo])
+  @@map("slot_assignments")
 }
 
 // Admin-managed list of fresh-meal buckets (e.g. "Meat", "Veg/Vegan").

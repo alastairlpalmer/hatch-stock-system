@@ -27,6 +27,7 @@ import analyticsRouter from './routes/analytics.js';
 import reportsRouter from './routes/reports.js';
 import vendliveRouter from './routes/vendlive.js';
 import vendliveStockRouter from './routes/vendlive-stock.js';
+import planogramRouter from './routes/planogram.js';
 import authRouter from './routes/auth.js';
 
 // Import middleware
@@ -170,6 +171,7 @@ app.use('/api/analytics', analyticsRouter);
 app.use('/api/reports', reportsRouter);
 app.use('/api/vendlive', vendliveRouter);
 app.use('/api/vendlive/stock', vendliveStockRouter);
+app.use('/api/planogram', planogramRouter);
 
 // 404 handler
 app.use((req, res) => {
