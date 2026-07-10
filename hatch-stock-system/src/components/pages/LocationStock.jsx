@@ -259,6 +259,21 @@ export default function LocationStock() {
     return { amount, pct: (amount / product.salePrice) * 100 };
   };
   const totalUnits = products.reduce((acc, p) => acc + getQty(p.sku), 0);
+  // Value of stock currently in the machine, at cost and at sale price.
+  // Products missing a price contribute nothing to that total (rather than
+  // guessing), so both figures are floors when prices are incomplete.
+  const stockValue = products.reduce(
+    (acc, p) => {
+      const qty = getQty(p.sku);
+      if (qty > 0) {
+        acc.cost += qty * (p.unitCost || 0);
+        acc.sale += qty * (p.salePrice || 0);
+        if (!p.unitCost || !p.salePrice) acc.unpriced += 1;
+      }
+      return acc;
+    },
+    { cost: 0, sale: 0, unpriced: 0 }
+  );
   // Low-stock: regular products counted per-SKU; each meal group counted once.
   const lowStockCount =
     regularProducts.filter(p => {
@@ -764,8 +779,21 @@ export default function LocationStock() {
               <div className="text-xs text-zinc-500 mt-1">Low Stock Items</div>
             </div>
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4">
-              <div className="text-2xl font-bold text-zinc-400 capitalize">{location.type}</div>
-              <div className="text-xs text-zinc-500 mt-1">Location Type</div>
+              <div className="text-2xl font-bold text-purple-400">
+                £{stockValue.sale.toFixed(2)}
+                <span className="text-sm font-medium text-zinc-400 ml-2">retail</span>
+              </div>
+              <div className="text-xs text-zinc-500 mt-1">
+                £{stockValue.cost.toFixed(2)} at cost
+                {stockValue.unpriced > 0 && (
+                  <span
+                    className="text-amber-400/80 ml-1"
+                    title={`${stockValue.unpriced} stocked product(s) missing a cost or sale price — excluded from these totals`}
+                  >
+                    · {stockValue.unpriced} unpriced
+                  </span>
+                )}
+              </div>
             </div>
           </div>
 
