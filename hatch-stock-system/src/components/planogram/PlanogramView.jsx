@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import planogramService from '../../services/planogram.service';
 import FridgeDiagram from './FridgeDiagram';
+import PlanogramEditor from './PlanogramEditor';
 
 /**
  * Visual planogram view for Location Stock.
@@ -16,17 +17,21 @@ export default function PlanogramView({
   getStockStatus,
   getGroupStockStatus,
   mealGroups,
+  mealTypes,
   products,
+  location,
 }) {
   const [payload, setPayload] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [editing, setEditing] = useState(false);
 
   useEffect(() => {
     if (!locationId) return;
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setEditing(false);
     planogramService
       .getLocationPlanogram(locationId)
       .then((p) => !cancelled && setPayload(p))
@@ -109,17 +114,48 @@ export default function PlanogramView({
   if (error) {
     return <div className="bg-red-500/10 border border-red-500/30 text-red-400 text-sm rounded-lg px-4 py-3">{error}</div>;
   }
+
+  if (editing) {
+    return (
+      <PlanogramEditor
+        locationId={locationId}
+        payload={payload}
+        products={products}
+        mealGroups={mealGroups}
+        mealTypes={mealTypes}
+        location={location}
+        onSaved={(fresh) => { setPayload(fresh); setEditing(false); }}
+        onCancel={() => setEditing(false)}
+      />
+    );
+  }
+
   if (!payload?.layout) {
     return (
-      <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-8 text-center space-y-2">
+      <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-8 text-center space-y-3">
         <p className="text-zinc-300 text-sm font-medium">No fridge layout configured for this location.</p>
-        <p className="text-zinc-500 text-sm">Set up shelves and slots in Admin → Machine Layout, then the visual planogram renders here.</p>
+        <p className="text-zinc-500 text-sm">Set it up right here — drag products into slots and save.</p>
+        <button
+          onClick={() => setEditing(true)}
+          className="px-4 py-2 rounded text-sm font-medium bg-emerald-500 text-zinc-900 hover:bg-emerald-400"
+        >
+          Configure slots
+        </button>
       </div>
     );
   }
 
   return (
     <div className="space-y-4">
+      <div className="flex justify-end">
+        <button
+          onClick={() => setEditing(true)}
+          className="px-3 py-1.5 rounded text-sm bg-zinc-800 text-zinc-400 hover:text-white transition-colors border border-zinc-700"
+        >
+          ✎ Configure slots
+        </button>
+      </div>
+
       {staleCount > 0 && (
         <div className="bg-amber-500/10 border border-amber-500/30 text-amber-400 text-sm rounded-lg px-4 py-3">
           {staleCount} slot(s) reference products no longer stocked here — update them in Admin → Machine Layout.

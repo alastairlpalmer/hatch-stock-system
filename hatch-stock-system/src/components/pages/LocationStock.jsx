@@ -827,7 +827,9 @@ export default function LocationStock() {
               getStockStatus={getStockStatus}
               getGroupStockStatus={getGroupStockStatus}
               mealGroups={mealGroups}
+              mealTypes={data.mealTypes}
               products={data.products}
+              location={location}
             />
           )}
 
