@@ -110,6 +110,12 @@ export async function syncMachineStock(vendliveMachineId, locationId, config, sy
   if (missingSkus.length > 0 && autoCreate) {
     for (const sku of missingSkus) {
       const vl = vendliveStock[sku];
+      // Best-effort fresh-meal guess (unconfirmed), same as the sales-ingest
+      // and catalog-sync create paths. This path is usually the FIRST to see a
+      // new weekly Frive flavour (planogram updates before the first sale), so
+      // skipping classification here left flavours stranded outside the
+      // fresh-meal rollup with no way back in.
+      const meal = guessFreshMeal(vl.productName, { category: vl.category });
       await prisma.product.create({
         data: {
           sku,
@@ -117,6 +123,8 @@ export async function syncMachineStock(vendliveMachineId, locationId, config, sy
           category: vl.category || null,
           unitCost: vl.costPrice || null,
           salePrice: vl.salePrice || null,
+          isFreshMeal: meal.isFreshMeal,
+          mealType: meal.mealType,
         },
       }).catch(() => {}); // Ignore if race condition
       existingSkuSet.add(sku);
@@ -376,7 +384,7 @@ export async function syncProductCatalog(config) {
   const ops = [];
 
   for (const [sku, vl] of Object.entries(catalog)) {
-    const meal = guessFreshMeal(vl.productName);
+    const meal = guessFreshMeal(vl.productName, { category: vl.category });
     ops.push(prisma.product.upsert({
       where: { sku },
       create: {

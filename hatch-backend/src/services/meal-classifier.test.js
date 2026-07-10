@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { guessFreshMeal, guessMealType, MEAT_BUCKET, VEG_BUCKET } from './meal-classifier.js';
+import { categoryIsFreshMeal, guessFreshMeal, guessMealType, MEAT_BUCKET, VEG_BUCKET } from './meal-classifier.js';
+import { FRESH_MEAL_PLACEHOLDER_CATEGORY } from '../utils/fresh-meal-placeholders.js';
 
 describe('guessMealType', () => {
   it('classifies meat dishes as Meat', () => {
@@ -48,5 +49,56 @@ describe('guessFreshMeal', () => {
     expect(guessFreshMeal('Barebells Milkshake - Chocolate')).toEqual({ isFreshMeal: false, mealType: null });
     expect(guessFreshMeal('MOMA Porridge Pot - Berry')).toEqual({ isFreshMeal: false, mealType: null });
     expect(guessFreshMeal('Coca-Cola 330ml')).toEqual({ isFreshMeal: false, mealType: null });
+  });
+
+  it('flags fresh meals from a "Fresh Meals" category even when no name keyword matches', () => {
+    // Weekly-rotating flavours often have no recognisable dish word — the
+    // VendLive category is the signal that survives the menu churn.
+    expect(guessFreshMeal('Frive Katsu Bowl', { category: 'Fresh Meals' }))
+      .toEqual({ isFreshMeal: true, mealType: null });
+    expect(guessFreshMeal('Bulgogi Bowl', { category: 'fresh meals' }))
+      .toEqual({ isFreshMeal: true, mealType: null });
+    expect(guessFreshMeal('Bulgogi Bowl', { category: 'FRESH MEALS (FRIVE)' }))
+      .toEqual({ isFreshMeal: true, mealType: null });
+  });
+
+  it('still guesses the bucket from the name when the category flags it', () => {
+    expect(guessFreshMeal('Firecracker Chicken Thighs', { category: 'Fresh Meals' }))
+      .toEqual({ isFreshMeal: true, mealType: MEAT_BUCKET });
+    expect(guessFreshMeal('Bulgogi Vegan Beef Bowl', { category: 'Fresh Meals' }))
+      .toEqual({ isFreshMeal: true, mealType: VEG_BUCKET });
+  });
+
+  it('ignores non-fresh-meal categories', () => {
+    expect(guessFreshMeal('Coca-Cola 330ml', { category: 'Drinks' }))
+      .toEqual({ isFreshMeal: false, mealType: null });
+    expect(guessFreshMeal('Coca-Cola 330ml', { category: null }))
+      .toEqual({ isFreshMeal: false, mealType: null });
+  });
+
+  it('never flags the ordering placeholder category', () => {
+    // Placeholders (FRIVE-MEAT etc.) must stay isFreshMeal = false so they
+    // never join the fresh-meal group aggregation.
+    expect(categoryIsFreshMeal(FRESH_MEAL_PLACEHOLDER_CATEGORY)).toBe(false);
+    expect(guessFreshMeal('Some Placeholder', { category: FRESH_MEAL_PLACEHOLDER_CATEGORY }))
+      .toEqual({ isFreshMeal: false, mealType: null });
+  });
+});
+
+describe('categoryIsFreshMeal', () => {
+  it('matches the VendLive category in its variants', () => {
+    expect(categoryIsFreshMeal('Fresh Meals')).toBe(true);
+    expect(categoryIsFreshMeal('Fresh Meal')).toBe(true);
+    expect(categoryIsFreshMeal(' fresh meals ')).toBe(true);
+    expect(categoryIsFreshMeal('Fresh Meals (Frive)')).toBe(true);
+  });
+
+  it('rejects everything else', () => {
+    expect(categoryIsFreshMeal('Fresh Meal Order')).toBe(false); // ordering placeholders
+    expect(categoryIsFreshMeal('Freshly Squeezed Juice')).toBe(false);
+    expect(categoryIsFreshMeal('Meals')).toBe(false);
+    expect(categoryIsFreshMeal(null)).toBe(false);
+    expect(categoryIsFreshMeal(undefined)).toBe(false);
+    expect(categoryIsFreshMeal('')).toBe(false);
   });
 });
