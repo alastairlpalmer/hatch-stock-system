@@ -27,7 +27,7 @@ import analyticsRouter from './routes/analytics.js';
 import reportsRouter from './routes/reports.js';
 import vendliveRouter from './routes/vendlive.js';
 import vendliveStockRouter from './routes/vendlive-stock.js';
-import planogramRouter from './routes/planogram.js';
+import planogramRouter, { publicRestockSheetRouter } from './routes/planogram.js';
 import authRouter from './routes/auth.js';
 
 // Import middleware
@@ -118,6 +118,7 @@ app.use((req, res, next) => {
   if (PUBLIC_API_PATHS.includes(req.path)) return next();
   if (req.path.startsWith('/api/vendlive/webhook/')) return next();
   if (req.path.startsWith('/api/public/buying-lists/')) return next();
+  if (req.path.startsWith('/api/public/restock-sheet/')) return next();
   return authMiddleware(req, res, next);
 });
 
@@ -130,6 +131,7 @@ app.use((req, res, next) => {
   if (PUBLIC_API_PATHS.includes(req.path)) return next();
   if (req.path.startsWith('/api/vendlive/webhook/')) return next();
   if (req.path.startsWith('/api/public/buying-lists/')) return next();
+  if (req.path.startsWith('/api/public/restock-sheet/')) return next();
   return rolePolicy(req, res, next);
 });
 
@@ -172,6 +174,8 @@ app.use('/api/reports', reportsRouter);
 app.use('/api/vendlive', vendliveRouter);
 app.use('/api/vendlive/stock', vendliveStockRouter);
 app.use('/api/planogram', planogramRouter);
+// Read-only 3PL restock sheet — exempted from auth above; the token is the credential.
+app.use('/api/public/restock-sheet', publicRestockSheetRouter);
 
 // 404 handler
 app.use((req, res) => {

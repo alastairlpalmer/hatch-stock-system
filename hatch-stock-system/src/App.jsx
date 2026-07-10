@@ -21,6 +21,7 @@ import Users from './components/pages/Users';
 import BuyingLists from './components/pages/orders/BuyingLists';
 import BuyingListDetail from './components/pages/orders/BuyingListDetail';
 import SharedBuyingList from './components/pages/SharedBuyingList';
+import RestockSheet from './components/pages/RestockSheet';
 import PickLists from './components/pages/restock/PickLists';
 import PickListDetail from './components/pages/restock/PickListDetail';
 import StockCheck from './components/pages/restock/StockCheck';
@@ -76,6 +77,7 @@ function App() {
         {/* Public share view — the unguessable token is the credential, so this
             deliberately sits outside RequireAuth and the app chrome. */}
         <Route path="/share/buying-list/:token" element={<SharedBuyingList />} />
+        <Route path="/share/restock-sheet/:token" element={<RestockSheet />} />
         <Route
           path="/*"
           element={

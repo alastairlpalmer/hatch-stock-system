@@ -150,6 +150,81 @@ export function detectStale(assignments, assignedSkuSet, mealTypeMemberCounts = 
 }
 
 /**
+ * Build the 3PL restock-sheet rows from a location's open slot assignments.
+ *
+ * One row per slot, walked top shelf first, left to right — the order a
+ * restocker fills the fridge. "Add" quantities are computed at TARGET level
+ * (a SKU or meal-type group), never split across slots (a per-slot split
+ * would be a guess presented as fact): the first slot a target occupies is
+ * the `primary` row carrying current/target/add, and any further slots of
+ * the same target reference the primary's slot code instead.
+ *
+ * add = max(0, target - current) when a max is configured; null target ->
+ * add null (sheet renders "fill" guidance instead of a number).
+ *
+ * assignments: open rows [{ shelf, position, slotCode, targetType, sku, mealType }]
+ * ctx: {
+ *   qtyBySku:  Map(sku -> current qty),
+ *   groupQty:  Map(mealType -> summed group qty),
+ *   skuMax:    Map(sku -> maxStock | undefined),
+ *   groupMax:  Map(mealType -> maxStock | undefined),
+ *   nameBySku: Map(sku -> product name),
+ * }
+ * Returns { rows, totalAdd }.
+ */
+export function buildRestockSheetRows(assignments, ctx) {
+  const ordered = [...assignments].sort((a, b) => a.shelf - b.shelf || a.position - b.position);
+  const primaryByTarget = new Map();
+  const slotCountByTarget = new Map();
+  for (const a of ordered) {
+    const key = targetKey(a);
+    slotCountByTarget.set(key, (slotCountByTarget.get(key) || 0) + 1);
+    if (!primaryByTarget.has(key)) primaryByTarget.set(key, a.slotCode);
+  }
+
+  let totalAdd = 0;
+  const rows = ordered.map((a) => {
+    const key = targetKey(a);
+    const isGroup = a.targetType === 'mealType';
+    const label = isGroup ? a.mealType : (ctx.nameBySku.get(a.sku) || a.sku);
+    const primarySlotCode = primaryByTarget.get(key);
+    const primary = primarySlotCode === a.slotCode;
+
+    let current = null;
+    let target = null;
+    let add = null;
+    if (primary) {
+      current = isGroup ? (ctx.groupQty.get(a.mealType) || 0) : (ctx.qtyBySku.get(a.sku) || 0);
+      const max = isGroup ? ctx.groupMax.get(a.mealType) : ctx.skuMax.get(a.sku);
+      if (max != null && max > 0) {
+        target = max;
+        add = Math.max(0, max - current);
+        totalAdd += add;
+      }
+    }
+
+    return {
+      slotCode: a.slotCode,
+      shelf: a.shelf,
+      position: a.position,
+      label,
+      targetType: a.targetType,
+      sku: a.sku || null,
+      mealType: a.mealType || null,
+      isGroup,
+      primary,
+      primarySlotCode: primary ? null : primarySlotCode,
+      slotCount: slotCountByTarget.get(key),
+      current,
+      target,
+      add,
+    };
+  });
+
+  return { rows, totalAdd };
+}
+
+/**
  * Location products/groups with NO open slot — the "not placed" checklist for
  * the weekly pass. Fresh-meal products are represented by their meal-type
  * group (that is what gets slotted), everything else by SKU. The caller
