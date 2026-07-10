@@ -2,10 +2,13 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useStock } from '../../context/StockContext';
 import vendliveService from '../../services/vendlive.service';
 import { inventoryService } from '../../services/inventory.service';
+import PlanogramView from '../planogram/PlanogramView';
 
 export default function LocationStock() {
   const { data, updateLocationStock, updateLocationConfig, updateLocationAssignedItems, updateMealTypeConfig } = useStock();
   const [selectedLocation, setSelectedLocation] = useState('');
+  // 'list' = existing table; 'visual' = SVG fridge planogram
+  const [view, setView] = useState('list');
   // Which collapsed meal-type groups are expanded to show member flavours.
   const [expandedGroups, setExpandedGroups] = useState({});
 
@@ -751,14 +754,34 @@ export default function LocationStock() {
             ))}
           </select>
           <div className="flex gap-2">
-            <button
-              onClick={() => { setShowConfig(!showConfig); setShowAddProduct(false); }}
-              className={`flex-1 sm:flex-none px-3 py-2.5 rounded text-sm transition-colors ${
-                showConfig ? 'bg-emerald-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400 hover:text-white'
-              }`}
-            >
-              {showConfig ? 'Done' : 'Config'}
-            </button>
+            <div className="flex rounded overflow-hidden border border-zinc-700">
+              <button
+                onClick={() => setView('list')}
+                className={`px-3 py-2.5 text-sm transition-colors ${
+                  view === 'list' ? 'bg-emerald-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400 hover:text-white'
+                }`}
+              >
+                List
+              </button>
+              <button
+                onClick={() => { setView('visual'); setShowConfig(false); setShowAddProduct(false); }}
+                className={`px-3 py-2.5 text-sm transition-colors ${
+                  view === 'visual' ? 'bg-emerald-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400 hover:text-white'
+                }`}
+              >
+                Visual
+              </button>
+            </div>
+            {view === 'list' && (
+              <button
+                onClick={() => { setShowConfig(!showConfig); setShowAddProduct(false); }}
+                className={`flex-1 sm:flex-none px-3 py-2.5 rounded text-sm transition-colors ${
+                  showConfig ? 'bg-emerald-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400 hover:text-white'
+                }`}
+              >
+                {showConfig ? 'Done' : 'Config'}
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -797,6 +820,18 @@ export default function LocationStock() {
             </div>
           </div>
 
+          {view === 'visual' && (
+            <PlanogramView
+              locationId={selectedLocation}
+              getQty={getQty}
+              getStockStatus={getStockStatus}
+              getGroupStockStatus={getGroupStockStatus}
+              mealGroups={mealGroups}
+              products={data.products}
+            />
+          )}
+
+          {view === 'list' && (<>
           {showConfig && (
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4">
               <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
@@ -956,6 +991,7 @@ export default function LocationStock() {
               </p>
             </div>
           )}
+          </>)}
         </>
       )}
     </div>

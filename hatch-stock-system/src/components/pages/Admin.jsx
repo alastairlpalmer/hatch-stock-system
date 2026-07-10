@@ -3,6 +3,7 @@ import { useStock } from '../../context/StockContext';
 import AdminVendlive from './AdminVendlive';
 import AdminSalesImport from './AdminSalesImport';
 import AdminFreshMeals from './AdminFreshMeals';
+import AdminMachineLayout from './AdminMachineLayout';
 import BarcodeScanner from '../scanner/BarcodeScanner';
 import { unlockAudio } from '../../utils/feedback';
 
@@ -21,6 +22,7 @@ export default function Admin() {
           { id: 'routes', label: 'Restock Routes' },
           { id: 'suppliers', label: 'Suppliers' },
           { id: 'freshmeals', label: 'Fresh Meals' },
+          { id: 'layout', label: 'Machine Layout' },
           { id: 'vendlive', label: 'VendLive' },
           { id: 'salesimport', label: 'Sales Import' },
           { id: 'data', label: 'Data Management' }
@@ -43,6 +45,7 @@ export default function Admin() {
       {adminTab === 'routes' && <AdminRoutes />}
       {adminTab === 'suppliers' && <AdminSuppliers />}
       {adminTab === 'freshmeals' && <AdminFreshMeals />}
+      {adminTab === 'layout' && <AdminMachineLayout />}
       {adminTab === 'vendlive' && <AdminVendlive />}
       {adminTab === 'salesimport' && <AdminSalesImport />}
       {adminTab === 'data' && <AdminData />}
