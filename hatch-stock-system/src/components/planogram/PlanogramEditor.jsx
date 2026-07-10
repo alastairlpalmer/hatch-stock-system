@@ -12,10 +12,13 @@ import { slotCode } from '../../utils/planogramGeometry';
  * Click-to-place works as a touch/keyboard fallback: click a chip to arm it,
  * then click a slot.
  *
+ * Shelf structure is editable inline too: facings per shelf, add/remove/clear
+ * shelf — destructive changes (shrinking or removing populated shelves) ask
+ * for confirmation before clearing assignments.
+ *
  * All edits are a local draft until Save — the server writes position history
- * automatically (same PUT as the Admin editor). Shelf structure (adding
- * shelves / changing facings) stays in Admin → Machine Layout; this editor is
- * optimised for the weekly product-into-slot pass.
+ * automatically (same PUT as the Admin editor). Optimised for the weekly
+ * product-into-slot pass.
  */
 
 const DEFAULT_SHELVES = 8;
@@ -132,6 +135,59 @@ export default function PlanogramEditor({ locationId, payload, products, mealGro
       next[toKey] = moving;
       if (displaced) next[fromKey] = displaced; // swap
       else delete next[fromKey];
+      return next;
+    });
+    setDirty(true);
+  };
+
+  // ---- shelf structure ----
+
+  const addShelf = () => {
+    setShelves((sh) => {
+      const next = sh.length > 0 ? Math.max(...sh.map((s) => s.shelf)) + 1 : 1;
+      return [...sh, { shelf: next, slots: DEFAULT_FACINGS }];
+    });
+    setDirty(true);
+  };
+
+  const removeShelf = (shelf) => {
+    const affected = Object.keys(slots).filter((k) => k.startsWith(`${shelf}-`)).length;
+    if (affected > 0 && !window.confirm(`Removing shelf ${shelf} clears ${affected} assigned slot(s). Continue?`)) return;
+    setShelves((sh) => sh.filter((s) => s.shelf !== shelf));
+    setSlots((s) => {
+      const next = { ...s };
+      for (const k of Object.keys(next)) if (k.startsWith(`${shelf}-`)) delete next[k];
+      return next;
+    });
+    setDirty(true);
+  };
+
+  const clearShelf = (shelf) => {
+    const affected = Object.keys(slots).filter((k) => k.startsWith(`${shelf}-`)).length;
+    if (affected === 0) return;
+    if (!window.confirm(`Clear all ${affected} assigned slot(s) on shelf ${shelf}?`)) return;
+    setSlots((s) => {
+      const next = { ...s };
+      for (const k of Object.keys(next)) if (k.startsWith(`${shelf}-`)) delete next[k];
+      return next;
+    });
+    setDirty(true);
+  };
+
+  const setFacings = (shelf, value) => {
+    const n = Math.max(1, Math.min(26, parseInt(value) || 1));
+    const clipped = Object.keys(slots).filter((k) => {
+      const [s, p] = k.split('-').map(Number);
+      return s === shelf && p >= n;
+    }).length;
+    if (clipped > 0 && !window.confirm(`Shrinking shelf ${shelf} to ${n} facings clears ${clipped} assigned slot(s). Continue?`)) return;
+    setShelves((sh) => sh.map((s) => (s.shelf === shelf ? { ...s, slots: n } : s)));
+    setSlots((s) => {
+      const next = { ...s };
+      for (const k of Object.keys(next)) {
+        const [sh, p] = k.split('-').map(Number);
+        if (sh === shelf && p >= n) delete next[k];
+      }
       return next;
     });
     setDirty(true);
@@ -363,11 +419,49 @@ export default function PlanogramEditor({ locationId, payload, products, mealGro
                   );
                 })}
               </div>
+              {/* Shelf structure controls */}
+              <div className="w-[76px] shrink-0 flex flex-col items-stretch justify-center gap-1 pb-2">
+                <div className="flex items-center gap-1">
+                  <input
+                    type="number"
+                    min={1}
+                    max={26}
+                    value={s.slots}
+                    onChange={(e) => setFacings(s.shelf, e.target.value)}
+                    title={`Facings on shelf ${s.shelf}`}
+                    aria-label={`Facings on shelf ${s.shelf}`}
+                    className="w-11 bg-zinc-800 border border-zinc-700 rounded px-1 py-0.5 text-xs text-center focus:outline-none focus:border-emerald-500"
+                  />
+                  <button
+                    onClick={() => removeShelf(s.shelf)}
+                    className="text-zinc-600 hover:text-red-400 text-sm leading-none px-0.5"
+                    title={`Remove shelf ${s.shelf}`}
+                    aria-label={`Remove shelf ${s.shelf}`}
+                  >
+                    ✕
+                  </button>
+                </div>
+                <button
+                  onClick={() => clearShelf(s.shelf)}
+                  className="text-[10px] text-zinc-600 hover:text-zinc-300 text-left"
+                  title={`Clear all slots on shelf ${s.shelf}`}
+                >
+                  clear
+                </button>
+              </div>
             </div>
           ))}
-          <p className="text-[11px] text-zinc-600 pt-1">
-            Shelf structure (number of shelves / facings) is managed in Admin → Machine Layout.
-          </p>
+          <div className="flex items-center justify-between pt-1">
+            <button
+              onClick={addShelf}
+              className="px-3 py-1.5 border border-dashed border-zinc-700 rounded text-xs text-zinc-500 hover:text-zinc-300 hover:border-zinc-500 transition-colors"
+            >
+              + Add shelf
+            </button>
+            <p className="text-[11px] text-zinc-600">
+              Facings per shelf on the right · shelf 1 is the top of the fridge.
+            </p>
+          </div>
         </div>
       </div>
     </div>
