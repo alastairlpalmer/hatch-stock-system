@@ -378,12 +378,16 @@ export async function processVendliveOrder(orderData, syncSource, config) {
 
       if (!product && config?.autoCreateProducts) {
         // Auto-create product with real name if available. Best-effort fresh-meal
-        // guess (unconfirmed) so Frive flavours surface in the review queue.
-        const meal = guessFreshMeal(item.productName || sku);
+        // guess (unconfirmed) so Frive flavours surface in the review queue. The
+        // VendLive category (poll payloads carry it; webhooks don't) is both
+        // stored and fed to the classifier — a "Fresh Meals" category flags a
+        // flavour even when its name has no recognisable dish keyword.
+        const meal = guessFreshMeal(item.productName || sku, { category: item.productCategory });
         product = await prisma.product.create({
           data: {
             sku,
             name: item.productName || sku,
+            category: item.productCategory || null,
             unitCost: item.costPrice || null,
             salePrice: item.price || null,
             isFreshMeal: meal.isFreshMeal,
@@ -548,6 +552,7 @@ export async function runPollSync() {
           if (missingSkus.includes(item.productExternalId) && !skuNames.has(item.productExternalId)) {
             skuNames.set(item.productExternalId, {
               name: item.productName || item.productExternalId,
+              category: item.productCategory || null,
               costPrice: item.costPrice || null,
               salePrice: item.price || null,
             });
@@ -556,12 +561,13 @@ export async function runPollSync() {
 
         for (const sku of missingSkus) {
           const info = skuNames.get(sku) || { name: sku };
-          const meal = guessFreshMeal(info.name);
+          const meal = guessFreshMeal(info.name, { category: info.category });
           try {
             const created = await prisma.product.create({
               data: {
                 sku,
                 name: info.name,
+                category: info.category || null,
                 unitCost: info.costPrice,
                 salePrice: info.salePrice,
                 isFreshMeal: meal.isFreshMeal,

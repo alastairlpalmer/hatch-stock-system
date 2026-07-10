@@ -138,8 +138,9 @@ router.post('/import', asyncHandler(async (req, res) => {
     if (!existingSkus.has(sale.sku) && sale.productName) {
       existingSkus.add(sale.sku);
       // Best-effort fresh-meal guess (unconfirmed) so Frive flavours imported
-      // via CSV also surface in the review queue.
-      const meal = guessFreshMeal(sale.productName);
+      // via CSV also surface in the review queue. The CSV category feeds the
+      // classifier too — "Fresh Meals" flags a flavour name keywords miss.
+      const meal = guessFreshMeal(sale.productName, { category: sale.category });
       productRows.push({
         sku: sale.sku,
         name: sale.productName,

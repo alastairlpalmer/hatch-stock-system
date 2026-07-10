@@ -19,6 +19,18 @@
 export const MEAT_BUCKET = 'Meat';
 export const VEG_BUCKET = 'Veg/Vegan';
 
+// VendLive files Frive flavours under a "Fresh Meals" category — the strongest
+// signal available, since it survives weekly menu churn that name keywords
+// miss. The ordering placeholders ("Fresh Meal Order", see
+// utils/fresh-meal-placeholders.js) must NEVER match: they are deliberately
+// isFreshMeal = false so they stay out of group aggregation.
+const FRESH_MEAL_CATEGORY_PATTERN = /^fresh\s*meals?(\s*\(.*\))?$/i;
+
+/** Whether a raw category name marks a product as a Frive fresh meal. */
+export function categoryIsFreshMeal(category) {
+  return FRESH_MEAL_CATEGORY_PATTERN.test(String(category || '').trim());
+}
+
 // Veg/Vegan wins ties (e.g. "Vegan Tikka" mentions no meat but a meaty-sounding
 // dish name shouldn't misclassify an explicitly vegan meal), so it is checked
 // first. Word-boundary matching avoids "beefy" substrings inside unrelated words.
@@ -66,21 +78,28 @@ export function guessMealType(name) {
 }
 
 /**
- * Decide whether a product (by name) is a Frive fresh meal, and its bucket.
+ * Decide whether a product is a Frive fresh meal, and its bucket.
  *
  * @param {string} name
- * @param {{ supplierIsFrive?: boolean }} [opts] - caller passes true when it
- *   knows preferredSupplierId resolves to the Frive supplier.
+ * @param {{ supplierIsFrive?: boolean, category?: string|null }} [opts]
+ *   - supplierIsFrive: caller passes true when it knows preferredSupplierId
+ *     resolves to the Frive supplier.
+ *   - category: the raw (VendLive) category name — a "Fresh Meals" category is
+ *     a definitive signal that beats name keywords, so brand-new flavours with
+ *     no recognisable dish word (e.g. "Katsu Bowl") still classify.
  * @returns {{ isFreshMeal: boolean, mealType: string|null }}
  */
-export function guessFreshMeal(name, { supplierIsFrive = false } = {}) {
+export function guessFreshMeal(name, { supplierIsFrive = false, category = null } = {}) {
   const text = ` ${String(name || '').toLowerCase()} `;
   const mealType = guessMealType(name);
-  // A meal-type keyword or a fresh-meal dish keyword, OR an explicit Frive
-  // supplier, marks it as a fresh meal. mealType alone (e.g. "chicken") is a
-  // strong enough signal on its own.
+  // A meal-type keyword or a fresh-meal dish keyword, an explicit Frive
+  // supplier, OR the VendLive "Fresh Meals" category marks it as a fresh meal.
+  // mealType alone (e.g. "chicken") is a strong enough signal on its own.
   const isFreshMeal =
-    supplierIsFrive || mealType != null || hasKeyword(text, FRESH_MEAL_KEYWORDS);
+    supplierIsFrive ||
+    categoryIsFreshMeal(category) ||
+    mealType != null ||
+    hasKeyword(text, FRESH_MEAL_KEYWORDS);
   return {
     isFreshMeal,
     mealType: isFreshMeal ? mealType : null,

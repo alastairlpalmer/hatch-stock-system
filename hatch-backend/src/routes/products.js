@@ -257,7 +257,7 @@ router.post('/import', asyncHandler(async (req, res) => {
       // (e.g. screenshot import passes its own guess; CSV import does not). Always
       // unconfirmed so a human confirms it in the Fresh Meals review queue.
       const provided = product.isFreshMeal !== undefined || product.mealType !== undefined;
-      const guess = provided ? null : guessFreshMeal(product.name);
+      const guess = provided ? null : guessFreshMeal(product.name, { category: product.category });
       const mealFields = {
         isFreshMeal: provided ? !!product.isFreshMeal : guess.isFreshMeal,
         mealType: provided ? (product.mealType || null) : guess.mealType,
