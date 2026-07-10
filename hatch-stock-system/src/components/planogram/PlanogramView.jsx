@@ -25,6 +25,21 @@ export default function PlanogramView({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [editing, setEditing] = useState(false);
+  const [shareState, setShareState] = useState('idle'); // idle | copying | copied | error
+
+  const copyShareLink = async () => {
+    setShareState('copying');
+    try {
+      const { sharePath } = await planogramService.getShareInfo(locationId);
+      const url = `${window.location.origin}${sharePath}`;
+      await navigator.clipboard.writeText(url);
+      setShareState('copied');
+      setTimeout(() => setShareState('idle'), 2500);
+    } catch {
+      setShareState('error');
+      setTimeout(() => setShareState('idle'), 2500);
+    }
+  };
 
   useEffect(() => {
     if (!locationId) return;
@@ -147,7 +162,21 @@ export default function PlanogramView({
 
   return (
     <div className="space-y-4">
-      <div className="flex justify-end">
+      <div className="flex justify-end gap-2">
+        <button
+          onClick={copyShareLink}
+          disabled={shareState === 'copying'}
+          title="Copy a public link to this machine's restock sheet — hand it to whoever restocks"
+          className={`px-3 py-1.5 rounded text-sm transition-colors border ${
+            shareState === 'copied'
+              ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40'
+              : shareState === 'error'
+                ? 'bg-red-500/15 text-red-400 border-red-500/40'
+                : 'bg-zinc-800 text-zinc-400 hover:text-white border-zinc-700'
+          }`}
+        >
+          {shareState === 'copied' ? 'Link copied ✓' : shareState === 'error' ? 'Copy failed' : '⇪ Share restock sheet'}
+        </button>
         <button
           onClick={() => setEditing(true)}
           className="px-3 py-1.5 rounded text-sm bg-zinc-800 text-zinc-400 hover:text-white transition-colors border border-zinc-700"

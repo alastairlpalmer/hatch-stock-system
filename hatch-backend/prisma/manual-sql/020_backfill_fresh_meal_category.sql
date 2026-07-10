@@ -20,8 +20,10 @@
 -- the fresh-meal group aggregation (see utils/fresh-meal-placeholders.js).
 --
 -- Idempotent (guarded WHERE clauses) and safe to re-run.
+-- Already applied to production on 2026-07-10 (as 004; renumbered to 020 after
+-- a numbering collision with the pre-existing 004_stock_transfers.sql).
 --
--- Apply with e.g.:  psql "<DIRECT_DATABASE_URL>" -f prisma/manual-sql/004_backfill_fresh_meal_category.sql
+-- Apply with e.g.:  psql "<DIRECT_DATABASE_URL>" -f prisma/manual-sql/020_backfill_fresh_meal_category.sql
 -- (or paste into the Supabase SQL editor, on project Stock_Tracker).
 
 -- (1) Flag products in a "Fresh Meals" category (any variant VendLive reports,

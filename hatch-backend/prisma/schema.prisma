@@ -119,6 +119,10 @@ model MachineLayout {
   id         String   @id @default(uuid())
   locationId String   @unique @map("location_id")
   shelves    Json
+  // Public restock-sheet share link credential (same pattern as
+  // BuyingList.shareToken): the unguessable uuid IS the credential for the
+  // read-only 3PL sheet at /share/restock-sheet/:token.
+  shareToken String   @unique @default(uuid()) @map("share_token")
   createdAt  DateTime @default(now()) @map("created_at")
   updatedAt  DateTime @updatedAt @map("updated_at")
 

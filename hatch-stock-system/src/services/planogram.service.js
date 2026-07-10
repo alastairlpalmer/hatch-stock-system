@@ -18,6 +18,19 @@ export const planogramService = {
     const response = await api.put(`/planogram/location/${locationId}`, body);
     return response.data;
   },
+
+  // Share-link info for the location's public 3PL restock sheet.
+  // Returns { shareToken, sharePath }.
+  getShareInfo: async (locationId) => {
+    const response = await api.get(`/planogram/location/${locationId}/share`);
+    return response.data;
+  },
+
+  // Public restock sheet by token (no auth — the token is the credential).
+  getRestockSheet: async (token) => {
+    const response = await api.get(`/public/restock-sheet/${token}`);
+    return response.data;
+  },
 };
 
 export default planogramService;

@@ -9,6 +9,7 @@ import {
   diffSlotAssignments,
   detectStale,
   computeUnplaced,
+  buildRestockSheetRows,
 } from '../services/planogram-layout.js';
 
 const router = express.Router();
@@ -175,6 +176,105 @@ router.put('/location/:locationId', asyncHandler(async (req, res) => {
   }
 
   res.json(await buildPlanogramPayload(locationId));
+}));
+
+// Share-link info for the location's restock sheet. The token lives on the
+// layout (created with it via @default(uuid())), so this is a plain read —
+// exposed only to authed users, who then hand the URL to the 3PL.
+router.get('/location/:locationId/share', asyncHandler(async (req, res) => {
+  const layout = await prisma.machineLayout.findUnique({
+    where: { locationId: req.params.locationId },
+    select: { shareToken: true },
+  });
+  if (!layout) return res.status(404).json({ error: 'No layout configured for this location' });
+  res.json({ shareToken: layout.shareToken, sharePath: `/share/restock-sheet/${layout.shareToken}` });
+}));
+
+// ============ PUBLIC RESTOCK SHEET ============
+
+/**
+ * Read-only 3PL restock sheet by share token. Mounted at
+ * /api/public/restock-sheet — BEFORE the auth gate (see index.js), mirroring
+ * the shared buying-list view: the unguessable uuid token IS the credential.
+ *
+ * One row per slot in walking order (top shelf, left to right) with
+ * target-level "add" quantities (see buildRestockSheetRows). Quantities come
+ * from LocationStock (kept fresh by the VendLive stock sync); stockUpdatedAt
+ * reports how fresh. Deliberately excludes prices, margins and internal ids.
+ */
+export const publicRestockSheetRouter = express.Router();
+
+publicRestockSheetRouter.get('/:token', asyncHandler(async (req, res) => {
+  const layout = await prisma.machineLayout.findUnique({
+    where: { shareToken: req.params.token },
+    include: { location: { select: { id: true, name: true } } },
+  });
+  if (!layout) return res.status(404).json({ error: 'Not found' });
+
+  const [assignments, stockRows, configRows, mealConfigRows] = await Promise.all([
+    prisma.slotAssignment.findMany({
+      where: { layoutId: layout.id, validTo: null },
+      select: { shelf: true, position: true, slotCode: true, targetType: true, sku: true, mealType: true },
+    }),
+    prisma.locationStock.findMany({
+      where: { locationId: layout.locationId },
+      select: { sku: true, quantity: true, updatedAt: true, product: { select: { name: true, isFreshMeal: true, mealType: true } } },
+    }),
+    prisma.locationConfig.findMany({
+      where: { locationId: layout.locationId },
+      select: { sku: true, maxStock: true },
+    }),
+    prisma.locationMealConfig.findMany({
+      where: { locationId: layout.locationId },
+      select: { mealType: true, maxStock: true },
+    }),
+  ]);
+
+  const qtyBySku = new Map(stockRows.map((r) => [r.sku, r.quantity]));
+  const nameBySku = new Map(stockRows.map((r) => [r.sku, r.product?.name || r.sku]));
+  // Slot targets can reference SKUs with no stock row yet — name them too.
+  const missingSkus = assignments
+    .filter((a) => a.targetType === 'sku' && a.sku && !nameBySku.has(a.sku))
+    .map((a) => a.sku);
+  if (missingSkus.length > 0) {
+    const extra = await prisma.product.findMany({
+      where: { sku: { in: missingSkus } },
+      select: { sku: true, name: true },
+    });
+    for (const p of extra) nameBySku.set(p.sku, p.name);
+  }
+
+  const groupQty = new Map();
+  for (const r of stockRows) {
+    if (!r.product?.isFreshMeal) continue;
+    const group = r.product.mealType || 'Unclassified';
+    groupQty.set(group, (groupQty.get(group) || 0) + r.quantity);
+  }
+
+  const skuMax = new Map(configRows.filter((r) => r.maxStock != null).map((r) => [r.sku, r.maxStock]));
+  const groupMax = new Map(mealConfigRows.filter((r) => r.maxStock != null).map((r) => [r.mealType, r.maxStock]));
+
+  const { rows, totalAdd } = buildRestockSheetRows(assignments, {
+    qtyBySku,
+    groupQty,
+    skuMax,
+    groupMax,
+    nameBySku,
+  });
+
+  const stockUpdatedAt = stockRows.reduce(
+    (latest, r) => (!latest || r.updatedAt > latest ? r.updatedAt : latest),
+    null
+  );
+
+  res.json({
+    locationName: layout.location?.name || 'Unknown location',
+    generatedAt: new Date().toISOString(),
+    stockUpdatedAt,
+    shelves: layout.shelves,
+    rows,
+    totalAdd,
+  });
 }));
 
 export default router;

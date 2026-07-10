@@ -6,6 +6,7 @@ import {
   diffSlotAssignments,
   detectStale,
   computeUnplaced,
+  buildRestockSheetRows,
 } from './planogram-layout.js';
 
 describe('positionLetter / slotCode', () => {
@@ -141,6 +142,56 @@ describe('detectStale', () => {
       new Map([['Meat', 3], ['Veg/Vegan', 0]])
     );
     expect(out.map((a) => a.stale)).toEqual([true, false, false, true]);
+  });
+});
+
+describe('buildRestockSheetRows', () => {
+  const ctx = {
+    qtyBySku: new Map([['COKE', 2], ['JUICE', 6]]),
+    groupQty: new Map([['Meat', 3]]),
+    skuMax: new Map([['COKE', 6]]), // JUICE has no max configured
+    groupMax: new Map([['Meat', 20]]),
+    nameBySku: new Map([['COKE', 'Coca-Cola 330ml'], ['JUICE', 'Ginger Shot']]),
+  };
+
+  it('walks shelves top-down, left-to-right and computes target-level adds', () => {
+    const { rows, totalAdd } = buildRestockSheetRows(
+      [
+        { shelf: 2, position: 0, slotCode: '2A', targetType: 'sku', sku: 'JUICE', mealType: null },
+        { shelf: 1, position: 1, slotCode: '1B', targetType: 'mealType', sku: null, mealType: 'Meat' },
+        { shelf: 1, position: 0, slotCode: '1A', targetType: 'sku', sku: 'COKE', mealType: null },
+      ],
+      ctx
+    );
+    expect(rows.map((r) => r.slotCode)).toEqual(['1A', '1B', '2A']);
+    const coke = rows[0];
+    expect(coke).toMatchObject({ label: 'Coca-Cola 330ml', current: 2, target: 6, add: 4, primary: true });
+    const meat = rows[1];
+    expect(meat).toMatchObject({ label: 'Meat', isGroup: true, current: 3, target: 20, add: 17 });
+    const juice = rows[2];
+    expect(juice).toMatchObject({ current: 6, target: null, add: null }); // no max -> "fill" guidance
+    expect(totalAdd).toBe(21);
+  });
+
+  it('multi-slot targets: first slot is primary, repeats reference it and add is not double-counted', () => {
+    const { rows, totalAdd } = buildRestockSheetRows(
+      [
+        { shelf: 1, position: 0, slotCode: '1A', targetType: 'sku', sku: 'COKE', mealType: null },
+        { shelf: 1, position: 1, slotCode: '1B', targetType: 'sku', sku: 'COKE', mealType: null },
+      ],
+      ctx
+    );
+    expect(rows[0]).toMatchObject({ primary: true, add: 4, slotCount: 2, primarySlotCode: null });
+    expect(rows[1]).toMatchObject({ primary: false, add: null, current: null, primarySlotCode: '1A', slotCount: 2 });
+    expect(totalAdd).toBe(4);
+  });
+
+  it('never returns a negative add when overstocked', () => {
+    const { rows } = buildRestockSheetRows(
+      [{ shelf: 1, position: 0, slotCode: '1A', targetType: 'sku', sku: 'COKE', mealType: null }],
+      { ...ctx, qtyBySku: new Map([['COKE', 10]]) }
+    );
+    expect(rows[0].add).toBe(0);
   });
 });
 
