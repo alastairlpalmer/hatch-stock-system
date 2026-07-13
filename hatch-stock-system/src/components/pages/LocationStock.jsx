@@ -5,7 +5,7 @@ import { inventoryService } from '../../services/inventory.service';
 import PlanogramView from '../planogram/PlanogramView';
 
 export default function LocationStock() {
-  const { data, updateLocationStock, updateLocationConfig, updateLocationAssignedItems, updateMealTypeConfig } = useStock();
+  const { data, updateLocationStock, updateLocationConfig, updateLocationAssignedItems, updateMealTypeConfig, updateProductMeal } = useStock();
   const [selectedLocation, setSelectedLocation] = useState('');
   // 'list' = existing table; 'visual' = SVG fridge planogram
   const [view, setView] = useState('list');
@@ -294,6 +294,16 @@ export default function LocationStock() {
   const planogramManaged = locationMachines.length > 0;
   const colSpan = showConfig ? 9 : 7;
 
+  // Fresh-meal flavours at this location awaiting a human-confirmed bucket.
+  // Surfaced inline (banner + per-row controls) so the weekly review happens
+  // right here instead of a hidden Admin page.
+  const unconfirmedMeals = freshMeals.filter(p => !p.mealTypeConfirmed);
+  const expandGroupsNeedingReview = () => {
+    const groups = {};
+    unconfirmedMeals.forEach(p => { groups[p.mealType || 'Unclassified'] = true; });
+    setExpandedGroups(prev => ({ ...prev, ...groups }));
+  };
+
   // One per-SKU stock row. Reused for regular products and for the expanded
   // member flavours inside a collapsed meal group (indent flag).
   const renderProductRow = (product, { indent = false } = {}) => {
@@ -307,6 +317,13 @@ export default function LocationStock() {
         <td className={`px-4 py-3 text-zinc-200 ${indent ? 'pl-10' : ''}`}>
           {product.name}
           {renderExpiryChip(product.sku)}
+          {product.isFreshMeal && !product.mealTypeConfirmed && (
+            <InlineMealReview
+              product={product}
+              mealTypes={data.mealTypes || []}
+              updateProductMeal={updateProductMeal}
+            />
+          )}
         </td>
         <td className="px-4 py-3 text-zinc-500 text-xs font-mono">{product.sku}</td>
         {showConfig && (
@@ -516,6 +533,13 @@ export default function LocationStock() {
               {renderExpiryChip(product.sku)}
             </div>
             <div className="text-zinc-500 text-xs font-mono mt-0.5">{product.sku}</div>
+            {product.isFreshMeal && !product.mealTypeConfirmed && (
+              <InlineMealReview
+                product={product}
+                mealTypes={data.mealTypes || []}
+                updateProductMeal={updateProductMeal}
+              />
+            )}
           </div>
           <span className={`inline-block px-2 py-0.5 rounded text-xs shrink-0 ${
             color === 'red' ? 'bg-red-500/20 text-red-400' :
@@ -834,6 +858,20 @@ export default function LocationStock() {
           )}
 
           {view === 'list' && (<>
+          {unconfirmedMeals.length > 0 && (
+            <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg px-4 py-3 flex items-center justify-between gap-3 flex-wrap">
+              <p className="text-sm text-amber-400">
+                {unconfirmedMeals.length} fresh-meal flavour{unconfirmedMeals.length === 1 ? '' : 's'} need{unconfirmedMeals.length === 1 ? 's' : ''} a
+                confirmed bucket — pick Meat / Veg on the flavour rows below so group counts and ordering stay right.
+              </p>
+              <button
+                onClick={expandGroupsNeedingReview}
+                className="px-3 py-1.5 rounded text-xs font-medium bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 border border-amber-500/40"
+              >
+                Show them
+              </button>
+            </div>
+          )}
           {showConfig && (
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4">
               <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
@@ -997,5 +1035,66 @@ export default function LocationStock() {
         </>
       )}
     </div>
+  );
+}
+
+// Inline fresh-meal review — the Admin → Fresh Meals approval flow, moved to
+// where the flavours are actually seen. Renders under an unconfirmed
+// flavour's name: pick a bucket and confirm (moves it into that group row
+// immediately), or mark it not-a-meal (drops it back into its raw category).
+// Confirmed classifications are sticky — this control disappears after.
+function InlineMealReview({ product, mealTypes, updateProductMeal }) {
+  const [mealType, setMealType] = useState(product.mealType || '');
+  const [busy, setBusy] = useState(false);
+  const names = mealTypes.map(m => m.name);
+
+  const run = async (body) => {
+    setBusy(true);
+    try {
+      await updateProductMeal(product.sku, body);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <span
+      className="inline-flex items-center gap-1.5 ml-2 align-middle"
+      onClick={e => e.stopPropagation()}
+    >
+      <span className="text-[10px] uppercase tracking-wide bg-amber-500/20 text-amber-400 px-1.5 py-0.5 rounded">
+        review
+      </span>
+      <select
+        value={mealType}
+        onChange={e => setMealType(e.target.value)}
+        disabled={busy}
+        className="bg-zinc-800 border border-zinc-700 rounded px-1.5 py-0.5 text-xs focus:outline-none focus:border-emerald-500"
+      >
+        <option value="">Unclassified</option>
+        {names.map(name => (
+          <option key={name} value={name}>{name}</option>
+        ))}
+        {product.mealType && !names.includes(product.mealType) && (
+          <option value={product.mealType}>{product.mealType} (removed)</option>
+        )}
+      </select>
+      <button
+        onClick={() => run({ mealType: mealType || null, mealTypeConfirmed: true })}
+        disabled={busy || !mealType}
+        title={mealType ? `Confirm as ${mealType}` : 'Pick a bucket first'}
+        className="px-2 py-0.5 rounded text-xs font-medium bg-emerald-600 text-white hover:bg-emerald-500 disabled:opacity-40"
+      >
+        {busy ? '…' : 'Confirm'}
+      </button>
+      <button
+        onClick={() => run({ isFreshMeal: false, mealTypeConfirmed: true })}
+        disabled={busy}
+        title="Not a fresh meal — moves back to its normal category"
+        className="text-zinc-500 hover:text-red-400 text-xs"
+      >
+        not a meal
+      </button>
+    </span>
   );
 }
