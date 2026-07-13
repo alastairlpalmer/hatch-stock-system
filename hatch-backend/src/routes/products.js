@@ -232,11 +232,43 @@ router.put('/:sku/meal', asyncHandler(async (req, res) => {
   res.json(product);
 }));
 
-// Delete product
+// Delete product.
+//
+// Sales and order lines reference products WITHOUT cascade — deliberately, so
+// financial history can never vanish via a catalog delete. A bare delete on a
+// product with history therefore hit the FK constraint and surfaced as a
+// blank 500. Check first and answer 409 with a human explanation instead;
+// stock/config/batch rows DO cascade, so products without trading history
+// delete cleanly.
 router.delete('/:sku', asyncHandler(async (req, res) => {
-  await prisma.product.delete({
-    where: { sku: req.params.sku },
-  });
+  const sku = req.params.sku;
+
+  const [salesCount, orderLineCount] = await Promise.all([
+    prisma.sale.count({ where: { sku } }),
+    prisma.orderItem.count({ where: { sku } }),
+  ]);
+  if (salesCount > 0 || orderLineCount > 0) {
+    const parts = [
+      salesCount > 0 && `${salesCount} sale${salesCount === 1 ? '' : 's'}`,
+      orderLineCount > 0 && `${orderLineCount} order line${orderLineCount === 1 ? '' : 's'}`,
+    ].filter(Boolean).join(' and ');
+    return res.status(409).json({
+      error: `Cannot delete: this product has ${parts} in its history, which must be kept for reporting. Remove it from the VendLive planogram (it will stop appearing) or reassign its supplier instead.`,
+    });
+  }
+
+  try {
+    await prisma.product.delete({ where: { sku } });
+  } catch (err) {
+    // Safety net for any other restrictive relation added later.
+    if (err.code === 'P2003') {
+      return res.status(409).json({ error: 'Cannot delete: this product is referenced by other records that must be kept.' });
+    }
+    if (err.code === 'P2025') {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+    throw err;
+  }
 
   res.json({ success: true });
 }));

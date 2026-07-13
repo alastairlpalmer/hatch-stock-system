@@ -256,7 +256,11 @@ export default function SuppliersConfig() {
               </div>
 
               {expanded && (
-                <SupplierProductTable products={supplierProducts} updateProduct={updateProduct} />
+                <SupplierProductTable
+                  products={supplierProducts}
+                  suppliers={suppliers}
+                  updateProduct={updateProduct}
+                />
               )}
             </div>
           );
@@ -303,11 +307,13 @@ function Field({ label, children }) {
   );
 }
 
-// Per-supplier product config: inline cost + units-per-box editing. Values
-// save on blur (or Enter) so a fast top-to-bottom fill session is one
-// keystroke-tab-keystroke flow. VendLive price sync can overwrite unitCost on
-// later sales — this is still the right place to fill the blanks it misses.
-function SupplierProductTable({ products, updateProduct }) {
+// Per-supplier product config: inline cost + units-per-box editing (save on
+// blur or Enter, so a fast top-to-bottom fill session is one
+// keystroke-tab-keystroke flow) plus a supplier select to reassign a product
+// to a different supplier (or none) — the row leaves this table immediately.
+// VendLive price sync can overwrite unitCost on later sales — this is still
+// the right place to fill the blanks it misses.
+function SupplierProductTable({ products, suppliers, updateProduct }) {
   if (products.length === 0) {
     return <p className="px-4 py-4 text-sm text-zinc-600 border-t border-zinc-800">No products assigned to this supplier yet — assign them from the gaps panel below or in Admin → Products.</p>;
   }
@@ -320,11 +326,12 @@ function SupplierProductTable({ products, updateProduct }) {
             <th className="text-left px-4 py-2 text-zinc-500 font-medium text-xs">SKU</th>
             <th className="text-right px-4 py-2 text-zinc-500 font-medium text-xs">Cost price (£)</th>
             <th className="text-right px-4 py-2 text-zinc-500 font-medium text-xs">Units / box</th>
+            <th className="text-left px-4 py-2 text-zinc-500 font-medium text-xs">Supplier</th>
           </tr>
         </thead>
         <tbody>
           {products.map(p => (
-            <ProductConfigRow key={p.sku} product={p} updateProduct={updateProduct} />
+            <ProductConfigRow key={p.sku} product={p} suppliers={suppliers} updateProduct={updateProduct} />
           ))}
         </tbody>
       </table>
@@ -332,7 +339,7 @@ function SupplierProductTable({ products, updateProduct }) {
   );
 }
 
-function ProductConfigRow({ product, updateProduct }) {
+function ProductConfigRow({ product, suppliers, updateProduct }) {
   const [cost, setCost] = useState(product.unitCost != null ? String(product.unitCost) : '');
   const [upb, setUpb] = useState(product.unitsPerBox != null ? String(product.unitsPerBox) : '');
   const [saving, setSaving] = useState(false);
@@ -383,6 +390,27 @@ function ProductConfigRow({ product, updateProduct }) {
           placeholder="1"
           className="w-20 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm text-right focus:outline-none focus:border-emerald-500"
         />
+      </td>
+      <td className="px-4 py-2">
+        <select
+          value={product.preferredSupplierId || ''}
+          onChange={async (e) => {
+            setSaving(true);
+            try {
+              await updateProduct(product.sku, { preferredSupplierId: e.target.value || null });
+            } finally {
+              setSaving(false);
+            }
+          }}
+          disabled={saving}
+          title="Reassign this product to a different supplier — it moves to that supplier's list"
+          className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs focus:outline-none focus:border-emerald-500 max-w-[160px]"
+        >
+          <option value="">— no supplier</option>
+          {suppliers.map(s => (
+            <option key={s.id} value={s.id}>{s.name}</option>
+          ))}
+        </select>
       </td>
     </tr>
   );
