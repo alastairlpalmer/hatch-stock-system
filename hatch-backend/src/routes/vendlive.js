@@ -94,7 +94,14 @@ router.get('/config', asyncHandler(async (req, res) => {
 
 // PUT /api/vendlive/config — update config
 router.put('/config', asyncHandler(async (req, res) => {
-  const { apiToken, accountId, baseUrl, webhookSecret, salesSyncEnabled, pollIntervalMin, autoCreateProducts, productSyncEnabled, productSyncIntervalMin } = req.body;
+  const {
+    apiToken, accountId, baseUrl, webhookSecret, salesSyncEnabled, pollIntervalMin,
+    autoCreateProducts, productSyncEnabled, productSyncIntervalMin,
+    // These three were accepted by the Admin UI but silently DROPPED here —
+    // the stock-sync toggle looked like it worked while the DB never changed
+    // (the root cause of stock sync being off for a week in July 2026).
+    stockSyncEnabled, stockPollIntervalMin, autoShrinkageCalc, restockMovementTypes,
+  } = req.body;
 
   const data = {};
   if (accountId !== undefined) data.accountId = accountId;
@@ -104,6 +111,10 @@ router.put('/config', asyncHandler(async (req, res) => {
   if (autoCreateProducts !== undefined) data.autoCreateProducts = autoCreateProducts;
   if (productSyncEnabled !== undefined) data.productSyncEnabled = productSyncEnabled;
   if (productSyncIntervalMin !== undefined) data.productSyncIntervalMin = parseInt(productSyncIntervalMin);
+  if (stockSyncEnabled !== undefined) data.stockSyncEnabled = stockSyncEnabled;
+  if (stockPollIntervalMin !== undefined) data.stockPollIntervalMin = parseInt(stockPollIntervalMin);
+  if (autoShrinkageCalc !== undefined) data.autoShrinkageCalc = autoShrinkageCalc;
+  if (restockMovementTypes !== undefined) data.restockMovementTypes = restockMovementTypes;
 
   // Encrypt token if provided and not the masked value
   if (apiToken && apiToken !== '***') {
@@ -559,8 +570,22 @@ router.get('/health', asyncHandler(async (req, res) => {
     (!lastSalesSync || now - lastSalesSync.createdAt.getTime() > salesStaleAfterMs);
 
   const stockEnabled = config?.stockSyncEnabled || false;
+  // 24h staleness window (was 4 days — long enough to hide a whole broken
+  // week). The poll job's 6h staleness-fallback sync means a healthy system
+  // never comes close to this threshold, weekends included.
   const stockStale = stockEnabled &&
-    (!lastStockSync || now - lastStockSync.createdAt.getTime() > 4 * 24 * 60 * 60 * 1000);
+    (!lastStockSync || now - lastStockSync.createdAt.getTime() > 24 * 60 * 60 * 1000);
+
+  const productSyncEnabled = config?.productSyncEnabled || false;
+
+  // A disabled sync is a LOUD condition, not a quiet one: with stock or
+  // product sync off, quantities drift and each week's new rotating flavours
+  // never enter the catalog — and nothing else in the app says why.
+  const syncsDisabled = [
+    !salesEnabled && 'sales',
+    !stockEnabled && 'stock',
+    !productSyncEnabled && 'products',
+  ].filter(Boolean);
 
   res.json({
     salesSync: {
@@ -575,10 +600,16 @@ router.get('/health', asyncHandler(async (req, res) => {
       lastSyncAt: lastStockSync?.createdAt || null,
       stale: stockStale,
     },
+    productSync: {
+      enabled: productSyncEnabled,
+      lastSyncAt: config?.lastProductSyncAt || null,
+    },
+    syncsDisabled,
     quarantine: { unresolved: quarantineUnresolved },
     unmappedMachines,
     errorsLast24h,
-    ok: !salesStale && !stockStale && quarantineUnresolved === 0 && unmappedMachines === 0,
+    ok: !salesStale && !stockStale && syncsDisabled.length === 0 &&
+      quarantineUnresolved === 0 && unmappedMachines === 0,
   });
 }));
 

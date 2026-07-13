@@ -429,12 +429,35 @@ export async function syncProductCatalog(config) {
 }
 
 /**
+ * Parse the configured restock movement types ("restock, refill" etc.) into
+ * normalised lowercase tokens. Exported for testing.
+ */
+export function parseRestockTypes(configured) {
+  return String(configured || 'In')
+    .split(',')
+    .map((t) => t.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+/**
+ * Whether a VendLive movement counts as a restock. Case-insensitive and
+ * substring-tolerant in BOTH directions ("Restock" config matches a
+ * "Machine Restock" movement and vice versa) — exact-match on free-typed
+ * config strings silently disabled detection for weeks. Exported for testing.
+ */
+export function isRestockMovement(movementType, restockTypes) {
+  const mt = String(movementType || '').trim().toLowerCase();
+  if (!mt) return false;
+  return restockTypes.some((t) => mt === t || mt.includes(t) || t.includes(mt));
+}
+
+/**
  * Poll stock movements for a machine and detect restock events.
  * A restock is detected when movementType matches any configured restock type.
  * Returns: { restockDetected: boolean, movements: [...] }
  */
 export async function detectRestockEvents(vendliveMachineId, config) {
-  const restockTypes = (config.restockMovementTypes || 'In').split(',').map(t => t.trim());
+  const restockTypes = parseRestockTypes(config.restockMovementTypes);
 
   // Get or create movement tracker
   let tracker = await prisma.vendliveMovementTracker.findUnique({
@@ -459,8 +482,15 @@ export async function detectRestockEvents(vendliveMachineId, config) {
     return { restockDetected: false, newMovements: 0 };
   }
 
-  // Check for restock-type movements
-  const restockMovements = newMovements.filter(m => restockTypes.includes(m.movementType));
+  // Check for restock-type movements (case-insensitive, substring-tolerant)
+  const restockMovements = newMovements.filter(m => isRestockMovement(m.movementType, restockTypes));
+  // Surface the ACTUAL movement type strings whenever nothing matched — the
+  // config is free-typed, and a silent mismatch here disabled stock sync for
+  // days. This log is the evidence needed to correct restockMovementTypes.
+  if (restockMovements.length === 0) {
+    const seen = [...new Set(newMovements.map(m => m.movementType))];
+    console.warn(`Movement poll: machine ${vendliveMachineId} — no restock match among types [${seen.join(', ')}] (configured: ${restockTypes.join(', ')})`);
+  }
 
   // Update tracker with highest movement ID
   const highestId = Math.max(...newMovements.map(m => m.id));
@@ -491,9 +521,18 @@ export async function detectRestockEvents(vendliveMachineId, config) {
   };
 }
 
+// If no successful stock sync has landed in this window, the poll job runs a
+// full sync regardless of restock detection. Restock detection is the fast
+// path, but it depends on free-typed movement-type config matching what
+// VendLive actually sends — when that silently mismatches (as it did for six
+// days in July 2026), this fallback caps the damage at hours, not days.
+const STALE_SYNC_FALLBACK_MS = 6 * 60 * 60 * 1000;
+
 /**
  * Run the stock movement polling job.
- * Checks all mapped machines for new movements, triggers sync if restock detected.
+ * Checks all mapped machines for new movements and triggers a sync on restock
+ * detection; independently, falls back to a full sync of every mapped machine
+ * when the last successful sync is older than STALE_SYNC_FALLBACK_MS.
  */
 export async function runStockPollJob() {
   const config = await prisma.vendliveConfig.findUnique({ where: { id: 'default' } });
@@ -526,5 +565,27 @@ export async function runStockPollJob() {
     }
   }
 
-  return { machinesChecked: mappings.length, syncsTriggered };
+  // Staleness fallback: if nothing synced recently (detection broken, quiet
+  // week, restarted tracker...), do a full pass so numbers can never silently
+  // drift for days. Idempotent and cheap at this fleet size.
+  let fallbackRan = false;
+  if (syncsTriggered === 0 && mappings.length > 0) {
+    try {
+      const lastSuccess = await prisma.vendliveStockSync.findFirst({
+        where: { status: 'success' },
+        orderBy: { createdAt: 'desc' },
+        select: { createdAt: true },
+      });
+      if (!lastSuccess || Date.now() - lastSuccess.createdAt.getTime() > STALE_SYNC_FALLBACK_MS) {
+        console.warn(`Stock poll: no successful sync since ${lastSuccess?.createdAt?.toISOString() || 'ever'} — running staleness-fallback full sync`);
+        const result = await syncAllMachines(config);
+        fallbackRan = true;
+        syncsTriggered += result?.machinesSynced || 0;
+      }
+    } catch (err) {
+      console.error('Stock poll: staleness-fallback sync failed:', err.message);
+    }
+  }
+
+  return { machinesChecked: mappings.length, syncsTriggered, fallbackRan };
 }
