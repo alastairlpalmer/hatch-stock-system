@@ -61,6 +61,20 @@ export default function useNeedsAttention() {
 
     // ---- red ----
 
+    // 0. A DISABLED sync outranks a stale one: with stock or product sync off,
+    // quantities silently drift and each week's new rotating flavours never
+    // enter the catalog — and previously nothing anywhere in the UI said so
+    // (stock sync sat off for six days in July 2026 before anyone noticed).
+    if (health && Array.isArray(health.syncsDisabled) && health.syncsDisabled.length > 0) {
+      out.push({
+        id: 'sync-disabled',
+        severity: 'red',
+        title: `VendLive ${health.syncsDisabled.join(' + ')} sync switched OFF`,
+        detail: 'stock and product data are not updating',
+        to: '/support/settings',
+      });
+    }
+
     // 1. Stale sync taints every number below it — always ranked first.
     if (health && ((health.salesSync?.enabled && health.salesSync?.stale) || (health.stockSync?.enabled && health.stockSync?.stale))) {
       const salesStale = health.salesSync?.enabled && health.salesSync?.stale;
