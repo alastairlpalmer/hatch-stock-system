@@ -35,6 +35,7 @@ import OrdersLanding from './components/pages/orders/OrdersLanding';
 
 // Parent layouts
 import OrdersLayout from './components/pages/orders/OrdersLayout';
+import SuppliersConfig from './components/pages/orders/SuppliersConfig';
 import RestockLayout from './components/pages/restock/RestockLayout';
 import RestockWorkflow from './components/pages/restock/RestockWorkflow';
 import SelectRoute from './components/pages/restock/SelectRoute';
@@ -183,6 +184,7 @@ function AppLayout() {
                 <Route path="buying-lists" element={<BuyingLists />} />
                 <Route path="buying-lists/:id" element={<BuyingListDetail />} />
                 <Route path="receive" element={<ReceiveStock />} />
+                <Route path="suppliers" element={<SuppliersConfig />} />
               </Route>
 
               <Route path="/restock" element={<RestockLayout />}>

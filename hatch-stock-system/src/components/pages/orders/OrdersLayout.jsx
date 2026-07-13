@@ -6,6 +6,7 @@ const tabs = [
   { to: 'buying-lists', label: 'Buying Lists' },
   { to: 'receive', label: 'Receive' },
   { to: 'warehouse', label: 'Warehouse' },
+  { to: 'suppliers', label: 'Suppliers' },
 ];
 
 export default function OrdersLayout() {
