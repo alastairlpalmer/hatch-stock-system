@@ -134,7 +134,9 @@ function AdminProducts() {
     try {
       await deleteProduct(sku);
     } catch (err) {
-      setError(err.message || 'Failed to delete product');
+      // Prefer the server's explanation (e.g. "has sales history") over the
+      // generic axios "Request failed with status code 409/500" message.
+      setError(err.response?.data?.error || err.message || 'Failed to delete product');
     } finally {
       setLoading(false);
     }
