@@ -19,6 +19,7 @@ import ordersRouter from './routes/orders.js';
 import buyingListsRouter, { publicBuyingListsRouter } from './routes/buying-lists.js';
 import pickListsRouter from './routes/pick-lists.js';
 import attentionRouter from './routes/attention.js';
+import restockPlannerRouter from './routes/restock-planner.js';
 import suppliersRouter from './routes/suppliers.js';
 import routesRouter from './routes/routes.js';
 import salesRouter from './routes/sales.js';
@@ -165,6 +166,7 @@ app.use('/api/public/buying-lists', publicBuyingListsRouter);
 app.use('/api/pick-lists', pickListsRouter);
 // Writes here are admin-only via rolePolicy (not on the ops allowlist).
 app.use('/api/attention-dismissals', attentionRouter);
+app.use('/api/restock-planner', restockPlannerRouter);
 app.use('/api/suppliers', suppliersRouter);
 app.use('/api/routes', routesRouter);
 app.use('/api/sales', salesRouter);
