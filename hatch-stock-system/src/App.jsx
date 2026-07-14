@@ -37,6 +37,7 @@ import OrdersLanding from './components/pages/orders/OrdersLanding';
 import OrdersLayout from './components/pages/orders/OrdersLayout';
 import SuppliersConfig from './components/pages/orders/SuppliersConfig';
 import RestockLayout from './components/pages/restock/RestockLayout';
+import RestockPlanner from './components/pages/restock/RestockPlanner';
 import RestockWorkflow from './components/pages/restock/RestockWorkflow';
 import SelectRoute from './components/pages/restock/SelectRoute';
 import SupportLayout from './components/pages/support/SupportLayout';
@@ -189,6 +190,7 @@ function AppLayout() {
 
               <Route path="/restock" element={<RestockLayout />}>
                 <Route index element={<RestockIndex />} />
+                <Route path="planner" element={<RestockPlanner />} />
                 <Route path="route" element={<SelectRoute />} />
                 <Route path="picklists" element={<PickLists />} />
                 <Route path="picklists/:id" element={<PickListDetail />} />

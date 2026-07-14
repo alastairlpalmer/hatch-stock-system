@@ -3,6 +3,7 @@ import { NavLink, Outlet, useLocation } from 'react-router-dom';
 
 const tabs = [
   { to: '/restock', label: 'Workflow', end: true },
+  { to: '/restock/planner', label: 'Planner' },
   { to: '/restock/route', label: 'Select Route' },
   { to: '/restock/picklists', label: 'Pick Lists' },
   { to: '/restock/run', label: "Today's Run" },

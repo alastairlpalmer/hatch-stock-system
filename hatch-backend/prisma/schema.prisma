@@ -698,6 +698,26 @@ model AttentionDismissal {
   @@map("attention_dismissals")
 }
 
+// Restock planner calendar (Restock > Planner). The frontend renders the
+// weekly defaults itself (Monday = restock, Friday = de-stock); rows here
+// only store overrides and ad-hoc entries keyed by (date, kind):
+// assignees/notes decorate a default, status 'cancelled' hides it, a row on
+// any other day is an ad-hoc run. Deleting a row reverts the day to its
+// default. See manual-sql/019_restock_planner.sql.
+model RestockPlanEntry {
+  id        String   @id @default(uuid())
+  date      DateTime @db.Date
+  kind      String // 'restock' | 'destock'
+  status    String   @default("planned") // 'planned' | 'cancelled'
+  assignees String[] @default([])
+  notes     String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([date, kind])
+  @@map("restock_plan_entries")
+}
+
 // ============ USERS (Optional Auth) ============
 
 model User {

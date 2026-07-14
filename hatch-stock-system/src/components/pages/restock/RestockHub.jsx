@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { Truck, ClipboardCheck, ListChecks, PackagePlus, Route as RouteIcon } from 'lucide-react';
+import { Truck, ClipboardCheck, ListChecks, PackagePlus, CalendarDays, Route as RouteIcon } from 'lucide-react';
 import { useRestockRun } from '../../../context/RestockRunContext';
 import { useStock } from '../../../context/StockContext';
 import ActionCard from '../../ui/ActionCard';
@@ -32,6 +32,12 @@ const ACTIONS = [
     icon: PackagePlus,
     title: 'Log a Restock',
     description: 'Record what went into a machine.',
+  },
+  {
+    to: '/restock/planner',
+    icon: CalendarDays,
+    title: 'Planner',
+    description: "See who's restocking and de-stocking each week.",
   },
 ];
 
