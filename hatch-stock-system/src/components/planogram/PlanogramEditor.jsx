@@ -44,6 +44,8 @@ export default function PlanogramEditor({ locationId, payload, products, mealGro
         targetType: a.targetType,
         sku: a.sku || undefined,
         mealType: a.mealType || undefined,
+        // Per-slot capacity override; travels with the placement on move/swap.
+        capacity: a.capacity ?? undefined,
       };
     }
     return map;
@@ -171,6 +173,38 @@ export default function PlanogramEditor({ locationId, payload, products, mealGro
       for (const k of Object.keys(next)) if (k.startsWith(`${shelf}-`)) delete next[k];
       return next;
     });
+    setDirty(true);
+  };
+
+  // Shelf-wide capacity default (units per facing). Empty input clears it.
+  const setUnitsPerSlot = (shelf, value) => {
+    const raw = String(value).trim();
+    const n = raw === '' ? null : Math.max(1, Math.min(999, parseInt(raw) || 1));
+    setShelves((sh) => sh.map((s) => {
+      if (s.shelf !== shelf) return s;
+      const next = { ...s };
+      if (n == null) delete next.unitsPerSlot;
+      else next.unitsPerSlot = n;
+      return next;
+    }));
+    setDirty(true);
+  };
+
+  // Per-slot capacity override. Prompt keeps the editor dependency-free;
+  // empty input clears the override back to the shelf default.
+  const editCapacity = (shelf, position) => {
+    const key = keyOf(shelf, position);
+    const target = slots[key];
+    if (!target) return;
+    const shelfDefault = shelves.find((s) => s.shelf === shelf)?.unitsPerSlot;
+    const raw = window.prompt(
+      `Units this slot holds (empty = shelf default${shelfDefault ? ` of ${shelfDefault}` : ', none set'})`,
+      target.capacity ?? '',
+    );
+    if (raw == null) return; // cancelled
+    const trimmed = raw.trim();
+    const n = trimmed === '' ? undefined : Math.max(1, Math.min(999, parseInt(trimmed) || 1));
+    setSlots((s) => ({ ...s, [key]: { ...s[key], capacity: n } }));
     setDirty(true);
   };
 
@@ -403,6 +437,31 @@ export default function PlanogramEditor({ locationId, payload, products, mealGro
                           title={`${targetLabel(target)} — drag to move`}
                         >
                           <span className="block truncate pr-4">{targetLabel(target)}</span>
+                          {(() => {
+                            const effective = target.capacity ?? s.unitsPerSlot ?? null;
+                            return (
+                              <button
+                                onClick={(e) => { e.stopPropagation(); editCapacity(s.shelf, position); }}
+                                className={`absolute bottom-0.5 right-1 text-[9px] font-mono leading-none px-1 py-0.5 rounded ${
+                                  target.capacity != null
+                                    ? 'bg-emerald-500/20 text-emerald-300'
+                                    : effective != null
+                                      ? 'text-zinc-500 hover:text-zinc-300'
+                                      : 'text-zinc-600 hover:text-zinc-400'
+                                }`}
+                                title={
+                                  target.capacity != null
+                                    ? `Holds ${target.capacity} units (slot override) — click to edit`
+                                    : effective != null
+                                      ? `Holds ${effective} units (shelf default) — click to override`
+                                      : 'No capacity set — click to set units for this slot'
+                                }
+                                aria-label={`Edit capacity for slot ${slotCode(s.shelf, position)}`}
+                              >
+                                {effective != null ? `×${effective}` : '×?'}
+                              </button>
+                            );
+                          })()}
                           <button
                             onClick={(e) => { e.stopPropagation(); clear(s.shelf, position); }}
                             className="absolute top-0.5 right-1 text-zinc-500 hover:text-red-400 text-sm leading-none"
@@ -420,7 +479,7 @@ export default function PlanogramEditor({ locationId, payload, products, mealGro
                 })}
               </div>
               {/* Shelf structure controls */}
-              <div className="w-[76px] shrink-0 flex flex-col items-stretch justify-center gap-1 pb-2">
+              <div className="w-[88px] shrink-0 flex flex-col items-stretch justify-center gap-1 pb-2">
                 <div className="flex items-center gap-1">
                   <input
                     type="number"
@@ -440,6 +499,19 @@ export default function PlanogramEditor({ locationId, payload, products, mealGro
                   >
                     ✕
                   </button>
+                </div>
+                <div className="flex items-center gap-1" title={`Units each facing on shelf ${s.shelf} holds (order/pick fill target)`}>
+                  <input
+                    type="number"
+                    min={1}
+                    max={999}
+                    value={s.unitsPerSlot ?? ''}
+                    placeholder="u"
+                    onChange={(e) => setUnitsPerSlot(s.shelf, e.target.value)}
+                    aria-label={`Units per slot on shelf ${s.shelf}`}
+                    className="w-11 bg-zinc-800 border border-zinc-700 rounded px-1 py-0.5 text-xs text-center focus:outline-none focus:border-emerald-500 placeholder:text-zinc-600"
+                  />
+                  <span className="text-[9px] text-zinc-600">u/slot</span>
                 </div>
                 <button
                   onClick={() => clearShelf(s.shelf)}

@@ -94,6 +94,9 @@ export default function PlanogramView({
 
       const count = slotCounts.get(a.targetType === 'mealType' ? `g:${a.mealType}` : `s:${a.sku}`) || 1;
       if (count > 1) lines.push(`Total across ${count} slots — per-slot split unknown`);
+      if (a.effectiveCapacity != null) {
+        lines.push(`Holds ${a.effectiveCapacity} units${a.capacity != null ? ' (slot override)' : ''}`);
+      }
       if (a.stale) lines.push('No longer stocked at this location — reassign in Admin › Machine Layout');
       lines.push(`Slot ${a.slotCode}`);
 

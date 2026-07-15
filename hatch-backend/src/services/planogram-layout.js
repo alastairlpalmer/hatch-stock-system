@@ -24,6 +24,15 @@ export function slotCode(shelf, position) {
   return `${shelf}${positionLetter(position)}`;
 }
 
+// Sanity ceiling for capacity values (units per facing) — generous enough for
+// any real fridge slot, tight enough to catch fat-fingered entries.
+export const MAX_SLOT_CAPACITY = 999;
+
+/** True when v is a valid capacity value: null/undefined (unset) or int 1..MAX. */
+function isValidCapacity(v) {
+  return v == null || (Number.isInteger(v) && v >= 1 && v <= MAX_SLOT_CAPACITY);
+}
+
 /**
  * Validate a layout document (shelves + assignments) before saving.
  * Returns an array of human-readable error strings; empty = valid.
@@ -50,6 +59,10 @@ export function validateLayout(shelves, assignments = []) {
     }
     if (!Number.isInteger(s.slots) || s.slots < 1 || s.slots > MAX_SLOTS_PER_SHELF) {
       errors.push(`Shelf ${s.shelf}: slots must be 1-${MAX_SLOTS_PER_SHELF} (got ${s.slots})`);
+      continue;
+    }
+    if (!isValidCapacity(s.unitsPerSlot)) {
+      errors.push(`Shelf ${s.shelf}: unitsPerSlot must be 1-${MAX_SLOT_CAPACITY} (got ${s.unitsPerSlot})`);
       continue;
     }
     slotsByShelf.set(s.shelf, s.slots);
@@ -80,13 +93,20 @@ export function validateLayout(shelves, assignments = []) {
     } else {
       errors.push(`Assignment ${code}: unknown targetType '${a.targetType}'`);
     }
+    if (!isValidCapacity(a.capacity)) {
+      errors.push(`Assignment ${code}: capacity must be 1-${MAX_SLOT_CAPACITY} (got ${a.capacity})`);
+    }
   }
 
   return errors;
 }
 
-/** Identity of a slot's target — used to decide whether a save changed it. */
-function targetKey(a) {
+/**
+ * Identity of a slot's target — used to decide whether a save changed it.
+ * Deliberately capacity-blind: a capacity edit is a current-attribute update,
+ * not a product move, so it must never cycle the history row.
+ */
+export function targetKey(a) {
   return a.targetType === 'mealType' ? `mealType:${a.mealType}` : `sku:${a.sku}`;
 }
 
@@ -95,10 +115,14 @@ function targetKey(a) {
  * Unchanged slots are untouched (their validFrom is preserved) — a weekly save
  * that moves 5 of 48 slots cycles exactly 5 history rows, not 48.
  *
- * openRows: [{ id, shelf, position, targetType, sku, mealType }]
- * next:     [{ shelf, position, targetType, sku, mealType }]
- * Returns { toCloseIds, toCreate } where toCreate rows still need layoutId /
- * locationId / validFrom added by the caller.
+ * Capacity is a current attribute, not part of slot history: a slot whose
+ * target is unchanged but whose capacity differs lands in toUpdateCapacity
+ * (in-place update), never in toCloseIds/toCreate.
+ *
+ * openRows: [{ id, shelf, position, targetType, sku, mealType, capacity? }]
+ * next:     [{ shelf, position, targetType, sku, mealType, capacity? }]
+ * Returns { toCloseIds, toCreate, toUpdateCapacity } where toCreate rows still
+ * need layoutId / locationId / validFrom added by the caller.
  */
 export function diffSlotAssignments(openRows, next) {
   const openBySlot = new Map(openRows.map((r) => [`${r.shelf}-${r.position}`, r]));
@@ -106,6 +130,7 @@ export function diffSlotAssignments(openRows, next) {
 
   const toCloseIds = [];
   const toCreate = [];
+  const toUpdateCapacity = [];
 
   for (const [key, row] of openBySlot) {
     const incoming = nextBySlot.get(key);
@@ -124,11 +149,73 @@ export function diffSlotAssignments(openRows, next) {
         targetType: a.targetType,
         sku: a.targetType === 'sku' ? a.sku : null,
         mealType: a.targetType === 'mealType' ? a.mealType : null,
+        capacity: a.capacity ?? null,
       });
+    } else if ((existing.capacity ?? null) !== (a.capacity ?? null)) {
+      toUpdateCapacity.push({ id: existing.id, capacity: a.capacity ?? null });
     }
   }
 
-  return { toCloseIds, toCreate };
+  return { toCloseIds, toCreate, toUpdateCapacity };
+}
+
+/**
+ * Effective capacity of one slot: the per-slot override, else its shelf's
+ * unitsPerSlot default, else null (unknown).
+ *
+ * assignment: { shelf, capacity? }
+ * shelvesByNumber: Map(shelf -> { shelf, slots, unitsPerSlot? })
+ */
+export function resolveSlotCapacity(assignment, shelvesByNumber) {
+  if (assignment.capacity != null) return assignment.capacity;
+  const shelf = shelvesByNumber.get(assignment.shelf);
+  return shelf?.unitsPerSlot ?? null;
+}
+
+/**
+ * Build the ordering/picking scope from a layout's open slot assignments:
+ * which SKUs and meal-type groups are actually in the fridge, and how many
+ * units each target's slots hold.
+ *
+ * capacityByTarget sums effective slot capacities per target and is NULL for
+ * a target when ANY of its slots has no resolvable capacity — a partial sum
+ * would silently understate the fill target, so unknown means unknown and the
+ * caller falls back to the config maxStock.
+ *
+ * openAssignments: [{ shelf, position, targetType, sku, mealType, capacity? }]
+ * shelves: MachineLayout.shelves JSON — [{ shelf, slots, unitsPerSlot? }]
+ * Returns {
+ *   skuSet: Set<sku>, mealTypeSet: Set<mealType>,
+ *   capacityByTarget: Map(targetKey -> int|null),
+ *   slotCountByTarget: Map(targetKey -> int),
+ * }
+ */
+export function buildPlanogramScope(openAssignments, shelves) {
+  const shelvesByNumber = new Map(
+    (Array.isArray(shelves) ? shelves : []).map((s) => [s.shelf, s]),
+  );
+
+  const skuSet = new Set();
+  const mealTypeSet = new Set();
+  const capacityByTarget = new Map();
+  const slotCountByTarget = new Map();
+
+  for (const a of openAssignments || []) {
+    const key = targetKey(a);
+    if (a.targetType === 'sku') skuSet.add(a.sku);
+    else mealTypeSet.add(a.mealType);
+
+    slotCountByTarget.set(key, (slotCountByTarget.get(key) || 0) + 1);
+
+    const slotCap = resolveSlotCapacity(a, shelvesByNumber);
+    if (slotCap == null) {
+      capacityByTarget.set(key, null); // poison: any unknown slot -> unknown target
+    } else if (capacityByTarget.get(key) !== null || !capacityByTarget.has(key)) {
+      capacityByTarget.set(key, (capacityByTarget.get(key) || 0) + slotCap);
+    }
+  }
+
+  return { skuSet, mealTypeSet, capacityByTarget, slotCountByTarget };
 }
 
 /**

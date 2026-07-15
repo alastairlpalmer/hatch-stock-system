@@ -12,6 +12,7 @@ import {
   countTradingDaysBetween,
   countTradingDaysInWindow,
 } from '../utils/trading-days.js';
+import { getEffectiveLayout } from './planogram-scope.js';
 
 const MS_PER_DAY = 86_400_000;
 const round = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -173,14 +174,31 @@ export function computeOrderQty({ netNeed, unitsPerBox = 1, projectedStock = 0, 
 }
 
 /**
+ * Fill target for a planogram-scoped line: the diagram's summed slot capacity
+ * when resolvable, else the config maxStock. Pure; exported for tests.
+ */
+export function effectiveMaxStock(scope, key, configMax) {
+  if (!scope) return configMax ?? null;
+  return scope.capacityByTarget.get(key) ?? configMax ?? null;
+}
+
+/**
  * Compute the per-location gross lines for one location: non-fresh products
  * per SKU, Frive fresh meals collapsed into one line per meal-type group
  * (stock + velocity summed across flavours, par from LocationMealConfig).
  * Velocity fields are kept RAW (unrounded) — rounding happens once, after
  * merging, to avoid re-rounding accumulation.
+ *
+ * When the location has a visual planogram (`planogram` from
+ * getEffectiveLayout), lines are SCOPED to the slotted targets: non-fresh
+ * products must be in scope.skuSet, meal groups in scope.mealTypeSet, and the
+ * fill cap comes from the diagram's slot capacity (config maxStock fallback).
+ * Assigned-but-unplaced targets are returned in `excluded` so the UI can warn
+ * instead of silently dropping selling products.
  */
-async function buildLocationGrossLines(location, now, meta) {
+async function buildLocationGrossLines(location, now, meta, planogram = null) {
   const assignedSkus = location.assignedItems.map((a) => a.sku);
+  const scope = planogram?.scope ?? null;
 
   const [stockRows, configRows, mealConfigRows, velocity] = await Promise.all([
     prisma.locationStock.findMany({ where: { locationId: location.id } }),
@@ -200,9 +218,14 @@ async function buildLocationGrossLines(location, now, meta) {
   const velOf = (sku) => velocity[sku] || { vShort: 0, vLong: 0, unitsShort: 0, unitsLong: 0 };
 
   const lines = [];
+  const excluded = { skus: [], mealTypes: [] };
 
   // --- Non-fresh: per SKU ---
   for (const p of products.filter((p) => !p.isFreshMeal)) {
+    if (scope && !scope.skuSet.has(p.sku)) {
+      excluded.skus.push({ sku: p.sku, name: p.name });
+      continue;
+    }
     const machineStock = stockMap[p.sku] || 0;
     const cfg = configMap[p.sku] || {};
     const v = velOf(p.sku);
@@ -214,7 +237,7 @@ async function buildLocationGrossLines(location, now, meta) {
       sellingDaysBeforeRestock: meta.sellingDaysBeforeRestock,
       coverTradingDays: meta.coverTradingDays,
       minStock: cfg.minStock ?? null,
-      maxStock: cfg.maxStock ?? null,
+      maxStock: effectiveMaxStock(scope, `sku:${p.sku}`, cfg.maxStock),
     });
     if (!sug || sug.grossNeed <= 0) continue;
 
@@ -226,7 +249,7 @@ async function buildLocationGrossLines(location, now, meta) {
       preferredSupplierId: p.preferredSupplierId ?? null,
       machineStock,
       minStock: cfg.minStock ?? null,
-      maxStock: cfg.maxStock ?? null,
+      maxStock: effectiveMaxStock(scope, `sku:${p.sku}`, cfg.maxStock),
       unitsPerBox: p.unitsPerBox || 1,
       unitCost: p.unitCost || 0,
       vShort: v.vShort,
@@ -245,12 +268,17 @@ async function buildLocationGrossLines(location, now, meta) {
   }
 
   for (const [mealType, members] of Object.entries(groups)) {
+    if (scope && !scope.mealTypeSet.has(mealType)) {
+      excluded.mealTypes.push(mealType);
+      continue;
+    }
     const machineStock = members.reduce((a, p) => a + (stockMap[p.sku] || 0), 0);
     const vShort = members.reduce((a, p) => a + velOf(p.sku).vShort, 0);
     const vLong = members.reduce((a, p) => a + velOf(p.sku).vLong, 0);
     const unitsLong = members.reduce((a, p) => a + velOf(p.sku).unitsLong, 0);
     const blended = blendVelocity(vShort, vLong);
     const cfg = mealConfigMap[mealType] || {};
+    const groupMax = effectiveMaxStock(scope, `mealType:${mealType}`, cfg.maxStock);
     const avgCost = members.length
       ? members.reduce((a, p) => a + (p.unitCost || 0), 0) / members.length
       : 0;
@@ -261,7 +289,7 @@ async function buildLocationGrossLines(location, now, meta) {
       sellingDaysBeforeRestock: meta.sellingDaysBeforeRestock,
       coverTradingDays: meta.coverTradingDays,
       minStock: cfg.minStock ?? null,
-      maxStock: cfg.maxStock ?? null,
+      maxStock: groupMax,
     });
     if (!sug || sug.grossNeed <= 0) continue;
 
@@ -277,7 +305,7 @@ async function buildLocationGrossLines(location, now, meta) {
       preferredSupplierId: groupSupplierId,
       machineStock,
       minStock: cfg.minStock ?? null,
-      maxStock: cfg.maxStock ?? null,
+      maxStock: groupMax,
       unitsPerBox: 1, // order in units; flavour split happens at pick/restock
       unitCost: round(avgCost),
       vShort,
@@ -295,7 +323,7 @@ async function buildLocationGrossLines(location, now, meta) {
     });
   }
 
-  return lines;
+  return { lines, excluded };
 }
 
 /**
@@ -465,6 +493,32 @@ async function finalizeLines(mergedLines, supplierNameOf) {
 }
 
 /**
+ * Merge per-location "not on diagram" exclusions into one deduped list, each
+ * entry carrying the location names it applies to. Only locations where a
+ * planogram was applied contribute. Pure; exported for tests.
+ *
+ * perLocation: [{ locationName, applied, excluded: { skus: [{sku,name}], mealTypes: [str] } }]
+ */
+export function mergeNotOnPlanogram(perLocation) {
+  const skuMap = new Map();
+  const mealMap = new Map();
+  for (const loc of perLocation || []) {
+    if (!loc.applied || !loc.excluded) continue;
+    for (const { sku, name } of loc.excluded.skus || []) {
+      const entry = skuMap.get(sku) || { sku, name, locations: [] };
+      entry.locations.push(loc.locationName);
+      skuMap.set(sku, entry);
+    }
+    for (const mealType of loc.excluded.mealTypes || []) {
+      const entry = mealMap.get(mealType) || { mealType, locations: [] };
+      entry.locations.push(loc.locationName);
+      mealMap.set(mealType, entry);
+    }
+  }
+  return { skus: [...skuMap.values()], mealTypes: [...mealMap.values()] };
+}
+
+/**
  * Build purchase-order suggestions for ONE location, netted against the shared
  * warehouse pool and pending POs.
  *
@@ -484,10 +538,11 @@ export async function buildOrderSuggestions(locationId, now = new Date(), option
   const { leadTimeDays, coverDays } = resolveOrderingConfig(location);
   const meta = resolveModeMeta(now, { mode, coverDays });
 
-  const [lines, suppliers] = await Promise.all([
-    buildLocationGrossLines(location, now, meta),
+  const [planogram, suppliers] = await Promise.all([
+    getEffectiveLayout(location.id, { prefer: 'next' }),
     prisma.supplier.findMany({ select: { id: true, name: true } }),
   ]);
+  const { lines, excluded } = await buildLocationGrossLines(location, now, meta, planogram);
   const supplierNameOf = Object.fromEntries(suppliers.map((s) => [s.id, s.name]));
 
   const merged = mergeLines([{ location, lines }]);
@@ -499,6 +554,14 @@ export async function buildOrderSuggestions(locationId, now = new Date(), option
     return (a.daysOfCover ?? Infinity) - (b.daysOfCover ?? Infinity);
   });
 
+  const perLocation = [{
+    locationId: location.id,
+    locationName: location.name,
+    applied: !!planogram,
+    source: planogram?.source ?? null,
+    excluded: planogram ? excluded : null,
+  }];
+
   return {
     locationId,
     leadTimeDays,
@@ -509,6 +572,7 @@ export async function buildOrderSuggestions(locationId, now = new Date(), option
     coverTradingDays: meta.coverTradingDays,
     generatedAt: now.toISOString(),
     velocityWindows: VELOCITY_WINDOW_DAYS,
+    planogram: { perLocation, notOnPlanogram: mergeNotOnPlanogram(perLocation) },
     suggestions,
   };
 }
@@ -534,7 +598,7 @@ export async function buildConsolidatedSuggestions(locationIds, now = new Date()
 
   const meta = resolveModeMeta(now, { mode });
 
-  const [perLocationLines, suppliers] = await Promise.all([
+  const [perLocationResults, suppliers] = await Promise.all([
     Promise.all(
       locations.map(async (location) => {
         // Weekly cover is per-location configurable (trading days); topup cover
@@ -542,17 +606,16 @@ export async function buildConsolidatedSuggestions(locationIds, now = new Date()
         const locMeta = mode === 'weekly'
           ? { ...meta, coverTradingDays: resolveOrderingConfig(location).coverDays }
           : meta;
-        return {
-          location,
-          lines: await buildLocationGrossLines(location, now, locMeta),
-        };
+        const planogram = await getEffectiveLayout(location.id, { prefer: 'next' });
+        const { lines, excluded } = await buildLocationGrossLines(location, now, locMeta, planogram);
+        return { location, lines, excluded, planogram };
       }),
     ),
     prisma.supplier.findMany({ select: { id: true, name: true } }),
   ]);
   const supplierNameOf = Object.fromEntries(suppliers.map((s) => [s.id, s.name]));
 
-  const merged = mergeLines(perLocationLines);
+  const merged = mergeLines(perLocationResults);
   const suggestions = await finalizeLines(merged, supplierNameOf);
 
   // Critical first, then heaviest order first (rough proxy for urgency).
@@ -560,6 +623,14 @@ export async function buildConsolidatedSuggestions(locationIds, now = new Date()
     if (a.priority !== b.priority) return a.priority === 'critical' ? -1 : 1;
     return b.orderQty - a.orderQty;
   });
+
+  const perLocation = perLocationResults.map(({ location, excluded, planogram }) => ({
+    locationId: location.id,
+    locationName: location.name,
+    applied: !!planogram,
+    source: planogram?.source ?? null,
+    excluded: planogram ? excluded : null,
+  }));
 
   return {
     locationIds: locations.map((l) => l.id),
@@ -570,6 +641,7 @@ export async function buildConsolidatedSuggestions(locationIds, now = new Date()
     coverTradingDays: meta.coverTradingDays,
     generatedAt: now.toISOString(),
     velocityWindows: VELOCITY_WINDOW_DAYS,
+    planogram: { perLocation, notOnPlanogram: mergeNotOnPlanogram(perLocation) },
     suggestions,
   };
 }

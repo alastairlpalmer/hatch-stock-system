@@ -5,11 +5,13 @@ import { asyncHandler } from '../middleware/errorHandler.js';
 import {
   MAX_SHELVES,
   MAX_SLOTS_PER_SHELF,
+  MAX_SLOT_CAPACITY,
   validateLayout,
   diffSlotAssignments,
   detectStale,
   computeUnplaced,
   buildRestockSheetRows,
+  resolveSlotCapacity,
 } from '../services/planogram-layout.js';
 
 const router = express.Router();
@@ -25,9 +27,12 @@ const router = express.Router();
  * create a second freshness source.
  */
 
+const capacitySchema = z.number().int().min(1).max(MAX_SLOT_CAPACITY).optional().nullable();
+
 const shelfSchema = z.object({
   shelf: z.number().int().min(1).max(MAX_SHELVES),
   slots: z.number().int().min(1).max(MAX_SLOTS_PER_SHELF),
+  unitsPerSlot: capacitySchema, // shelf-wide capacity default (units per facing)
 });
 
 const assignmentSchema = z
@@ -37,6 +42,7 @@ const assignmentSchema = z
     targetType: z.enum(['sku', 'mealType']),
     sku: z.string().min(1).optional().nullable(),
     mealType: z.string().min(1).optional().nullable(),
+    capacity: capacitySchema, // per-slot override of the shelf default
   })
   .refine((a) => (a.targetType === 'sku' ? !!a.sku : !!a.mealType), {
     message: "sku targets require 'sku'; mealType targets require 'mealType'",
@@ -99,6 +105,9 @@ async function buildPlanogramPayload(locationId) {
     mealTypeMemberCounts.set(group, (mealTypeMemberCounts.get(group) || 0) + 1);
   }
 
+  const shelvesByNumber = new Map(
+    (Array.isArray(layout.shelves) ? layout.shelves : []).map((s) => [s.shelf, s]),
+  );
   const assignments = detectStale(openRows, assignedSkuSet, mealTypeMemberCounts).map((a) => ({
     id: a.id,
     shelf: a.shelf,
@@ -107,6 +116,9 @@ async function buildPlanogramPayload(locationId) {
     targetType: a.targetType,
     sku: a.sku,
     mealType: a.mealType,
+    capacity: a.capacity ?? null,
+    // capacity ?? shelf unitsPerSlot ?? null — what this facing actually holds
+    effectiveCapacity: resolveSlotCapacity(a, shelvesByNumber),
     validFrom: a.validFrom,
     stale: a.stale,
     product: a.sku ? (productBySku.get(a.sku) ?? null) : null,
@@ -153,11 +165,11 @@ router.put('/location/:locationId', asyncHandler(async (req, res) => {
 
   const openRows = await prisma.slotAssignment.findMany({
     where: { layoutId: layout.id, validTo: null },
-    select: { id: true, shelf: true, position: true, targetType: true, sku: true, mealType: true },
+    select: { id: true, shelf: true, position: true, targetType: true, sku: true, mealType: true, capacity: true },
   });
-  const { toCloseIds, toCreate } = diffSlotAssignments(openRows, assignments);
+  const { toCloseIds, toCreate, toUpdateCapacity } = diffSlotAssignments(openRows, assignments);
 
-  if (toCloseIds.length > 0 || toCreate.length > 0) {
+  if (toCloseIds.length > 0 || toCreate.length > 0 || toUpdateCapacity.length > 0) {
     const now = new Date();
     await prisma.$transaction([
       prisma.slotAssignment.updateMany({
@@ -172,6 +184,11 @@ router.put('/location/:locationId', asyncHandler(async (req, res) => {
           validFrom: now,
         })),
       }),
+      // Capacity edits on unchanged targets update the open row in place —
+      // capacity is a current attribute, never a history-cycling change.
+      ...toUpdateCapacity.map(({ id, capacity }) =>
+        prisma.slotAssignment.update({ where: { id }, data: { capacity } })
+      ),
     ]);
   }
 

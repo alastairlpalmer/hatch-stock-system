@@ -33,6 +33,27 @@ describe('savePlanogramSchema', () => {
     ).toThrow();
   });
 
+  it('accepts capacity fields and rejects out-of-range values', () => {
+    expect(() =>
+      savePlanogramSchema.parse({
+        shelves: [{ shelf: 1, slots: 6, unitsPerSlot: 8 }],
+        assignments: [{ shelf: 1, position: 0, targetType: 'sku', sku: 'ABC', capacity: 12 }],
+      })
+    ).not.toThrow();
+    expect(() =>
+      savePlanogramSchema.parse({
+        shelves: [{ shelf: 1, slots: 6, unitsPerSlot: 0 }],
+        assignments: [],
+      })
+    ).toThrow();
+    expect(() =>
+      savePlanogramSchema.parse({
+        shelves: [{ shelf: 1, slots: 6 }],
+        assignments: [{ shelf: 1, position: 0, targetType: 'sku', sku: 'ABC', capacity: 1000 }],
+      })
+    ).toThrow();
+  });
+
   it('rejects target/field mismatches', () => {
     expect(() =>
       savePlanogramSchema.parse({

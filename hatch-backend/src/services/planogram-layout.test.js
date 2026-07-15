@@ -7,6 +7,9 @@ import {
   detectStale,
   computeUnplaced,
   buildRestockSheetRows,
+  resolveSlotCapacity,
+  buildPlanogramScope,
+  targetKey,
 } from './planogram-layout.js';
 
 describe('positionLetter / slotCode', () => {
@@ -104,7 +107,7 @@ describe('diffSlotAssignments', () => {
     ]);
     expect(toCloseIds).toEqual(['r1']);
     expect(toCreate).toEqual([
-      { shelf: 1, position: 0, slotCode: '1A', targetType: 'sku', sku: 'B', mealType: null },
+      { shelf: 1, position: 0, slotCode: '1A', targetType: 'sku', sku: 'B', mealType: null, capacity: null },
     ]);
   });
 
@@ -115,7 +118,7 @@ describe('diffSlotAssignments', () => {
     ]);
     expect(toCloseIds).toEqual(['r1']);
     expect(toCreate).toEqual([
-      { shelf: 2, position: 4, slotCode: '2E', targetType: 'sku', sku: 'C', mealType: null },
+      { shelf: 2, position: 4, slotCode: '2E', targetType: 'sku', sku: 'C', mealType: null, capacity: null },
     ]);
   });
 
@@ -126,6 +129,99 @@ describe('diffSlotAssignments', () => {
     ]);
     expect(toCloseIds).toEqual(['r1']);
     expect(toCreate[0]).toMatchObject({ targetType: 'mealType', mealType: 'Veg/Vegan', sku: null });
+  });
+
+  it('capacity change on an unchanged target updates in place, never cycles history', () => {
+    const { toCloseIds, toCreate, toUpdateCapacity } = diffSlotAssignments(open, [
+      { shelf: 1, position: 0, targetType: 'sku', sku: 'A', capacity: 8 }, // was null
+      { shelf: 1, position: 1, targetType: 'mealType', mealType: 'Meat' }, // untouched
+    ]);
+    expect(toCloseIds).toEqual([]);
+    expect(toCreate).toEqual([]);
+    expect(toUpdateCapacity).toEqual([{ id: 'r1', capacity: 8 }]);
+  });
+
+  it('capacity cleared back to null is an in-place update too', () => {
+    const openWithCap = [
+      { id: 'r1', shelf: 1, position: 0, targetType: 'sku', sku: 'A', mealType: null, capacity: 8 },
+    ];
+    const { toUpdateCapacity } = diffSlotAssignments(openWithCap, [
+      { shelf: 1, position: 0, targetType: 'sku', sku: 'A' },
+    ]);
+    expect(toUpdateCapacity).toEqual([{ id: 'r1', capacity: null }]);
+  });
+
+  it('target change carries the new capacity on the created row without a capacity update', () => {
+    const { toCloseIds, toCreate, toUpdateCapacity } = diffSlotAssignments(open, [
+      { shelf: 1, position: 0, targetType: 'sku', sku: 'B', capacity: 5 },
+      { shelf: 1, position: 1, targetType: 'mealType', mealType: 'Meat' },
+    ]);
+    expect(toCloseIds).toEqual(['r1']);
+    expect(toCreate[0]).toMatchObject({ sku: 'B', capacity: 5 });
+    expect(toUpdateCapacity).toEqual([]);
+  });
+});
+
+describe('validateLayout capacity fields', () => {
+  const shelves = [{ shelf: 1, slots: 6, unitsPerSlot: 8 }];
+
+  it('accepts shelf unitsPerSlot and per-slot capacity', () => {
+    expect(validateLayout(shelves, [
+      { shelf: 1, position: 0, targetType: 'sku', sku: 'A', capacity: 12 },
+    ])).toEqual([]);
+  });
+
+  it('rejects out-of-range unitsPerSlot and capacity', () => {
+    const errors = validateLayout(
+      [{ shelf: 1, slots: 6, unitsPerSlot: 0 }, { shelf: 2, slots: 4 }],
+      [{ shelf: 2, position: 0, targetType: 'sku', sku: 'A', capacity: 1000 }],
+    );
+    expect(errors.some((e) => e.includes('unitsPerSlot'))).toBe(true);
+    expect(errors.some((e) => e.includes('capacity'))).toBe(true);
+  });
+});
+
+describe('resolveSlotCapacity / buildPlanogramScope', () => {
+  const shelves = [
+    { shelf: 1, slots: 6, unitsPerSlot: 8 },
+    { shelf: 2, slots: 4 }, // no shelf default
+  ];
+  const byNumber = new Map(shelves.map((s) => [s.shelf, s]));
+
+  it('per-slot override wins, then shelf default, then null', () => {
+    expect(resolveSlotCapacity({ shelf: 1, capacity: 3 }, byNumber)).toBe(3);
+    expect(resolveSlotCapacity({ shelf: 1 }, byNumber)).toBe(8);
+    expect(resolveSlotCapacity({ shelf: 2 }, byNumber)).toBe(null);
+  });
+
+  it('builds sku/mealType sets and sums capacity across a target\'s slots', () => {
+    const scope = buildPlanogramScope([
+      { shelf: 1, position: 0, targetType: 'sku', sku: 'COKE', capacity: null },
+      { shelf: 1, position: 1, targetType: 'sku', sku: 'COKE', capacity: 10 },
+      { shelf: 1, position: 2, targetType: 'mealType', mealType: 'Meat', capacity: null },
+    ], shelves);
+    expect([...scope.skuSet]).toEqual(['COKE']);
+    expect([...scope.mealTypeSet]).toEqual(['Meat']);
+    expect(scope.capacityByTarget.get('sku:COKE')).toBe(18); // 8 (shelf) + 10 (override)
+    expect(scope.capacityByTarget.get('mealType:Meat')).toBe(8);
+    expect(scope.slotCountByTarget.get('sku:COKE')).toBe(2);
+  });
+
+  it('any unresolvable slot poisons the target capacity to null (order matters not)', () => {
+    const scope = buildPlanogramScope([
+      { shelf: 2, position: 0, targetType: 'sku', sku: 'COKE', capacity: null }, // unknown first
+      { shelf: 1, position: 0, targetType: 'sku', sku: 'COKE', capacity: 10 },
+      { shelf: 1, position: 1, targetType: 'sku', sku: 'JUICE', capacity: 6 },
+      { shelf: 2, position: 1, targetType: 'sku', sku: 'JUICE', capacity: null }, // unknown last
+    ], shelves);
+    expect(scope.capacityByTarget.get('sku:COKE')).toBe(null);
+    expect(scope.capacityByTarget.get('sku:JUICE')).toBe(null);
+    expect(scope.skuSet.has('COKE')).toBe(true); // still in scope, just unknown capacity
+  });
+
+  it('targetKey distinguishes sku and mealType targets', () => {
+    expect(targetKey({ targetType: 'sku', sku: 'A' })).toBe('sku:A');
+    expect(targetKey({ targetType: 'mealType', mealType: 'Meat' })).toBe('mealType:Meat');
   });
 });
 

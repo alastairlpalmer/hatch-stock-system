@@ -153,6 +153,12 @@ model SlotAssignment {
   targetType String    @map("target_type") // 'sku' | 'mealType'
   sku        String?
   mealType   String?   @map("meal_type")
+  // Per-slot fill capacity override (units in this facing). The shelf default
+  // lives in MachineLayout.shelves entries as unitsPerSlot; effective capacity
+  // = capacity ?? shelf.unitsPerSlot, summed per target across its slots.
+  // A capacity change updates the open row IN PLACE (not part of slot history).
+  // See manual-sql/022_slot_capacity.sql.
+  capacity   Int?
   validFrom  DateTime  @default(now()) @map("valid_from")
   validTo    DateTime? @map("valid_to")
 

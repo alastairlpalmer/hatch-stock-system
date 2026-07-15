@@ -4,7 +4,10 @@ import {
   computeSuggestion,
   computeNetNeed,
   computeOrderQty,
+  effectiveMaxStock,
+  mergeNotOnPlanogram,
 } from './order-suggestions.js';
+import { buildPlanogramScope } from './planogram-layout.js';
 
 // 2026-06-29 was a Monday.
 const TUESDAY = new Date('2026-06-30T10:00:00Z');
@@ -162,5 +165,70 @@ describe('computeOrderQty — box rounding capped by machine capacity', () => {
 
   it('treats a missing/zero unitsPerBox as 1', () => {
     expect(computeOrderQty({ netNeed: 5, unitsPerBox: 0 })).toBe(5);
+  });
+});
+
+describe('effectiveMaxStock — planogram capacity as the fill cap', () => {
+  const scope = buildPlanogramScope(
+    [
+      { shelf: 1, position: 0, targetType: 'sku', sku: 'COKE', capacity: null },
+      { shelf: 1, position: 1, targetType: 'sku', sku: 'COKE', capacity: null },
+      { shelf: 2, position: 0, targetType: 'sku', sku: 'JUICE', capacity: null }, // no capacity anywhere
+      { shelf: 1, position: 2, targetType: 'mealType', mealType: 'Meat', capacity: 20 },
+    ],
+    [{ shelf: 1, slots: 6, unitsPerSlot: 8 }, { shelf: 2, slots: 4 }],
+  );
+
+  it('uses summed slot capacity when resolvable', () => {
+    expect(effectiveMaxStock(scope, 'sku:COKE', 99)).toBe(16); // 2 slots × 8, config ignored
+    expect(effectiveMaxStock(scope, 'mealType:Meat', null)).toBe(20);
+  });
+
+  it('falls back to config maxStock when capacity is unknown', () => {
+    expect(effectiveMaxStock(scope, 'sku:JUICE', 30)).toBe(30);
+    expect(effectiveMaxStock(scope, 'sku:JUICE', null)).toBe(null);
+  });
+
+  it('no scope (no diagram) -> config maxStock, legacy behaviour', () => {
+    expect(effectiveMaxStock(null, 'sku:COKE', 12)).toBe(12);
+    expect(effectiveMaxStock(null, 'sku:COKE', undefined)).toBe(null);
+  });
+
+  it('capacity flows through computeSuggestion as the fill cap', () => {
+    const s = computeSuggestion({
+      machineStock: 0,
+      velocityTd: 10,
+      sellingDaysBeforeRestock: 0,
+      coverTradingDays: 5,
+      maxStock: effectiveMaxStock(scope, 'sku:COKE', 99),
+    });
+    expect(s.targetFill).toBe(16); // ceil(10×5)=50 capped at 16 slots-worth
+  });
+});
+
+describe('mergeNotOnPlanogram — deduped warning list across locations', () => {
+  it('merges per-location exclusions with the locations affected', () => {
+    const merged = mergeNotOnPlanogram([
+      {
+        locationName: 'Office A', applied: true,
+        excluded: { skus: [{ sku: 'COKE', name: 'Coca-Cola' }], mealTypes: ['Meat'] },
+      },
+      {
+        locationName: 'Office B', applied: true,
+        excluded: { skus: [{ sku: 'COKE', name: 'Coca-Cola' }, { sku: 'JUICE', name: 'Ginger Shot' }], mealTypes: [] },
+      },
+      // no diagram -> contributes nothing even if excluded is present
+      { locationName: 'Office C', applied: false, excluded: { skus: [{ sku: 'X', name: 'X' }], mealTypes: [] } },
+    ]);
+    expect(merged.skus).toEqual([
+      { sku: 'COKE', name: 'Coca-Cola', locations: ['Office A', 'Office B'] },
+      { sku: 'JUICE', name: 'Ginger Shot', locations: ['Office B'] },
+    ]);
+    expect(merged.mealTypes).toEqual([{ mealType: 'Meat', locations: ['Office A'] }]);
+  });
+
+  it('handles empty/missing input', () => {
+    expect(mergeNotOnPlanogram([])).toEqual({ skus: [], mealTypes: [] });
+    expect(mergeNotOnPlanogram(undefined)).toEqual({ skus: [], mealTypes: [] });
   });
 });

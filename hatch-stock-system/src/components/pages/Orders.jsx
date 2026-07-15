@@ -288,6 +288,11 @@ export default function Orders() {
   const [suggestedItems, setSuggestedItems] = useState([]);
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
   const [suggestionMeta, setSuggestionMeta] = useState(null); // { mode, restockDate, coverTradingDays, ... }
+  // Planogram scoping info from the suggestions response:
+  // { perLocation: [{ locationId, locationName, applied, source, excluded }],
+  //   notOnPlanogram: { skus: [{ sku, name, locations }], mealTypes: [...] } }
+  const [suggestionPlanogram, setSuggestionPlanogram] = useState(null);
+  const [showNotOnPlanogram, setShowNotOnPlanogram] = useState(false);
   const [expandedLines, setExpandedLines] = useState(() => new Set());
   const [orderNotes, setOrderNotes] = useState('');
   const [stockFreshness, setStockFreshness] = useState([]); // [{ locationId, mapped, lastSyncedAt }]
@@ -371,12 +376,21 @@ export default function Orders() {
         return base;
       });
       setSuggestedItems(items);
-      setSuggestionMeta(res.meta || null);
+      // Meta fields ride at the top level of the response (there is no `meta`
+      // envelope) — pick the ones the panel and saveAsBuyingList need.
+      setSuggestionMeta({
+        mode: res.mode,
+        restockDate: res.restockDate ?? null,
+        coverTradingDays: res.coverTradingDays ?? null,
+        sellingDaysBeforeRestock: res.sellingDaysBeforeRestock ?? null,
+      });
+      setSuggestionPlanogram(res.planogram || null);
     } catch (err) {
       if (seq !== fetchSeqRef.current) return;
       console.error('Failed to load consolidated suggestions:', err);
       setSuggestedItems([]);
       setSuggestionMeta(null);
+      setSuggestionPlanogram(null);
       setPanelBanner({ type: 'error', message: 'Failed to load suggestions — check the connection and try again.' });
     } finally {
       if (seq === fetchSeqRef.current) setSuggestionsLoading(false);
@@ -1130,6 +1144,58 @@ export default function Orders() {
               <div className="text-xs text-zinc-500">Est. Total</div>
             </div>
           </div>
+
+          {/* Planogram scoping: no-diagram locations + assigned-but-unplaced warning */}
+          {!suggestionsLoading && suggestionPlanogram && (() => {
+            const noDiagram = (suggestionPlanogram.perLocation || []).filter(l => !l.applied);
+            const excluded = suggestionPlanogram.notOnPlanogram || { skus: [], mealTypes: [] };
+            const excludedCount = (excluded.skus?.length || 0) + (excluded.mealTypes?.length || 0);
+            if (noDiagram.length === 0 && excludedCount === 0) return null;
+            return (
+              <div className="space-y-2">
+                {noDiagram.length > 0 && (
+                  <p className="text-xs text-zinc-500">
+                    No visual diagram yet for{' '}
+                    <span className="text-zinc-400">{noDiagram.map(l => l.locationName).join(', ')}</span>
+                    {' '}— using the assigned product list for {noDiagram.length > 1 ? 'these locations' : 'this location'}.
+                  </p>
+                )}
+                {excludedCount > 0 && (
+                  <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg">
+                    <button
+                      onClick={() => setShowNotOnPlanogram(v => !v)}
+                      className="w-full flex items-center justify-between px-4 py-2.5 text-left"
+                    >
+                      <span className="text-sm text-amber-400 font-medium">
+                        {excludedCount} product{excludedCount > 1 ? 's' : ''} not on the visual diagram — excluded from this order
+                      </span>
+                      <span className="text-amber-400/70 text-xs">{showNotOnPlanogram ? 'Hide' : 'Show'}</span>
+                    </button>
+                    {showNotOnPlanogram && (
+                      <div className="px-4 pb-3 space-y-1 text-xs text-zinc-400">
+                        <p className="text-zinc-500">
+                          These are assigned to the location(s) but have no slot on the fridge diagram.
+                          Place them in Location Stock → Visual to include them in ordering.
+                        </p>
+                        {(excluded.mealTypes || []).map(m => (
+                          <div key={`mt-${m.mealType}`} className="flex justify-between gap-2">
+                            <span className="text-teal-300">{m.mealType} (fresh meal group)</span>
+                            <span className="text-zinc-600 truncate">{(m.locations || []).join(', ')}</span>
+                          </div>
+                        ))}
+                        {(excluded.skus || []).map(s => (
+                          <div key={s.sku} className="flex justify-between gap-2">
+                            <span>{s.name || s.sku}</span>
+                            <span className="text-zinc-600 truncate">{(s.locations || []).join(', ')}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {/* Suggestions table */}
           {suggestionsLoading ? (
