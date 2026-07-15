@@ -134,7 +134,7 @@ export default function useNeedsAttention() {
         severity: 'red',
         title: `${expiredCount} expired batch${expiredCount === 1 ? '' : 'es'} in the warehouse`,
         detail: `${expiredUnits} unit${expiredUnits === 1 ? '' : 's'} to write off`,
-        to: '/orders/warehouse',
+        to: '/warehouse',
       });
     }
 
@@ -154,7 +154,7 @@ export default function useNeedsAttention() {
         id: 'batches-critical',
         severity: 'red',
         title: `${criticalCount} warehouse batch${criticalCount === 1 ? '' : 'es'} expire within 7 days`,
-        to: '/orders/warehouse',
+        to: '/warehouse',
       });
     }
 

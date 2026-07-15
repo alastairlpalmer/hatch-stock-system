@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { Warehouse, CalendarClock, PackageCheck } from 'lucide-react';
+import { CalendarClock, PackageCheck } from 'lucide-react';
 import { useStock } from '../../../context/StockContext';
 import ActionCard from '../../ui/ActionCard';
 
@@ -14,12 +14,6 @@ export default function OrdersHub() {
   return (
     <div className="space-y-4">
       <div className="space-y-3">
-        <ActionCard
-          to="/orders/warehouse"
-          icon={Warehouse}
-          title="Warehouse Stock"
-          description="Stock on hand, expiry batches, transfers and write-offs."
-        />
         <ActionCard
           // ?generate=1 auto-opens the weekly-buy planner on arrival.
           to="/orders/purchase?generate=1"
