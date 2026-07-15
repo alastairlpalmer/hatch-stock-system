@@ -5,12 +5,16 @@ import { asyncHandler } from '../middleware/errorHandler.js';
 import {
   MAX_SHELVES,
   MAX_SLOTS_PER_SHELF,
+  MAX_SLOT_CAPACITY,
   validateLayout,
   diffSlotAssignments,
   detectStale,
   computeUnplaced,
   buildRestockSheetRows,
+  resolveSlotCapacity,
+  buildPlanogramScope,
 } from '../services/planogram-layout.js';
+import { promoteDraftLayout } from '../services/planogram-promote.js';
 
 const router = express.Router();
 
@@ -25,9 +29,12 @@ const router = express.Router();
  * create a second freshness source.
  */
 
+const capacitySchema = z.number().int().min(1).max(MAX_SLOT_CAPACITY).optional().nullable();
+
 const shelfSchema = z.object({
   shelf: z.number().int().min(1).max(MAX_SHELVES),
   slots: z.number().int().min(1).max(MAX_SLOTS_PER_SHELF),
+  unitsPerSlot: capacitySchema, // shelf-wide capacity default (units per facing)
 });
 
 const assignmentSchema = z
@@ -37,6 +44,7 @@ const assignmentSchema = z
     targetType: z.enum(['sku', 'mealType']),
     sku: z.string().min(1).optional().nullable(),
     mealType: z.string().min(1).optional().nullable(),
+    capacity: capacitySchema, // per-slot override of the shelf default
   })
   .refine((a) => (a.targetType === 'sku' ? !!a.sku : !!a.mealType), {
     message: "sku targets require 'sku'; mealType targets require 'mealType'",
@@ -64,9 +72,17 @@ async function loadLocationProducts(locationId) {
   });
 }
 
+/** ?revision=current|next — anything else is a 400 at the call sites. */
+function parseRevision(req) {
+  const revision = req.query.revision || 'current';
+  return revision === 'current' || revision === 'next' ? revision : null;
+}
+
 /** Shared read used by GET and returned after PUT so the client refreshes atomically. */
-async function buildPlanogramPayload(locationId) {
-  const layout = await prisma.machineLayout.findUnique({ where: { locationId } });
+async function buildPlanogramPayload(locationId, revision = 'current') {
+  const layout = await prisma.machineLayout.findUnique({
+    where: { locationId_revision: { locationId, revision } },
+  });
   if (!layout) return { layout: null, assignments: [], unplaced: { skus: [], mealTypes: [] } };
 
   const [openRows, locationProducts] = await Promise.all([
@@ -99,6 +115,9 @@ async function buildPlanogramPayload(locationId) {
     mealTypeMemberCounts.set(group, (mealTypeMemberCounts.get(group) || 0) + 1);
   }
 
+  const shelvesByNumber = new Map(
+    (Array.isArray(layout.shelves) ? layout.shelves : []).map((s) => [s.shelf, s]),
+  );
   const assignments = detectStale(openRows, assignedSkuSet, mealTypeMemberCounts).map((a) => ({
     id: a.id,
     shelf: a.shelf,
@@ -107,6 +126,9 @@ async function buildPlanogramPayload(locationId) {
     targetType: a.targetType,
     sku: a.sku,
     mealType: a.mealType,
+    capacity: a.capacity ?? null,
+    // capacity ?? shelf unitsPerSlot ?? null — what this facing actually holds
+    effectiveCapacity: resolveSlotCapacity(a, shelvesByNumber),
     validFrom: a.validFrom,
     stale: a.stale,
     product: a.sku ? (productBySku.get(a.sku) ?? null) : null,
@@ -116,6 +138,7 @@ async function buildPlanogramPayload(locationId) {
     layout: {
       id: layout.id,
       locationId: layout.locationId,
+      revision: layout.revision,
       shelves: layout.shelves,
       updatedAt: layout.updatedAt,
     },
@@ -124,11 +147,14 @@ async function buildPlanogramPayload(locationId) {
   };
 }
 
-// Current layout + open slot assignments (+ stale flags, unplaced checklist)
+// Layout + open slot assignments (+ stale flags, unplaced checklist).
+// ?revision=current (default) | next — the next-week draft.
 router.get('/location/:locationId', asyncHandler(async (req, res) => {
+  const revision = parseRevision(req);
+  if (!revision) return res.status(400).json({ error: "revision must be 'current' or 'next'" });
   const location = await prisma.location.findUnique({ where: { id: req.params.locationId } });
   if (!location) return res.status(404).json({ error: 'Location not found' });
-  res.json(await buildPlanogramPayload(req.params.locationId));
+  res.json(await buildPlanogramPayload(req.params.locationId, revision));
 }));
 
 // Full-document save. Diffs against the open rows so unchanged slots keep
@@ -136,6 +162,8 @@ router.get('/location/:locationId', asyncHandler(async (req, res) => {
 // replacements inserted — automatic position history for the future heatmap.
 router.put('/location/:locationId', asyncHandler(async (req, res) => {
   const locationId = req.params.locationId;
+  const revision = parseRevision(req);
+  if (!revision) return res.status(400).json({ error: "revision must be 'current' or 'next'" });
   const location = await prisma.location.findUnique({ where: { id: locationId } });
   if (!location) return res.status(404).json({ error: 'Location not found' });
 
@@ -146,18 +174,18 @@ router.put('/location/:locationId', asyncHandler(async (req, res) => {
   }
 
   const layout = await prisma.machineLayout.upsert({
-    where: { locationId },
-    create: { locationId, shelves },
+    where: { locationId_revision: { locationId, revision } },
+    create: { locationId, revision, shelves },
     update: { shelves },
   });
 
   const openRows = await prisma.slotAssignment.findMany({
     where: { layoutId: layout.id, validTo: null },
-    select: { id: true, shelf: true, position: true, targetType: true, sku: true, mealType: true },
+    select: { id: true, shelf: true, position: true, targetType: true, sku: true, mealType: true, capacity: true },
   });
-  const { toCloseIds, toCreate } = diffSlotAssignments(openRows, assignments);
+  const { toCloseIds, toCreate, toUpdateCapacity } = diffSlotAssignments(openRows, assignments);
 
-  if (toCloseIds.length > 0 || toCreate.length > 0) {
+  if (toCloseIds.length > 0 || toCreate.length > 0 || toUpdateCapacity.length > 0) {
     const now = new Date();
     await prisma.$transaction([
       prisma.slotAssignment.updateMany({
@@ -172,18 +200,84 @@ router.put('/location/:locationId', asyncHandler(async (req, res) => {
           validFrom: now,
         })),
       }),
+      // Capacity edits on unchanged targets update the open row in place —
+      // capacity is a current attribute, never a history-cycling change.
+      ...toUpdateCapacity.map(({ id, capacity }) =>
+        prisma.slotAssignment.update({ where: { id }, data: { capacity } })
+      ),
     ]);
   }
 
-  res.json(await buildPlanogramPayload(locationId));
+  res.json(await buildPlanogramPayload(locationId, revision));
+}));
+
+// ============ NEXT-WEEK DRAFT ============
+
+// Create the next-week draft as a copy of the current layout (shelves + open
+// slot assignments, capacities included). 409 when a draft already exists.
+router.post('/location/:locationId/draft', asyncHandler(async (req, res) => {
+  const locationId = req.params.locationId;
+  const [current, existingDraft] = await Promise.all([
+    prisma.machineLayout.findUnique({
+      where: { locationId_revision: { locationId, revision: 'current' } },
+    }),
+    prisma.machineLayout.findUnique({
+      where: { locationId_revision: { locationId, revision: 'next' } },
+      select: { id: true },
+    }),
+  ]);
+  if (!current) {
+    return res.status(404).json({ error: 'No current layout to copy — set up the fridge layout first' });
+  }
+  if (existingDraft) {
+    return res.status(409).json({ error: 'A next-week draft already exists for this location' });
+  }
+
+  const openRows = await prisma.slotAssignment.findMany({
+    where: { layoutId: current.id, validTo: null },
+    select: { shelf: true, position: true, slotCode: true, targetType: true, sku: true, mealType: true, capacity: true },
+  });
+
+  await prisma.$transaction(async (tx) => {
+    const draft = await tx.machineLayout.create({
+      data: { locationId, revision: 'next', shelves: current.shelves },
+    });
+    if (openRows.length > 0) {
+      await tx.slotAssignment.createMany({
+        data: openRows.map((a) => ({ ...a, layoutId: draft.id, locationId })),
+      });
+    }
+  });
+
+  res.status(201).json(await buildPlanogramPayload(locationId, 'next'));
+}));
+
+// Discard the next-week draft (cascade removes its slot rows).
+router.delete('/location/:locationId/draft', asyncHandler(async (req, res) => {
+  const locationId = req.params.locationId;
+  const draft = await prisma.machineLayout.findUnique({
+    where: { locationId_revision: { locationId, revision: 'next' } },
+    select: { id: true },
+  });
+  if (!draft) return res.status(404).json({ error: 'No next-week draft layout for this location' });
+  await prisma.machineLayout.delete({ where: { id: draft.id } });
+  res.json({ success: true });
+}));
+
+// Go live: promote the draft onto the current layout (clean temporal history)
+// and delete the draft. Returns the refreshed CURRENT payload.
+router.post('/location/:locationId/promote', asyncHandler(async (req, res) => {
+  const result = await promoteDraftLayout(req.params.locationId);
+  res.json({ ...result, payload: await buildPlanogramPayload(req.params.locationId, 'current') });
 }));
 
 // Share-link info for the location's restock sheet. The token lives on the
 // layout (created with it via @default(uuid())), so this is a plain read —
 // exposed only to authed users, who then hand the URL to the 3PL.
+// Always the CURRENT layout's token — drafts are never publicly visible.
 router.get('/location/:locationId/share', asyncHandler(async (req, res) => {
   const layout = await prisma.machineLayout.findUnique({
-    where: { locationId: req.params.locationId },
+    where: { locationId_revision: { locationId: req.params.locationId, revision: 'current' } },
     select: { shareToken: true },
   });
   if (!layout) return res.status(404).json({ error: 'No layout configured for this location' });
@@ -209,12 +303,13 @@ publicRestockSheetRouter.get('/:token', asyncHandler(async (req, res) => {
     where: { shareToken: req.params.token },
     include: { location: { select: { id: true, name: true } } },
   });
-  if (!layout) return res.status(404).json({ error: 'Not found' });
+  // Draft layouts carry a token too (uuid default) but are never public.
+  if (!layout || layout.revision !== 'current') return res.status(404).json({ error: 'Not found' });
 
   const [assignments, stockRows, configRows, mealConfigRows] = await Promise.all([
     prisma.slotAssignment.findMany({
       where: { layoutId: layout.id, validTo: null },
-      select: { shelf: true, position: true, slotCode: true, targetType: true, sku: true, mealType: true },
+      select: { shelf: true, position: true, slotCode: true, targetType: true, sku: true, mealType: true, capacity: true },
     }),
     prisma.locationStock.findMany({
       where: { locationId: layout.locationId },
@@ -253,6 +348,15 @@ publicRestockSheetRouter.get('/:token', asyncHandler(async (req, res) => {
 
   const skuMax = new Map(configRows.filter((r) => r.maxStock != null).map((r) => [r.sku, r.maxStock]));
   const groupMax = new Map(mealConfigRows.filter((r) => r.maxStock != null).map((r) => [r.mealType, r.maxStock]));
+
+  // Diagram slot capacity overrides the config max where resolvable — keeps
+  // the 3PL sheet's "add" targets consistent with pick-list generation.
+  const scope = buildPlanogramScope(assignments, layout.shelves);
+  for (const [key, cap] of scope.capacityByTarget) {
+    if (cap == null) continue;
+    if (key.startsWith('sku:')) skuMax.set(key.slice(4), cap);
+    else groupMax.set(key.slice('mealType:'.length), cap);
+  }
 
   const { rows, totalAdd } = buildRestockSheetRows(assignments, {
     qtyBySku,

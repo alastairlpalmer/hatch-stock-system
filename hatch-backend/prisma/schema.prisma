@@ -104,7 +104,7 @@ model Location {
   assignedItems      LocationAssignment[]
   machineMappings    VendliveMachineMapping[]
   vendliveStockSyncs VendliveStockSync[]
-  machineLayout      MachineLayout?
+  machineLayouts     MachineLayout[]
 
   @@map("locations")
 }
@@ -117,7 +117,11 @@ model Location {
 // See manual-sql/019_visual_planogram.sql.
 model MachineLayout {
   id         String   @id @default(uuid())
-  locationId String   @unique @map("location_id")
+  locationId String   @map("location_id")
+  // 'current' = the live layout; 'next' = the draft for the coming restock
+  // Monday. Ordering/picking prefer 'next'; the public restock sheet pins
+  // 'current'. See manual-sql/024_layout_revisions.sql.
+  revision   String   @default("current")
   shelves    Json
   // Public restock-sheet share link credential (same pattern as
   // BuyingList.shareToken): the unguessable uuid IS the credential for the
@@ -129,6 +133,7 @@ model MachineLayout {
   location    Location         @relation(fields: [locationId], references: [id], onDelete: Cascade)
   assignments SlotAssignment[]
 
+  @@unique([locationId, revision])
   @@map("machine_layouts")
 }
 
@@ -153,6 +158,12 @@ model SlotAssignment {
   targetType String    @map("target_type") // 'sku' | 'mealType'
   sku        String?
   mealType   String?   @map("meal_type")
+  // Per-slot fill capacity override (units in this facing). The shelf default
+  // lives in MachineLayout.shelves entries as unitsPerSlot; effective capacity
+  // = capacity ?? shelf.unitsPerSlot, summed per target across its slots.
+  // A capacity change updates the open row IN PLACE (not part of slot history).
+  // See manual-sql/022_slot_capacity.sql.
+  capacity   Int?
   validFrom  DateTime  @default(now()) @map("valid_from")
   validTo    DateTime? @map("valid_to")
 
@@ -397,6 +408,10 @@ model PickList {
   // [{ sku, quantity, returnedAt }]. Booked back as batches with the earliest
   // expiry of that SKU's original allocation (conservative for FEFO).
   returnedItems Json?   @map("returned_items")
+  // Configured targets skipped at generation because they have no slot on the
+  // location's visual diagram: [{ locationId, locationName, skus: [{sku,name}],
+  // mealTypes: [str] }]. See manual-sql/023_pick_list_planogram.sql.
+  notOnPlanogram Json?  @map("not_on_planogram")
   createdBy   String?   @map("created_by")
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @updatedAt @map("updated_at")

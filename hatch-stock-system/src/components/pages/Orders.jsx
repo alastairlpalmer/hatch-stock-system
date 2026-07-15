@@ -288,6 +288,16 @@ export default function Orders() {
   const [suggestedItems, setSuggestedItems] = useState([]);
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
   const [suggestionMeta, setSuggestionMeta] = useState(null); // { mode, restockDate, coverTradingDays, ... }
+  // Planogram scoping info from the suggestions response:
+  // { perLocation: [{ locationId, locationName, applied, source, excluded }],
+  //   notOnPlanogram: { skus: [{ sku, name, locations }], mealTypes: [...] } }
+  const [suggestionPlanogram, setSuggestionPlanogram] = useState(null);
+  const [showNotOnPlanogram, setShowNotOnPlanogram] = useState(false);
+  // Concise-list toggles: zero-order lines are noise by default; "tiny
+  // top-ups" (≤1 box and ≤2 units net) can be hidden too. Hiding never
+  // deselects — selection, not visibility, decides what saves.
+  const [hideZero, setHideZero] = useState(true);
+  const [hideTinyTopups, setHideTinyTopups] = useState(false);
   const [expandedLines, setExpandedLines] = useState(() => new Set());
   const [orderNotes, setOrderNotes] = useState('');
   const [stockFreshness, setStockFreshness] = useState([]); // [{ locationId, mapped, lastSyncedAt }]
@@ -362,7 +372,9 @@ export default function Orders() {
           ...s,
           key,
           unitPrice: s.unitCost ?? 0,
-          selected: true,
+          // Zero-order lines (fully netted by warehouse/on-order) start
+          // deselected — they're informational, not part of the buy.
+          selected: (s.orderQty ?? 0) > 0,
         };
         if (editedKeysRef.current.has(key) && prevByKey.has(key)) {
           const prev = prevByKey.get(key);
@@ -371,12 +383,21 @@ export default function Orders() {
         return base;
       });
       setSuggestedItems(items);
-      setSuggestionMeta(res.meta || null);
+      // Meta fields ride at the top level of the response (there is no `meta`
+      // envelope) — pick the ones the panel and saveAsBuyingList need.
+      setSuggestionMeta({
+        mode: res.mode,
+        restockDate: res.restockDate ?? null,
+        coverTradingDays: res.coverTradingDays ?? null,
+        sellingDaysBeforeRestock: res.sellingDaysBeforeRestock ?? null,
+      });
+      setSuggestionPlanogram(res.planogram || null);
     } catch (err) {
       if (seq !== fetchSeqRef.current) return;
       console.error('Failed to load consolidated suggestions:', err);
       setSuggestedItems([]);
       setSuggestionMeta(null);
+      setSuggestionPlanogram(null);
       setPanelBanner({ type: 'error', message: 'Failed to load suggestions — check the connection and try again.' });
     } finally {
       if (seq === fetchSeqRef.current) setSuggestionsLoading(false);
@@ -818,10 +839,18 @@ export default function Orders() {
     return query.split(/\s+/).every(token => haystack.includes(token));
   };
 
-  // Group the current lines by preferred supplier for the table sections.
+  // Concise-list suppression. Hidden lines stay in suggestedItems (selection
+  // decides what saves); they just drop out of the table.
+  const isTinyTopup = (i) => (i.orderQty ?? 0) > 0 && boxesFor(i) <= 1 && (i.netNeed ?? 0) <= 2;
+  const isSuppressed = (i) =>
+    (hideZero && (i.orderQty ?? 0) === 0) || (hideTinyTopups && isTinyTopup(i));
+  const visibleSuggestions = suggestedItems.filter((i) => !isSuppressed(i));
+  const suppressedCount = suggestedItems.length - visibleSuggestions.length;
+
+  // Group the VISIBLE lines by preferred supplier for the table sections.
   const supplierGroups = () => {
     const groups = new Map();
-    suggestedItems.forEach((item) => {
+    visibleSuggestions.forEach((item) => {
       const key = item.supplierId || '__none__';
       if (!groups.has(key)) {
         groups.set(key, {
@@ -835,9 +864,10 @@ export default function Orders() {
     return [...groups.values()];
   };
 
-  // One suggestion table row (+ optional per-location breakdown row).
+  // One suggestion table row. The default view keeps only the decision-making
+  // columns; warehouse/on-order/net-need/velocity/cover and the unit-price
+  // input live in the expandable detail row alongside the per-location split.
   const renderSuggestionRow = (item) => {
-    const expandable = Array.isArray(item.perLocation) && item.perLocation.length > 0;
     const expanded = expandedLines.has(item.key);
     return (
       <React.Fragment key={item.key}>
@@ -852,15 +882,13 @@ export default function Orders() {
           </td>
           <td className="px-2 py-2 min-w-[180px]">
             <div className="flex items-center gap-1.5">
-              {expandable && (
-                <button
-                  onClick={() => toggleLineExpanded(item.key)}
-                  className="shrink-0 text-zinc-500 hover:text-zinc-300"
-                  title={expanded ? 'Hide locations' : 'Show per-location breakdown'}
-                >
-                  {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                </button>
-              )}
+              <button
+                onClick={() => toggleLineExpanded(item.key)}
+                className="shrink-0 text-zinc-500 hover:text-zinc-300"
+                title={expanded ? 'Hide details' : 'Show netting details and per-location breakdown'}
+              >
+                {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+              </button>
               <span className="text-sm text-zinc-200">{item.name}</span>
               {item.edited && (
                 <span
@@ -876,16 +904,13 @@ export default function Orders() {
               )}
             </div>
           </td>
-          <td className="px-2 py-2 text-sm whitespace-nowrap" title="projected at restock">
+          <td className="px-2 py-2 text-sm whitespace-nowrap" title="Machine stock now → projected at restock">
             <span className="text-zinc-300">{item.machineStock ?? '—'}</span>
             <ArrowRight size={11} className="inline mx-1 text-zinc-600" />
             <span className={`${(item.projectedStock ?? 0) <= 0 ? 'text-red-400' : 'text-zinc-400'}`}>
               {item.projectedStock ?? '—'}
             </span>
           </td>
-          <td className="px-2 py-2 text-sm text-zinc-400 text-right">{item.warehouseStock ?? 0}</td>
-          <td className="px-2 py-2 text-sm text-zinc-400 text-right">{item.pendingPOQty ?? 0}</td>
-          <td className="px-2 py-2 text-sm text-zinc-300 text-right">{item.netNeed ?? 0}</td>
           <td className="px-2 py-2">
             <input
               type="number"
@@ -899,23 +924,6 @@ export default function Orders() {
             {boxesFor(item)}{(item.unitsPerBox || 1) > 1 && <span className="text-zinc-600"> × {item.unitsPerBox}</span>}
           </td>
           <td className="px-2 py-2">
-            <input
-              type="number"
-              step="0.01"
-              min="0"
-              value={item.unitPrice}
-              onChange={(e) => updateSuggestedItem(item.key, 'unitPrice', parseFloat(e.target.value) || 0)}
-              className="w-16 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-center text-sm focus:outline-none focus:border-emerald-500"
-            />
-          </td>
-          <td className="px-2 py-2 text-sm text-center whitespace-nowrap">
-            {item.daysOfCover != null ? (
-              <span className="text-teal-400">{item.daysOfCover}td</span>
-            ) : (
-              <span className="text-zinc-600">—</span>
-            )}
-          </td>
-          <td className="px-2 py-2">
             <span className={`text-xs px-1.5 py-0.5 rounded whitespace-nowrap ${
               item.priority === 'critical' ? 'bg-red-500/20 text-red-400' : 'bg-yellow-500/20 text-yellow-400'
             }`}>
@@ -923,26 +931,53 @@ export default function Orders() {
             </span>
           </td>
         </tr>
-        {expandable && expanded && (
+        {expanded && (
           <tr className="border-t border-zinc-800/50">
             <td />
-            <td colSpan={10} className="px-2 pb-2">
-              <div className="rounded-md bg-zinc-800/40 border border-zinc-700 divide-y divide-zinc-700/60">
-                {item.perLocation.map(pl => (
-                  <div key={pl.locationId} className="flex items-center justify-between px-3 py-1.5 text-xs">
-                    <span className="text-zinc-300">{pl.locationName}</span>
-                    <span className="text-zinc-500">
-                      {pl.machineStock != null && `machine ${pl.machineStock}`}
-                      {pl.projectedStock != null && ` → ${pl.projectedStock}`}
-                      {pl.daysOfCover != null && ` · ${pl.daysOfCover}td cover`}
-                      {pl.orderQty != null && (
-                        <>
-                          {' · '}<span className="text-teal-400">order {pl.orderQty}</span>
-                        </>
-                      )}
-                    </span>
+            <td colSpan={5} className="px-2 pb-2">
+              <div className="rounded-md bg-zinc-800/40 border border-zinc-700">
+                {/* Netting workings + unit price */}
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-2 text-xs text-zinc-400 border-b border-zinc-700/60">
+                  <span>Warehouse <span className="text-zinc-200">{item.warehouseStock ?? 0}</span></span>
+                  <span>On order <span className="text-zinc-200">{item.pendingPOQty ?? 0}</span></span>
+                  <span>Net need <span className="text-zinc-200">{item.netNeed ?? 0}</span></span>
+                  {item.blendedVelocity != null && (
+                    <span>Velocity <span className="text-zinc-200">{item.blendedVelocity}/td</span></span>
+                  )}
+                  {item.daysOfCover != null && (
+                    <span>Cover <span className="text-teal-400">{item.daysOfCover}td</span></span>
+                  )}
+                  <span className="flex items-center gap-1.5">
+                    Unit £
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={item.unitPrice}
+                      onChange={(e) => updateSuggestedItem(item.key, 'unitPrice', parseFloat(e.target.value) || 0)}
+                      className="w-16 bg-zinc-800 border border-zinc-700 rounded px-2 py-0.5 text-center text-xs focus:outline-none focus:border-emerald-500"
+                    />
+                  </span>
+                </div>
+                {Array.isArray(item.perLocation) && item.perLocation.length > 0 && (
+                  <div className="divide-y divide-zinc-700/60">
+                    {item.perLocation.map(pl => (
+                      <div key={pl.locationId} className="flex items-center justify-between px-3 py-1.5 text-xs">
+                        <span className="text-zinc-300">{pl.locationName}</span>
+                        <span className="text-zinc-500">
+                          {pl.machineStock != null && `machine ${pl.machineStock}`}
+                          {pl.projectedStock != null && ` → ${pl.projectedStock}`}
+                          {pl.daysOfCover != null && ` · ${pl.daysOfCover}td cover`}
+                          {pl.orderQty != null && (
+                            <>
+                              {' · '}<span className="text-teal-400">order {pl.orderQty}</span>
+                            </>
+                          )}
+                        </span>
+                      </div>
+                    ))}
                   </div>
-                ))}
+                )}
               </div>
             </td>
           </tr>
@@ -1034,6 +1069,18 @@ export default function Orders() {
                 {' · '}{suggestionMeta.coverTradingDays ?? suggestionMeta.tradingDaysToRestock ?? '—'} trading days
               </span>
             )}
+            {(() => {
+              const nextLocs = (suggestionPlanogram?.perLocation || []).filter(l => l.source === 'next');
+              if (nextLocs.length === 0) return null;
+              return (
+                <span
+                  className="text-xs bg-purple-500/10 border border-purple-500/30 rounded px-2.5 py-1.5 text-purple-300"
+                  title={`Planned against the next-week draft layout for: ${nextLocs.map(l => l.locationName).join(', ')}`}
+                >
+                  Next-week layout · {nextLocs.length} location{nextLocs.length > 1 ? 's' : ''}
+                </span>
+              );
+            })()}
           </div>
 
           {/* Location multi-select with per-location freshness + sync */}
@@ -1131,6 +1178,58 @@ export default function Orders() {
             </div>
           </div>
 
+          {/* Planogram scoping: no-diagram locations + assigned-but-unplaced warning */}
+          {!suggestionsLoading && suggestionPlanogram && (() => {
+            const noDiagram = (suggestionPlanogram.perLocation || []).filter(l => !l.applied);
+            const excluded = suggestionPlanogram.notOnPlanogram || { skus: [], mealTypes: [] };
+            const excludedCount = (excluded.skus?.length || 0) + (excluded.mealTypes?.length || 0);
+            if (noDiagram.length === 0 && excludedCount === 0) return null;
+            return (
+              <div className="space-y-2">
+                {noDiagram.length > 0 && (
+                  <p className="text-xs text-zinc-500">
+                    No visual diagram yet for{' '}
+                    <span className="text-zinc-400">{noDiagram.map(l => l.locationName).join(', ')}</span>
+                    {' '}— using the assigned product list for {noDiagram.length > 1 ? 'these locations' : 'this location'}.
+                  </p>
+                )}
+                {excludedCount > 0 && (
+                  <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg">
+                    <button
+                      onClick={() => setShowNotOnPlanogram(v => !v)}
+                      className="w-full flex items-center justify-between px-4 py-2.5 text-left"
+                    >
+                      <span className="text-sm text-amber-400 font-medium">
+                        {excludedCount} product{excludedCount > 1 ? 's' : ''} not on the visual diagram — excluded from this order
+                      </span>
+                      <span className="text-amber-400/70 text-xs">{showNotOnPlanogram ? 'Hide' : 'Show'}</span>
+                    </button>
+                    {showNotOnPlanogram && (
+                      <div className="px-4 pb-3 space-y-1 text-xs text-zinc-400">
+                        <p className="text-zinc-500">
+                          These are assigned to the location(s) but have no slot on the fridge diagram.
+                          Place them in Location Stock → Visual to include them in ordering.
+                        </p>
+                        {(excluded.mealTypes || []).map(m => (
+                          <div key={`mt-${m.mealType}`} className="flex justify-between gap-2">
+                            <span className="text-teal-300">{m.mealType} (fresh meal group)</span>
+                            <span className="text-zinc-600 truncate">{(m.locations || []).join(', ')}</span>
+                          </div>
+                        ))}
+                        {(excluded.skus || []).map(s => (
+                          <div key={s.sku} className="flex justify-between gap-2">
+                            <span>{s.name || s.sku}</span>
+                            <span className="text-zinc-600 truncate">{(s.locations || []).join(', ')}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
           {/* Suggestions table */}
           {suggestionsLoading ? (
             <div className="bg-zinc-800/40 border border-zinc-700 rounded-lg p-6 text-center">
@@ -1148,6 +1247,45 @@ export default function Orders() {
               </p>
             </div>
           ) : (
+            <>
+            {/* Suppression toggles + hidden-count pill */}
+            <div className="flex items-center justify-between gap-3 flex-wrap text-xs">
+              <div className="flex items-center gap-4">
+                <label className="flex items-center gap-1.5 text-zinc-400 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={hideZero}
+                    onChange={(e) => setHideZero(e.target.checked)}
+                    className="w-3.5 h-3.5 rounded border-zinc-600"
+                  />
+                  Hide zero-order lines
+                </label>
+                <label className="flex items-center gap-1.5 text-zinc-400 cursor-pointer" title="≤1 box and ≤2 units net need">
+                  <input
+                    type="checkbox"
+                    checked={hideTinyTopups}
+                    onChange={(e) => setHideTinyTopups(e.target.checked)}
+                    className="w-3.5 h-3.5 rounded border-zinc-600"
+                  />
+                  Hide small top-ups
+                </label>
+              </div>
+              {suppressedCount > 0 && (
+                <button
+                  onClick={() => { setHideZero(false); setHideTinyTopups(false); }}
+                  className="px-2 py-1 rounded bg-zinc-800 border border-zinc-700 text-zinc-400 hover:text-white"
+                >
+                  {suppressedCount} line{suppressedCount > 1 ? 's' : ''} hidden · show all
+                </button>
+              )}
+            </div>
+            {visibleSuggestions.length === 0 ? (
+              <div className="bg-zinc-800/40 border border-zinc-700 rounded-lg p-6 text-center">
+                <p className="text-zinc-400 text-sm">
+                  Every line is hidden by the filters above — the warehouse and pending orders cover the whole buy.
+                </p>
+              </div>
+            ) : (
             <div className="overflow-x-auto max-h-96 overflow-y-auto rounded-lg border border-zinc-800">
               <table className="w-full text-left">
                 <thead className="sticky top-0 bg-zinc-900 z-10">
@@ -1155,13 +1293,8 @@ export default function Orders() {
                     <th className="px-2 py-2 font-medium w-8" />
                     <th className="px-2 py-2 font-medium">Product / Supplier</th>
                     <th className="px-2 py-2 font-medium whitespace-nowrap" title="Machine stock now → projected at restock">Machine</th>
-                    <th className="px-2 py-2 font-medium text-right">Warehouse</th>
-                    <th className="px-2 py-2 font-medium text-right whitespace-nowrap">On order</th>
-                    <th className="px-2 py-2 font-medium text-right whitespace-nowrap">Net need</th>
                     <th className="px-2 py-2 font-medium whitespace-nowrap">Order qty</th>
                     <th className="px-2 py-2 font-medium text-center">Boxes</th>
-                    <th className="px-2 py-2 font-medium">Unit £</th>
-                    <th className="px-2 py-2 font-medium text-center" title="Days of cover (trading days)">Cover</th>
                     <th className="px-2 py-2 font-medium" />
                   </tr>
                 </thead>
@@ -1183,7 +1316,7 @@ export default function Orders() {
                     return (
                       <React.Fragment key={group.supplierId || '__none__'}>
                         <tr className="bg-zinc-800/60">
-                          <td colSpan={11} className="px-2 py-1.5">
+                          <td colSpan={6} className="px-2 py-1.5">
                             <div className="flex items-center justify-between gap-2 flex-wrap">
                               <div className="flex items-center gap-2 flex-wrap">
                                 <span className="text-sm font-medium text-teal-400">{group.supplierName}</span>
@@ -1209,6 +1342,8 @@ export default function Orders() {
                 </tbody>
               </table>
             </div>
+            )}
+            </>
           )}
 
           <div>
