@@ -1,5 +1,6 @@
 import prisma from '../utils/db.js';
 import { consumeBatchesFEFO, recomputeWarehouseStock } from '../utils/inventory-stock.js';
+import { getEffectiveLayout } from './planogram-scope.js';
 
 /**
  * Pick lists: "what to pack into bags tonight for tomorrow's restock run."
@@ -121,6 +122,89 @@ export function splitGroupNeed(need, members) {
 }
 
 /**
+ * Per-location fill needs for one location, planogram-aware. Pure; exported
+ * for tests.
+ *
+ * With a planogram scope, needs are computed for the SLOTTED targets only:
+ * plain-SKU fill target = diagram capacity ?? config maxStock (target skipped
+ * when both are unknown); meal-group target likewise, then split across member
+ * flavours by warehouse availability. Configured targets with a maxStock that
+ * have NO slot are reported in notOnPlanogram instead of generating a need.
+ * Without a scope (no diagram) the legacy fill-to-config-max behaviour is
+ * unchanged and notOnPlanogram is null.
+ *
+ * @param {Object} p
+ * @param {Object|null} p.scope - buildPlanogramScope output or null
+ * @param {Array}  p.configs - LocationConfig rows [{ sku, maxStock }] (maxStock set)
+ * @param {Array}  p.mealConfigs - LocationMealConfig rows [{ mealType, maxStock }]
+ * @param {Set}    p.freshSkus - all fresh-meal SKUs
+ * @param {Object} p.membersByMealType - { mealType: [{ sku, name }] }
+ * @param {Function} p.stockOf - (sku) => current qty at this location
+ * @param {Object} p.availableOf - { sku: warehouse units available }
+ * @param {Function} p.earliestExpiryOf - (sku) => earliest batch expiry | null
+ * @returns {{ needs: Array<{ sku: string, qty: number }>,
+ *             notOnPlanogram: { skus: string[], mealTypes: string[] } | null }}
+ */
+export function computeLocationNeeds({
+  scope,
+  configs,
+  mealConfigs,
+  freshSkus,
+  membersByMealType,
+  stockOf,
+  availableOf,
+  earliestExpiryOf,
+}) {
+  const needs = [];
+  const addNeed = (sku, qty) => { if (qty > 0) needs.push({ sku, qty }); };
+
+  const configMax = new Map(
+    (configs || []).filter((c) => !freshSkus.has(c.sku)).map((c) => [c.sku, c.maxStock]),
+  );
+  const mealMax = new Map((mealConfigs || []).map((m) => [m.mealType, m.maxStock]));
+
+  const splitGroup = (mealType, groupMax) => {
+    const members = membersByMealType[mealType] || [];
+    if (members.length === 0) return;
+    const groupStock = members.reduce((sum, m) => sum + (stockOf(m.sku) || 0), 0);
+    const groupNeed = Math.max(0, groupMax - groupStock);
+    if (groupNeed <= 0) return;
+    const split = splitGroupNeed(groupNeed, members.map((m) => ({
+      sku: m.sku,
+      available: availableOf[m.sku] || 0,
+      earliestExpiry: earliestExpiryOf(m.sku),
+    })));
+    for (const [sku, qty] of Object.entries(split)) addNeed(sku, qty);
+  };
+
+  if (!scope) {
+    // Legacy path — fill every configured target to its config max.
+    for (const [sku, max] of configMax) addNeed(sku, Math.max(0, max - (stockOf(sku) || 0)));
+    for (const [mealType, max] of mealMax) splitGroup(mealType, max);
+    return { needs, notOnPlanogram: null };
+  }
+
+  // Planogram path — slotted targets only, diagram capacity first.
+  for (const sku of scope.skuSet) {
+    if (freshSkus.has(sku)) continue; // flavour SKUs fill via their group slot
+    const target = scope.capacityByTarget.get(`sku:${sku}`) ?? configMax.get(sku) ?? null;
+    if (target == null) continue; // no capacity anywhere — nothing to fill to
+    addNeed(sku, Math.max(0, target - (stockOf(sku) || 0)));
+  }
+  for (const mealType of scope.mealTypeSet) {
+    const target = scope.capacityByTarget.get(`mealType:${mealType}`) ?? mealMax.get(mealType) ?? null;
+    if (target == null) continue;
+    splitGroup(mealType, target);
+  }
+
+  const notOnPlanogram = {
+    skus: [...configMax.keys()].filter((sku) => !scope.skuSet.has(sku)),
+    mealTypes: [...mealMax.keys()].filter((mt) => !scope.mealTypeSet.has(mt)),
+  };
+  return { needs, notOnPlanogram };
+}
+
+/**
  * Generate (and persist) a draft pick list for a route or an explicit set of
  * locations against one warehouse.
  *
@@ -160,7 +244,7 @@ export async function generatePickList({
   if (locations.length === 0) throw httpError(400, 'No active locations to pick for');
 
   const locIds = locations.map((l) => l.id);
-  const [configRows, mealConfigRows, stockRows, freshProducts] = await Promise.all([
+  const [configRows, mealConfigRows, stockRows, freshProducts, planograms] = await Promise.all([
     prisma.locationConfig.findMany({ where: { locationId: { in: locIds }, maxStock: { not: null } } }),
     prisma.locationMealConfig.findMany({ where: { locationId: { in: locIds }, maxStock: { not: null } } }),
     prisma.locationStock.findMany({ where: { locationId: { in: locIds } } }),
@@ -168,7 +252,9 @@ export async function generatePickList({
       where: { isFreshMeal: true },
       select: { sku: true, name: true, mealType: true },
     }),
+    Promise.all(locIds.map((id) => getEffectiveLayout(id, { prefer: 'next' }))),
   ]);
+  const planogramByLocation = new Map(locIds.map((id, i) => [id, planograms[i]]));
 
   const stockOf = new Map(stockRows.map((s) => [`${s.locationId}|${s.sku}`, s.quantity]));
   const freshSkus = new Set(freshProducts.map((p) => p.sku));
@@ -177,9 +263,13 @@ export async function generatePickList({
     (membersByMealType[p.mealType || 'Unclassified'] ||= []).push(p);
   }
 
-  // Candidate SKUs = everything a config or a fresh group could ask for.
+  // Candidate SKUs = everything a config, a fresh group or a planogram slot
+  // could ask for (capacity-only slots have no config row but still pick).
   const candidateSkus = new Set(freshSkus);
   for (const c of configRows) candidateSkus.add(c.sku);
+  for (const p of planograms) {
+    if (p) for (const sku of p.scope.skuSet) candidateSkus.add(sku);
+  }
 
   // Warehouse batches in FEFO order (earliest expiry first, nulls last, then
   // oldest received) — used both for availability and the allocation plan.
@@ -215,38 +305,34 @@ export async function generatePickList({
     entry.perLocation.push({ locationId: location.id, locationName: location.name, qty });
   };
 
+  const notOnPlanogramPerLocation = [];
   for (const location of locations) {
-    // Plain products: fill to max. Fresh SKUs are excluded here — their
-    // capacity lives on the meal-type group, not per flavour.
-    for (const cfg of configsByLocation[location.id] || []) {
-      if (freshSkus.has(cfg.sku)) continue;
-      const current = stockOf.get(`${location.id}|${cfg.sku}`) || 0;
-      addNeed(cfg.sku, location, Math.max(0, cfg.maxStock - current));
-    }
-
-    // Fresh-meal groups: group need split across member SKUs by warehouse
-    // availability, soonest-expiring flavours preferred.
-    for (const mealCfg of mealConfigsByLocation[location.id] || []) {
-      const members = membersByMealType[mealCfg.mealType] || [];
-      if (members.length === 0) continue;
-      const groupStock = members.reduce(
-        (sum, m) => sum + (stockOf.get(`${location.id}|${m.sku}`) || 0), 0,
-      );
-      const groupNeed = Math.max(0, mealCfg.maxStock - groupStock);
-      if (groupNeed <= 0) continue;
-
-      const split = splitGroupNeed(groupNeed, members.map((m) => ({
-        sku: m.sku,
-        available: availableOf[m.sku] || 0,
-        earliestExpiry: earliestExpiryOf(m.sku),
-      })));
-      for (const [sku, qty] of Object.entries(split)) addNeed(sku, location, qty);
+    const planogram = planogramByLocation.get(location.id);
+    const { needs, notOnPlanogram } = computeLocationNeeds({
+      scope: planogram?.scope ?? null,
+      configs: configsByLocation[location.id] || [],
+      mealConfigs: mealConfigsByLocation[location.id] || [],
+      freshSkus,
+      membersByMealType,
+      stockOf: (sku) => stockOf.get(`${location.id}|${sku}`) || 0,
+      availableOf,
+      earliestExpiryOf,
+    });
+    for (const { sku, qty } of needs) addNeed(sku, location, qty);
+    if (notOnPlanogram && (notOnPlanogram.skus.length || notOnPlanogram.mealTypes.length)) {
+      notOnPlanogramPerLocation.push({
+        locationId: location.id,
+        locationName: location.name,
+        ...notOnPlanogram,
+      });
     }
   }
 
   // ---- Cap at availability + plan the FEFO batch allocation ----
   const productNames = new Map(freshProducts.map((p) => [p.sku, p.name]));
-  const plainSkus = [...needBySku.keys()].filter((sku) => !productNames.has(sku));
+  const excludedSkus = notOnPlanogramPerLocation.flatMap((l) => l.skus);
+  const plainSkus = [...new Set([...needBySku.keys(), ...excludedSkus])]
+    .filter((sku) => !productNames.has(sku));
   if (plainSkus.length) {
     const rows = await prisma.product.findMany({
       where: { sku: { in: plainSkus } },
@@ -254,6 +340,14 @@ export async function generatePickList({
     });
     for (const r of rows) productNames.set(r.sku, r.name);
   }
+
+  // Excluded SKUs carry their product name so the UI needn't resolve them.
+  const notOnPlanogram = notOnPlanogramPerLocation.length
+    ? notOnPlanogramPerLocation.map((l) => ({
+        ...l,
+        skus: l.skus.map((sku) => ({ sku, name: productNames.get(sku) || sku })),
+      }))
+    : null;
 
   const items = [];
   const shortfalls = [];
@@ -312,6 +406,7 @@ export async function generatePickList({
       status: 'draft',
       items,
       shortfalls: shortfalls.length ? shortfalls : null,
+      notOnPlanogram,
       createdBy,
     },
   });

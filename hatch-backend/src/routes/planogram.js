@@ -12,6 +12,7 @@ import {
   computeUnplaced,
   buildRestockSheetRows,
   resolveSlotCapacity,
+  buildPlanogramScope,
 } from '../services/planogram-layout.js';
 
 const router = express.Router();
@@ -231,7 +232,7 @@ publicRestockSheetRouter.get('/:token', asyncHandler(async (req, res) => {
   const [assignments, stockRows, configRows, mealConfigRows] = await Promise.all([
     prisma.slotAssignment.findMany({
       where: { layoutId: layout.id, validTo: null },
-      select: { shelf: true, position: true, slotCode: true, targetType: true, sku: true, mealType: true },
+      select: { shelf: true, position: true, slotCode: true, targetType: true, sku: true, mealType: true, capacity: true },
     }),
     prisma.locationStock.findMany({
       where: { locationId: layout.locationId },
@@ -270,6 +271,15 @@ publicRestockSheetRouter.get('/:token', asyncHandler(async (req, res) => {
 
   const skuMax = new Map(configRows.filter((r) => r.maxStock != null).map((r) => [r.sku, r.maxStock]));
   const groupMax = new Map(mealConfigRows.filter((r) => r.maxStock != null).map((r) => [r.mealType, r.maxStock]));
+
+  // Diagram slot capacity overrides the config max where resolvable — keeps
+  // the 3PL sheet's "add" targets consistent with pick-list generation.
+  const scope = buildPlanogramScope(assignments, layout.shelves);
+  for (const [key, cap] of scope.capacityByTarget) {
+    if (cap == null) continue;
+    if (key.startsWith('sku:')) skuMax.set(key.slice(4), cap);
+    else groupMax.set(key.slice('mealType:'.length), cap);
+  }
 
   const { rows, totalAdd } = buildRestockSheetRows(assignments, {
     qtyBySku,

@@ -317,6 +317,7 @@ export default function PickListDetail() {
 
   const [saveState, setSaveState] = useState('idle'); // idle | saving | saved | error
   const [shortfallsOpen, setShortfallsOpen] = useState(false);
+  const [notOnPlanogramOpen, setNotOnPlanogramOpen] = useState(false);
   const [expiryWarningsOpen, setExpiryWarningsOpen] = useState(false);
 
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -757,6 +758,48 @@ export default function PickListDetail() {
               ))}
               <p className="text-[11px] text-zinc-500 pt-1">
                 Quantities below are capped at what the warehouse can supply.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Not-on-diagram banner: configured targets skipped because they have
+          no slot on the location's visual planogram */}
+      {(list.notOnPlanogram?.length || 0) > 0 && (
+        <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg">
+          <button
+            onClick={() => setNotOnPlanogramOpen((v) => !v)}
+            className="w-full flex items-center justify-between gap-2 p-4 text-left"
+          >
+            <span className="flex items-center gap-2 text-amber-400 text-sm font-medium">
+              <AlertTriangle size={16} className="shrink-0" />
+              Products not on the visual diagram were skipped
+            </span>
+            {notOnPlanogramOpen ? (
+              <ChevronUp size={16} className="text-amber-400 shrink-0" />
+            ) : (
+              <ChevronDown size={16} className="text-amber-400 shrink-0" />
+            )}
+          </button>
+          {notOnPlanogramOpen && (
+            <div className="px-4 pb-4 space-y-2">
+              {list.notOnPlanogram.map((loc) => (
+                <div key={loc.locationId} className="text-xs">
+                  <span className="text-zinc-300 font-medium">{loc.locationName}</span>
+                  <div className="text-zinc-400 mt-0.5 space-y-0.5">
+                    {(loc.mealTypes || []).map((mt) => (
+                      <div key={`mt-${mt}`} className="text-teal-300">{mt} (fresh meal group)</div>
+                    ))}
+                    {(loc.skus || []).map((s) => (
+                      <div key={s.sku || s}>{s.name || s.sku || s}</div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+              <p className="text-[11px] text-zinc-500 pt-1">
+                These are configured for the location but have no slot on the fridge diagram.
+                Place them in Location Stock → Visual to include them in picking.
               </p>
             </div>
           )}

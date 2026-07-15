@@ -10,7 +10,9 @@ import {
   splitGroupNeed,
   expiresBeforeNextRestock,
   buildExpiryWarnings,
+  computeLocationNeeds,
 } from './pick-list.js';
+import { buildPlanogramScope } from './planogram-layout.js';
 
 describe('buildReconciliation', () => {
   const items = [
@@ -208,5 +210,110 @@ describe('splitGroupNeed', () => {
       { sku: 'B', available: 0, earliestExpiry: null },
     ]);
     expect(split).toEqual({ A: 4, B: 0 });
+  });
+});
+
+describe('computeLocationNeeds', () => {
+  const freshSkus = new Set(['FRIVE-1', 'FRIVE-2']);
+  const membersByMealType = {
+    Meat: [{ sku: 'FRIVE-1', name: 'Chicken' }, { sku: 'FRIVE-2', name: 'Beef' }],
+  };
+  const availableOf = { 'FRIVE-1': 10, 'FRIVE-2': 10, COKE: 50, JUICE: 50 };
+  const noExpiry = () => null;
+
+  const base = {
+    freshSkus,
+    membersByMealType,
+    availableOf,
+    earliestExpiryOf: noExpiry,
+  };
+
+  it('legacy path (no scope): fills every configured target to config max', () => {
+    const { needs, notOnPlanogram } = computeLocationNeeds({
+      ...base,
+      scope: null,
+      configs: [{ sku: 'COKE', maxStock: 12 }, { sku: 'JUICE', maxStock: 6 }],
+      mealConfigs: [{ mealType: 'Meat', maxStock: 10 }],
+      stockOf: (sku) => ({ COKE: 4, JUICE: 6, 'FRIVE-1': 2 }[sku] || 0),
+    });
+    expect(notOnPlanogram).toBeNull();
+    expect(needs).toContainEqual({ sku: 'COKE', qty: 8 });
+    expect(needs.find((n) => n.sku === 'JUICE')).toBeUndefined(); // already full
+    // Meat group: max 10 - 2 in machine = 8 split across members
+    const meat = needs.filter((n) => freshSkus.has(n.sku));
+    expect(meat.reduce((a, n) => a + n.qty, 0)).toBe(8);
+  });
+
+  it('scoped: only slotted targets pick, capacity beats config max', () => {
+    const scope = buildPlanogramScope(
+      [
+        { shelf: 1, position: 0, targetType: 'sku', sku: 'COKE', capacity: null },
+        { shelf: 1, position: 1, targetType: 'mealType', mealType: 'Meat', capacity: 15 },
+      ],
+      [{ shelf: 1, slots: 6, unitsPerSlot: 9 }],
+    );
+    const { needs, notOnPlanogram } = computeLocationNeeds({
+      ...base,
+      scope,
+      configs: [{ sku: 'COKE', maxStock: 99 }, { sku: 'JUICE', maxStock: 6 }],
+      mealConfigs: [{ mealType: 'Meat', maxStock: 10 }],
+      stockOf: (sku) => ({ COKE: 4 }[sku] || 0),
+    });
+    // COKE: capacity 9 (shelf default) beats config 99 -> need 5
+    expect(needs).toContainEqual({ sku: 'COKE', qty: 5 });
+    // JUICE configured but not slotted -> excluded, reported
+    expect(needs.find((n) => n.sku === 'JUICE')).toBeUndefined();
+    expect(notOnPlanogram.skus).toEqual(['JUICE']);
+    expect(notOnPlanogram.mealTypes).toEqual([]);
+    // Meat group: slot capacity 15 beats config 10 -> 15 split across members
+    const meat = needs.filter((n) => freshSkus.has(n.sku));
+    expect(meat.reduce((a, n) => a + n.qty, 0)).toBe(15);
+  });
+
+  it('scoped: slotted target with no capacity anywhere falls back to config max, else skipped', () => {
+    const scope = buildPlanogramScope(
+      [
+        { shelf: 2, position: 0, targetType: 'sku', sku: 'COKE', capacity: null },
+        { shelf: 2, position: 1, targetType: 'sku', sku: 'JUICE', capacity: null },
+      ],
+      [{ shelf: 2, slots: 4 }], // no unitsPerSlot
+    );
+    const { needs } = computeLocationNeeds({
+      ...base,
+      scope,
+      configs: [{ sku: 'COKE', maxStock: 12 }], // JUICE has no config either
+      mealConfigs: [],
+      stockOf: () => 0,
+    });
+    expect(needs).toContainEqual({ sku: 'COKE', qty: 12 }); // config fallback
+    expect(needs.find((n) => n.sku === 'JUICE')).toBeUndefined(); // nothing to fill to
+  });
+
+  it('scoped: fresh flavour SKU slotted directly is ignored (fills via its group)', () => {
+    const scope = buildPlanogramScope(
+      [{ shelf: 1, position: 0, targetType: 'sku', sku: 'FRIVE-1', capacity: 5 }],
+      [{ shelf: 1, slots: 6 }],
+    );
+    const { needs } = computeLocationNeeds({
+      ...base,
+      scope,
+      configs: [],
+      mealConfigs: [],
+      stockOf: () => 0,
+    });
+    expect(needs).toEqual([]);
+  });
+
+  it('scoped: empty diagram picks nothing and reports all configured targets', () => {
+    const scope = buildPlanogramScope([], [{ shelf: 1, slots: 6 }]);
+    const { needs, notOnPlanogram } = computeLocationNeeds({
+      ...base,
+      scope,
+      configs: [{ sku: 'COKE', maxStock: 12 }],
+      mealConfigs: [{ mealType: 'Meat', maxStock: 10 }],
+      stockOf: () => 0,
+    });
+    expect(needs).toEqual([]);
+    expect(notOnPlanogram).toEqual({ skus: ['COKE'], mealTypes: ['Meat'] });
   });
 });

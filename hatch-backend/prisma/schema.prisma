@@ -403,6 +403,10 @@ model PickList {
   // [{ sku, quantity, returnedAt }]. Booked back as batches with the earliest
   // expiry of that SKU's original allocation (conservative for FEFO).
   returnedItems Json?   @map("returned_items")
+  // Configured targets skipped at generation because they have no slot on the
+  // location's visual diagram: [{ locationId, locationName, skus: [{sku,name}],
+  // mealTypes: [str] }]. See manual-sql/023_pick_list_planogram.sql.
+  notOnPlanogram Json?  @map("not_on_planogram")
   createdBy   String?   @map("created_by")
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @updatedAt @map("updated_at")
