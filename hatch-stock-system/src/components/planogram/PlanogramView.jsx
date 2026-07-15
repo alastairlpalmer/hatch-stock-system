@@ -26,6 +26,10 @@ export default function PlanogramView({
   const [error, setError] = useState(null);
   const [editing, setEditing] = useState(false);
   const [shareState, setShareState] = useState('idle'); // idle | copying | copied | error
+  // 'current' = the live layout; 'next' = the draft for the coming Monday.
+  const [revision, setRevision] = useState('current');
+  const [draftExists, setDraftExists] = useState(false);
+  const [draftBusy, setDraftBusy] = useState(false); // create/discard/promote in flight
 
   const copyShareLink = async () => {
     setShareState('copying');
@@ -47,13 +51,73 @@ export default function PlanogramView({
     setLoading(true);
     setError(null);
     setEditing(false);
-    planogramService
-      .getLocationPlanogram(locationId)
-      .then((p) => !cancelled && setPayload(p))
+    Promise.all([
+      planogramService.getLocationPlanogram(locationId, revision),
+      // Draft existence drives the tab strip; cheap parallel probe.
+      revision === 'next'
+        ? Promise.resolve(null)
+        : planogramService.getLocationPlanogram(locationId, 'next').catch(() => null),
+    ])
+      .then(([p, draft]) => {
+        if (cancelled) return;
+        setPayload(p);
+        setDraftExists(revision === 'next' ? !!p?.layout : !!draft?.layout);
+      })
       .catch((err) => !cancelled && setError(err.response?.data?.error || err.message || 'Failed to load planogram'))
       .finally(() => !cancelled && setLoading(false));
     return () => { cancelled = true; };
-  }, [locationId]);
+  }, [locationId, revision]);
+
+  // When a location switch happens, snap back to the live layout.
+  useEffect(() => { setRevision('current'); }, [locationId]);
+
+  const createDraft = async () => {
+    setDraftBusy(true);
+    setError(null);
+    try {
+      await planogramService.createDraft(locationId);
+      setDraftExists(true);
+      setRevision('next');
+    } catch (err) {
+      setError(err.response?.data?.error || err.message || 'Could not create the draft');
+    } finally {
+      setDraftBusy(false);
+    }
+  };
+
+  const discardDraft = async () => {
+    if (!window.confirm("Discard next week's draft layout? The live layout is untouched.")) return;
+    setDraftBusy(true);
+    setError(null);
+    try {
+      await planogramService.discardDraft(locationId);
+      setDraftExists(false);
+      setRevision('current');
+    } catch (err) {
+      setError(err.response?.data?.error || err.message || 'Could not discard the draft');
+    } finally {
+      setDraftBusy(false);
+    }
+  };
+
+  const promoteDraft = async () => {
+    const slotCount = payload?.assignments?.length ?? 0;
+    if (!window.confirm(
+      `Go live with next week's layout? ${slotCount} slot${slotCount === 1 ? '' : 's'} will become the live planogram; the draft is then removed.`
+    )) return;
+    setDraftBusy(true);
+    setError(null);
+    try {
+      const res = await planogramService.promoteDraft(locationId);
+      setDraftExists(false);
+      setRevision('current');
+      if (res?.payload) setPayload(res.payload);
+    } catch (err) {
+      setError(err.response?.data?.error || err.message || 'Promotion failed');
+    } finally {
+      setDraftBusy(false);
+    }
+  };
 
   const productBySku = useMemo(() => new Map((products || []).map((p) => [p.sku, p])), [products]);
   const groupByName = useMemo(() => new Map((mealGroups || []).map((g) => [g.mealType, g])), [mealGroups]);
@@ -133,53 +197,135 @@ export default function PlanogramView({
     return <div className="bg-red-500/10 border border-red-500/30 text-red-400 text-sm rounded-lg px-4 py-3">{error}</div>;
   }
 
+  // Tab strip: live layout vs next-week draft, plus the draft lifecycle actions.
+  const revisionBar = (
+    <div className="flex items-center justify-between gap-2 flex-wrap">
+      <div className="flex gap-1">
+        <button
+          onClick={() => setRevision('current')}
+          className={`px-3 py-1.5 rounded text-sm transition-colors ${
+            revision === 'current' ? 'bg-teal-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:text-white'
+          }`}
+        >
+          Current
+        </button>
+        {draftExists ? (
+          <button
+            onClick={() => setRevision('next')}
+            className={`px-3 py-1.5 rounded text-sm transition-colors ${
+              revision === 'next' ? 'bg-purple-600 text-white' : 'bg-zinc-800 text-purple-300 hover:text-white'
+            }`}
+          >
+            Next week
+          </button>
+        ) : (
+          <button
+            onClick={createDraft}
+            disabled={draftBusy || !payload?.layout}
+            title="Copy the current layout into an editable next-week draft — ordering and picking will plan against it"
+            className="px-3 py-1.5 rounded text-sm bg-zinc-800 text-zinc-400 hover:text-white transition-colors disabled:opacity-50"
+          >
+            + Plan next week
+          </button>
+        )}
+      </div>
+      {revision === 'next' && (
+        <div className="flex gap-2">
+          <button
+            onClick={discardDraft}
+            disabled={draftBusy}
+            className="px-3 py-1.5 rounded text-sm bg-zinc-800 text-zinc-400 hover:text-red-400 transition-colors border border-zinc-700 disabled:opacity-50"
+          >
+            Discard draft
+          </button>
+          <button
+            onClick={promoteDraft}
+            disabled={draftBusy}
+            className="px-3 py-1.5 rounded text-sm font-medium bg-purple-500 text-white hover:bg-purple-400 transition-colors disabled:opacity-50"
+          >
+            {draftBusy ? 'Working…' : 'Go live'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+
+  const draftBanner = revision === 'next' && (
+    <div className="bg-purple-500/10 border border-purple-500/30 text-purple-300 text-xs rounded-lg px-4 py-2.5">
+      Editing <span className="font-medium">next week's</span> layout. Order lists and pick lists already
+      plan against this draft; the live fridge view and 3PL sheet keep using the current layout until you Go live.
+    </div>
+  );
+
   if (editing) {
     return (
-      <PlanogramEditor
-        locationId={locationId}
-        payload={payload}
-        products={products}
-        mealGroups={mealGroups}
-        mealTypes={mealTypes}
-        location={location}
-        onSaved={(fresh) => { setPayload(fresh); setEditing(false); }}
-        onCancel={() => setEditing(false)}
-      />
+      <div className="space-y-4">
+        {revisionBar}
+        {draftBanner}
+        <PlanogramEditor
+          locationId={locationId}
+          payload={payload}
+          products={products}
+          mealGroups={mealGroups}
+          mealTypes={mealTypes}
+          location={location}
+          revision={revision}
+          onSaved={(fresh) => { setPayload(fresh); setEditing(false); }}
+          onCancel={() => setEditing(false)}
+        />
+      </div>
     );
   }
 
   if (!payload?.layout) {
     return (
-      <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-8 text-center space-y-3">
-        <p className="text-zinc-300 text-sm font-medium">No fridge layout configured for this location.</p>
-        <p className="text-zinc-500 text-sm">Set it up right here — drag products into slots and save.</p>
-        <button
-          onClick={() => setEditing(true)}
-          className="px-4 py-2 rounded text-sm font-medium bg-emerald-500 text-zinc-900 hover:bg-emerald-400"
-        >
-          Configure slots
-        </button>
+      <div className="space-y-4">
+        {revisionBar}
+        <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-8 text-center space-y-3">
+          <p className="text-zinc-300 text-sm font-medium">
+            {revision === 'next'
+              ? 'No next-week draft for this location.'
+              : 'No fridge layout configured for this location.'}
+          </p>
+          <p className="text-zinc-500 text-sm">
+            {revision === 'next'
+              ? 'Create one from the Current tab with “Plan next week”.'
+              : 'Set it up right here — drag products into slots and save.'}
+          </p>
+          {revision === 'current' && (
+            <button
+              onClick={() => setEditing(true)}
+              className="px-4 py-2 rounded text-sm font-medium bg-emerald-500 text-zinc-900 hover:bg-emerald-400"
+            >
+              Configure slots
+            </button>
+          )}
+        </div>
       </div>
     );
   }
 
   return (
     <div className="space-y-4">
+      {revisionBar}
+      {draftBanner}
       <div className="flex justify-end gap-2">
-        <button
-          onClick={copyShareLink}
-          disabled={shareState === 'copying'}
-          title="Copy a public link to this machine's restock sheet — hand it to whoever restocks"
-          className={`px-3 py-1.5 rounded text-sm transition-colors border ${
-            shareState === 'copied'
-              ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40'
-              : shareState === 'error'
-                ? 'bg-red-500/15 text-red-400 border-red-500/40'
-                : 'bg-zinc-800 text-zinc-400 hover:text-white border-zinc-700'
-          }`}
-        >
-          {shareState === 'copied' ? 'Link copied ✓' : shareState === 'error' ? 'Copy failed' : '⇪ Share restock sheet'}
-        </button>
+        {revision === 'current' && (
+          <button
+            onClick={copyShareLink}
+            disabled={shareState === 'copying'}
+            title="Copy a public link to this machine's restock sheet — hand it to whoever restocks"
+            className={`px-3 py-1.5 rounded text-sm transition-colors border ${
+              shareState === 'copied'
+                ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40'
+                : shareState === 'error'
+                  ? 'bg-red-500/15 text-red-400 border-red-500/40'
+                  : 'bg-zinc-800 text-zinc-400 hover:text-white border-zinc-700'
+            }`}
+          >
+            {shareState === 'copied' ? 'Link copied ✓' : shareState === 'error' ? 'Copy failed' : '⇪ Share restock sheet'}
+          </button>
+        )}
         <button
           onClick={() => setEditing(true)}
           className="px-3 py-1.5 rounded text-sm bg-zinc-800 text-zinc-400 hover:text-white transition-colors border border-zinc-700"

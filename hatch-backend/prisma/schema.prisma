@@ -104,7 +104,7 @@ model Location {
   assignedItems      LocationAssignment[]
   machineMappings    VendliveMachineMapping[]
   vendliveStockSyncs VendliveStockSync[]
-  machineLayout      MachineLayout?
+  machineLayouts     MachineLayout[]
 
   @@map("locations")
 }
@@ -117,7 +117,11 @@ model Location {
 // See manual-sql/019_visual_planogram.sql.
 model MachineLayout {
   id         String   @id @default(uuid())
-  locationId String   @unique @map("location_id")
+  locationId String   @map("location_id")
+  // 'current' = the live layout; 'next' = the draft for the coming restock
+  // Monday. Ordering/picking prefer 'next'; the public restock sheet pins
+  // 'current'. See manual-sql/024_layout_revisions.sql.
+  revision   String   @default("current")
   shelves    Json
   // Public restock-sheet share link credential (same pattern as
   // BuyingList.shareToken): the unguessable uuid IS the credential for the
@@ -129,6 +133,7 @@ model MachineLayout {
   location    Location         @relation(fields: [locationId], references: [id], onDelete: Cascade)
   assignments SlotAssignment[]
 
+  @@unique([locationId, revision])
   @@map("machine_layouts")
 }
 

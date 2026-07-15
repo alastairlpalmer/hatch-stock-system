@@ -31,7 +31,7 @@ function sameTarget(a, b) {
   return a.targetType === b.targetType && a.sku === b.sku && a.mealType === b.mealType;
 }
 
-export default function PlanogramEditor({ locationId, payload, products, mealGroups, mealTypes, location, onSaved, onCancel }) {
+export default function PlanogramEditor({ locationId, payload, products, mealGroups, mealTypes, location, revision = 'current', onSaved, onCancel }) {
   const [shelves, setShelves] = useState(() =>
     payload?.layout?.shelves?.length
       ? payload.layout.shelves
@@ -238,7 +238,7 @@ export default function PlanogramEditor({ locationId, payload, products, mealGro
           return { shelf, position, ...target };
         }),
       };
-      const fresh = await planogramService.saveLocationPlanogram(locationId, body);
+      const fresh = await planogramService.saveLocationPlanogram(locationId, body, revision);
       setDirty(false);
       onSaved(fresh);
     } catch (err) {

@@ -1048,6 +1048,18 @@ export default function Orders() {
                 {' · '}{suggestionMeta.coverTradingDays ?? suggestionMeta.tradingDaysToRestock ?? '—'} trading days
               </span>
             )}
+            {(() => {
+              const nextLocs = (suggestionPlanogram?.perLocation || []).filter(l => l.source === 'next');
+              if (nextLocs.length === 0) return null;
+              return (
+                <span
+                  className="text-xs bg-purple-500/10 border border-purple-500/30 rounded px-2.5 py-1.5 text-purple-300"
+                  title={`Planned against the next-week draft layout for: ${nextLocs.map(l => l.locationName).join(', ')}`}
+                >
+                  Next-week layout · {nextLocs.length} location{nextLocs.length > 1 ? 's' : ''}
+                </span>
+              );
+            })()}
           </div>
 
           {/* Location multi-select with per-location freshness + sync */}

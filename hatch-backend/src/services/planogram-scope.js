@@ -4,17 +4,26 @@ import { buildPlanogramScope } from './planogram-layout.js';
 /**
  * Resolve the layout that ordering/picking should generate against.
  *
- * Phase 1: only the location's single (current) layout exists. The `prefer`
- * option is accepted now so call sites don't change when the next-week draft
- * revision lands (Phase 3: prefer 'next' -> fall back to 'current').
+ * prefer 'next': try the location's next-week draft first (the order placed
+ * midweek arrives for Monday's restock, so it should reflect the layout that
+ * will be live then), falling back to the current layout. prefer 'current'
+ * reads only the live layout.
  *
- * Returns { layout, openAssignments, scope, source } or null when the location
- * has no layout at all — callers MUST fall back to legacy behaviour
- * (assignedItems + config maxStock) so undiagrammed locations keep working.
+ * Returns { layout, openAssignments, scope, source: 'next'|'current' } or null
+ * when the location has no matching layout at all — callers MUST fall back to
+ * legacy behaviour (assignedItems + config maxStock) so undiagrammed locations
+ * keep working.
  */
 export async function getEffectiveLayout(locationId, { prefer = 'current' } = {}) {
-  void prefer; // Phase 3 will branch on this
-  const layout = await prisma.machineLayout.findUnique({ where: { locationId } });
+  const revisions = prefer === 'next' ? ['next', 'current'] : ['current'];
+
+  let layout = null;
+  for (const revision of revisions) {
+    layout = await prisma.machineLayout.findUnique({
+      where: { locationId_revision: { locationId, revision } },
+    });
+    if (layout) break;
+  }
   if (!layout) return null;
 
   const openAssignments = await prisma.slotAssignment.findMany({
@@ -28,6 +37,6 @@ export async function getEffectiveLayout(locationId, { prefer = 'current' } = {}
     layout,
     openAssignments,
     scope: buildPlanogramScope(openAssignments, layout.shelves),
-    source: 'current',
+    source: layout.revision,
   };
 }

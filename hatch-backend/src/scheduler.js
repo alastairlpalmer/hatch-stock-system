@@ -2,11 +2,13 @@ import cron from 'node-cron';
 import prisma from './utils/db.js';
 import { runPollSync } from './services/vendlive-sync.js';
 import { runStockPollJob, syncProductCatalog, syncAllMachines } from './services/vendlive-stock.js';
+import { promoteAllDrafts } from './services/planogram-promote.js';
 
 let salesJobRunning = false;
 let stockJobRunning = false;
 let productJobRunning = false;
 let fridayBaselineRunning = false;
+let planogramPromoteRunning = false;
 // The config table has no lastStockPollAt column, so the stock job tracks its
 // own last run in memory (fine for a single Railway instance; worst case after
 // a restart is one early run).
@@ -119,5 +121,31 @@ export function startScheduler() {
     }
   }, { timezone: 'Europe/London' });
 
-  console.log('VendLive schedulers started (sales + stock + products + Friday baseline)');
+  // Monday 05:00 London — auto-promote every next-week draft planogram before
+  // restock hours. Opt-in via PLANOGRAM_AUTO_PROMOTE=1 so ops can trust the
+  // manual "Go live" flow first.
+  if (process.env.PLANOGRAM_AUTO_PROMOTE === '1') {
+    cron.schedule('0 5 * * 1', async () => {
+      if (planogramPromoteRunning) return;
+      planogramPromoteRunning = true;
+      try {
+        const results = await promoteAllDrafts();
+        for (const r of results) {
+          if (r.ok) {
+            console.log(`[scheduler] planogram promote ${r.locationId}: ${r.result.created} created, ${r.result.closed} closed`);
+          } else {
+            console.error(`[scheduler] planogram promote ${r.locationId} FAILED: ${r.error}`);
+          }
+        }
+        if (results.length === 0) console.log('[scheduler] planogram promote: no drafts to promote');
+      } catch (err) {
+        console.error('[scheduler] planogram promote error:', err.message);
+      } finally {
+        planogramPromoteRunning = false;
+      }
+    }, { timezone: 'Europe/London' });
+  }
+
+  console.log('VendLive schedulers started (sales + stock + products + Friday baseline'
+    + (process.env.PLANOGRAM_AUTO_PROMOTE === '1' ? ' + Monday planogram promote)' : ')'));
 }
