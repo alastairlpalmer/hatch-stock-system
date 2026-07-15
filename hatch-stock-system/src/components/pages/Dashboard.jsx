@@ -334,16 +334,16 @@ export default function Dashboard() {
         <div className="text-xs uppercase tracking-wider text-zinc-500 mb-2">Operations</div>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <StatCard label="Pending Orders" value={pendingOrders} accent="teal" to="/orders/purchase" />
-          <StatCard label="Warehouse Stock" value={totalWarehouseUnits.toLocaleString()} accent="blue" to="/orders/warehouse" />
+          <StatCard label="Warehouse Stock" value={totalWarehouseUnits.toLocaleString()} accent="blue" to="/warehouse" />
           <StatCard label="Location Stock" value={totalLocationUnits.toLocaleString()} accent="emerald" to="/locations" />
-          <StatCard label="Expiry Alerts" value={expiryAlertCount} accent={expiryAlertCount > 0 ? 'red' : 'emerald'} to="/orders/warehouse" />
+          <StatCard label="Expiry Alerts" value={expiryAlertCount} accent={expiryAlertCount > 0 ? 'red' : 'emerald'} to="/warehouse" />
         </div>
       </div>
 
       <div>
         <div className="text-xs uppercase tracking-wider text-zinc-500 mb-2">Financial</div>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <StatCard label="Warehouse Value" value={`£${totalValue.toLocaleString('en-GB', { minimumFractionDigits: 2 })}`} accent="purple" to="/orders/warehouse" />
+          <StatCard label="Warehouse Value" value={`£${totalValue.toLocaleString('en-GB', { minimumFractionDigits: 2 })}`} accent="purple" to="/warehouse" />
           <StatCard label="30d Revenue" value={`£${totalSalesRevenue.toFixed(2)}`} accent="emerald" to="/sales" />
           <StatCard label="30d Profit" value={`£${totalSalesProfit.toFixed(2)}`} accent="teal" to="/sales" />
         </div>
@@ -427,7 +427,7 @@ export default function Dashboard() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-6">
-          <SectionHeading to="/orders/warehouse">Warehouse Stock</SectionHeading>
+          <SectionHeading to="/warehouse">Warehouse Stock</SectionHeading>
           {data.warehouses.length === 0 ? (
             <p className="text-zinc-500 text-sm">No warehouses configured</p>
           ) : (

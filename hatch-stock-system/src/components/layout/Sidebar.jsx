@@ -1,5 +1,6 @@
 import React from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
+import { Warehouse } from 'lucide-react';
 import { cn } from '../../utils/helpers';
 import { useAuth } from '../../context/AuthContext';
 import HatchLogo from '../ui/HatchLogo';
@@ -10,6 +11,7 @@ const navItems = [
   { path: '/sales', label: 'Sales', icon: SalesIcon },
   { path: '/locations', label: 'Location Stock', icon: LocationIcon },
   { path: '/orders', label: 'Orders', icon: OrdersIcon },
+  { path: '/warehouse', label: 'Warehouse', icon: WarehouseIcon },
   { path: '/restock', label: 'Restock', icon: RestockIcon },
   { path: '/support', label: 'Support', icon: SupportIcon },
 ];
@@ -167,6 +169,12 @@ function OrdersIcon({ className }) {
       <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
     </svg>
   );
+}
+
+// Same glyph the Orders cards used for this page; wrapped so it matches the
+// 1.5 stroke weight of the local icons.
+function WarehouseIcon({ className }) {
+  return <Warehouse className={className} strokeWidth={1.5} />;
 }
 
 function RestockIcon({ className }) {

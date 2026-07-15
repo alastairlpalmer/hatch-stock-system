@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { MapPin, ClipboardList, PackagePlus, MoreHorizontal } from 'lucide-react';
+import { MapPin, ClipboardList, Warehouse, PackagePlus, MoreHorizontal } from 'lucide-react';
 
 // Mobile-only bottom navigation. Rendered IN FLOW (flex-shrink-0 sibling
 // after <main>) rather than position:fixed — the scroll container ends above
@@ -15,12 +15,14 @@ import { MapPin, ClipboardList, PackagePlus, MoreHorizontal } from 'lucide-react
 const TABS = [
   { key: 'locations', label: 'Locations', to: '/home', Icon: MapPin },
   { key: 'orders', label: 'Orders', to: '/orders', Icon: ClipboardList },
+  { key: 'warehouse', label: 'Warehouse', to: '/warehouse', Icon: Warehouse },
   { key: 'restock', label: 'Restock', to: '/restock', Icon: PackagePlus },
   { key: 'other', label: 'Other', to: '/more', Icon: MoreHorizontal },
 ];
 
 function activeTab(pathname) {
   if (pathname === '/restock' || pathname.startsWith('/restock/')) return 'restock';
+  if (pathname === '/warehouse' || pathname.startsWith('/warehouse/')) return 'warehouse';
   if (pathname === '/orders' || pathname.startsWith('/orders/')) return 'orders';
   if (
     pathname === '/home' ||
@@ -42,7 +44,7 @@ export default function BottomNav() {
       style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
       aria-label="Primary"
     >
-      <div className="grid grid-cols-4 h-16">
+      <div className="grid grid-cols-5 h-16">
         {TABS.map(({ key, label, to, Icon }) => {
           const isActive = active === key;
           return (

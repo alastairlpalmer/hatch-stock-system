@@ -780,7 +780,7 @@ export default function Shrinkage() {
                         Expired on shelf now
                       </h3>
                       <Link
-                        to="/orders/warehouse"
+                        to="/warehouse"
                         className={`text-xs ${hasExpired ? 'text-red-400/70 hover:text-red-300' : 'text-zinc-500 hover:text-zinc-300'}`}
                       >
                         Warehouse stock →
@@ -815,7 +815,7 @@ export default function Shrinkage() {
                                 {batches.map((b, i) => (
                                   <Link
                                     key={`${b.sku}-${i}`}
-                                    to="/orders/warehouse"
+                                    to="/warehouse"
                                     className="flex items-center justify-between gap-3 py-2 border-b border-red-900/30 last:border-0 group"
                                   >
                                     <div className="min-w-0">

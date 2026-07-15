@@ -5,7 +5,6 @@ const tabs = [
   { to: 'purchase', label: 'Purchase Orders' },
   { to: 'buying-lists', label: 'Buying Lists' },
   { to: 'receive', label: 'Receive' },
-  { to: 'warehouse', label: 'Warehouse' },
   { to: 'suppliers', label: 'Suppliers' },
 ];
 

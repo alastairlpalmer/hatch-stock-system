@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { Warehouse, CalendarClock, PackageCheck, ListChecks } from 'lucide-react';
+import { CalendarClock, PackageCheck, ListChecks } from 'lucide-react';
 import { useStock } from '../../../context/StockContext';
 import ActionCard from '../../ui/ActionCard';
 
@@ -60,12 +60,6 @@ export default function OrdersLanding() {
           title="Receive Order"
           description="Check deliveries in — quantities, expiry dates, flavour allocation."
           badge={pending.length > 0 ? `${pending.length} pending` : null}
-        />
-        <ActionCard
-          to="/orders/warehouse"
-          icon={Warehouse}
-          title="Warehouse Stock"
-          description="Stock on hand, expiry batches, transfers and write-offs."
         />
         <ActionCard
           to="/orders/buying-lists"

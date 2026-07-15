@@ -178,9 +178,12 @@ function AppLayout() {
               <Route path="/sales" element={<SalesOverview />} />
               <Route path="/locations" element={<LocationStock />} />
 
+              <Route path="/warehouse" element={<Inventory />} />
+
               <Route path="/orders" element={<OrdersLayout />}>
                 <Route index element={<OrdersIndex />} />
-                <Route path="warehouse" element={<Inventory />} />
+                {/* Warehouse moved to top-level nav; keep old links working. */}
+                <Route path="warehouse" element={<Navigate to="/warehouse" replace />} />
                 <Route path="purchase" element={<Orders />} />
                 <Route path="buying-lists" element={<BuyingLists />} />
                 <Route path="buying-lists/:id" element={<BuyingListDetail />} />

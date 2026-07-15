@@ -8,6 +8,7 @@ const labelByPathPrefix = [
   ['/sales', 'Sales'],
   ['/locations', 'Location Stock'],
   ['/orders', 'Orders'],
+  ['/warehouse', 'Warehouse'],
   ['/restock', 'Restock'],
   ['/support', 'Support'],
 ];
