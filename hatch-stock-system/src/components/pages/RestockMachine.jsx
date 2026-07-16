@@ -4,6 +4,7 @@ import { useStock } from '../../context/StockContext';
 import { useRestockRun } from '../../context/RestockRunContext';
 import { pickListsService } from '../../services/pickLists.service';
 import StockCheckForm from './restock/StockCheckForm';
+import ProductSearchCombobox from '../ui/ProductSearchCombobox';
 
 // Shared with the standalone stock-check page — "who is doing the run".
 const NAME_STORAGE_KEY = 'hatch_checker_name';
@@ -427,16 +428,12 @@ export default function RestockMachine() {
                   return (
                     <div key={idx} className="grid grid-cols-12 gap-2 items-center">
                       <div className="col-span-6">
-                        <select
+                        <ProductSearchCombobox
+                          products={getLocationProducts()}
                           value={item.sku}
-                          onChange={e => updateRestockItem(idx, 'sku', e.target.value)}
-                          className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500"
-                        >
-                          <option value="">Select product</option>
-                          {getLocationProducts().map(p => (
-                            <option key={p.sku} value={p.sku}>{p.name}</option>
-                          ))}
-                        </select>
+                          onSelect={sku => updateRestockItem(idx, 'sku', sku)}
+                          recentsKey="hatch-recent-products-restock"
+                        />
                       </div>
                       <div className="col-span-2 text-center text-zinc-400 text-sm">
                         {item.sku ? currentStock : '-'}
@@ -447,6 +444,7 @@ export default function RestockMachine() {
                       <div className="col-span-2">
                         <input
                           type="number"
+                          inputMode="numeric"
                           value={item.quantity}
                           onChange={e => updateRestockItem(idx, 'quantity', e.target.value)}
                           placeholder="Qty"

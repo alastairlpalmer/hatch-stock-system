@@ -33,10 +33,12 @@ const dateString = z.string().refine(
   { message: 'must be a valid date' },
 );
 
+// items may be empty: a hand-built list starts blank and gains lines in the
+// detail view (create-orders separately rejects lists with no qty>0 lines).
 const createSchema = z.object({
   name: z.string().min(1),
   targetDate: dateString.nullish(), // the restock Monday this buy covers
-  items: z.array(itemSchema).min(1),
+  items: z.array(itemSchema).default([]),
   notes: z.string().nullish(),
   createdBy: z.string().nullish(),
 });
@@ -44,7 +46,7 @@ const createSchema = z.object({
 const updateSchema = z.object({
   name: z.string().min(1).optional(),
   targetDate: dateString.nullable().optional(),
-  items: z.array(itemSchema).min(1).optional(),
+  items: z.array(itemSchema).optional(),
   notes: z.string().nullable().optional(),
   status: z.enum(['draft', 'ordered', 'archived']).optional(),
 });

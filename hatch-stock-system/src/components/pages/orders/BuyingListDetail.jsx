@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { useStock } from '../../../context/StockContext';
 import buyingListsService from '../../../services/buyingLists.service';
+import ProductSearchCombobox from '../../ui/ProductSearchCombobox';
 
 const STATUS_STYLES = {
   draft: 'bg-amber-500/20 text-amber-400',
@@ -751,18 +752,16 @@ export default function BuyingListDetail() {
           <div>
             <label className="block text-xs text-zinc-500 mb-2">Add product</label>
             <div className="flex flex-col sm:flex-row gap-2">
-              <select
+              <ProductSearchCombobox
+                className="flex-1"
+                products={data.products}
                 value={addSku}
-                onChange={e => setAddSku(e.target.value)}
-                className="flex-1 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500"
-              >
-                <option value="">Select product</option>
-                {data.products.map(p => (
-                  <option key={p.sku} value={p.sku}>{p.name} ({p.sku})</option>
-                ))}
-              </select>
+                onSelect={sku => setAddSku(sku)}
+                recentsKey="hatch-recent-products-buylist"
+              />
               <input
                 type="number"
+                inputMode="numeric"
                 min="1"
                 placeholder="Qty"
                 value={addQty}

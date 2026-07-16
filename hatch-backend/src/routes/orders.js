@@ -143,6 +143,11 @@ export const orderCreateSchema = z.object({
   supplierId: z.string().nullish(),
   deliveryMethod: z.string().nullish(),
   deliveryTo: z.string().nullish(),
+  // Destination: a warehouse id (receiving pre-selects it) or a free-text
+  // custom address. The PO form has always sent these; before manual-sql/025
+  // they were silently stripped here.
+  warehouseId: z.string().nullish(),
+  customAddress: z.string().nullish(),
   deliveryFee: z.coerce.number().min(0).nullish(),
   notes: z.string().nullish(),
   invoiceRef: z.string().nullish(),
@@ -160,6 +165,8 @@ router.post('/', asyncHandler(async (req, res) => {
     supplierId,
     deliveryMethod,
     deliveryTo,
+    warehouseId,
+    customAddress,
     deliveryFee,
     notes,
     invoiceRef,
@@ -178,6 +185,8 @@ router.post('/', asyncHandler(async (req, res) => {
       supplierId,
       deliveryMethod,
       deliveryTo,
+      warehouseId,
+      customAddress,
       deliveryFee,
       notes,
       invoiceRef,
@@ -214,6 +223,8 @@ export const orderUpdateSchema = z.object({
   supplierId: z.string().nullish(),
   deliveryMethod: z.string().nullish(),
   deliveryTo: z.string().nullish(),
+  warehouseId: z.string().nullish(),
+  customAddress: z.string().nullish(),
   deliveryFee: z.coerce.number().min(0).nullish(),
   notes: z.string().nullish(),
   invoiceRef: z.string().nullish(),
@@ -227,8 +238,10 @@ export const orderUpdateSchema = z.object({
 });
 
 router.put('/:id', asyncHandler(async (req, res) => {
-  const { supplierId, deliveryMethod, deliveryTo, deliveryFee, notes, invoiceRef, expectedDate, status, items } =
-    orderUpdateSchema.parse(req.body);
+  const {
+    supplierId, deliveryMethod, deliveryTo, warehouseId, customAddress,
+    deliveryFee, notes, invoiceRef, expectedDate, status, items,
+  } = orderUpdateSchema.parse(req.body);
 
   const existing = await prisma.order.findUnique({ where: { id: req.params.id } });
   if (!existing) {
@@ -272,6 +285,8 @@ router.put('/:id', asyncHandler(async (req, res) => {
         ...(supplierId !== undefined && { supplierId }),
         ...(deliveryMethod !== undefined && { deliveryMethod }),
         ...(deliveryTo !== undefined && { deliveryTo }),
+        ...(warehouseId !== undefined && { warehouseId }),
+        ...(customAddress !== undefined && { customAddress }),
         ...(deliveryFee !== undefined && { deliveryFee }),
         ...(notes !== undefined && { notes }),
         ...(invoiceRef !== undefined && { invoiceRef }),

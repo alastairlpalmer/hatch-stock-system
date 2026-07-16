@@ -62,6 +62,9 @@ export default function ReceiveStock() {
   // quantities on open so scanning counts up from 0).
   const [preScanSnapshot, setPreScanSnapshot] = useState(null);
   const [scansThisSession, setScansThisSession] = useState(0);
+  // SKUs actually scanned this session — lines never scanned get their
+  // pre-scan quantities back on close instead of staying zeroed.
+  const scannedSkusRef = useRef(new Set());
 
   // Receipt History — loaded from the API when the tab is opened
   const [receipts, setReceipts] = useState([]);
@@ -181,14 +184,15 @@ export default function ReceiveStock() {
 
   // Open the scanner against the current order. Quantities are reset to 0
   // so the user counts each item by scanning. We snapshot first so the
-  // close handler can restore the previous (pre-fill) state if no scans
-  // happened — which happens when the user taps Scan by mistake.
+  // close handler can restore pre-fill quantities for lines that never got
+  // scanned (all of them when Scan was tapped by mistake).
   const openScanForOrder = () => {
     if (!selectedOrder) return;
     // Must run inside the synchronous user-gesture call stack — iOS only
     // permits AudioContext.resume() from within a tap handler, not from
     // useEffect that runs after the render commits.
     unlockAudio();
+    scannedSkusRef.current = new Set();
     setPreScanSnapshot(receivedItems);
     setReceivedItems(prev => {
       const next = {};
@@ -203,11 +207,22 @@ export default function ReceiveStock() {
 
   const closeScanner = () => {
     setScannerOpen(false);
-    // If the user opened the scanner but didn't actually scan anything,
-    // restore their previous quantities so we don't silently zero a PO
-    // that was about to be confirmed manually.
-    if (scansThisSession === 0 && preScanSnapshot) {
-      setReceivedItems(preScanSnapshot);
+    if (preScanSnapshot) {
+      if (scansThisSession === 0) {
+        // Nothing scanned (Scan tapped by mistake) — full restore.
+        receivedItemsRef.current = preScanSnapshot;
+        setReceivedItems(preScanSnapshot);
+      } else {
+        // Partial scan: keep the scanned counts, but restore every line the
+        // scanner never touched. Before this merge those lines stayed at 0,
+        // silently turning a full delivery into a short receipt.
+        const merged = { ...receivedItemsRef.current };
+        Object.keys(preScanSnapshot).forEach(sku => {
+          if (!scannedSkusRef.current.has(sku)) merged[sku] = preScanSnapshot[sku];
+        });
+        receivedItemsRef.current = merged;
+        setReceivedItems(merged);
+      }
     }
     setPreScanSnapshot(null);
     setScansThisSession(0);
@@ -263,6 +278,7 @@ export default function ReceiveStock() {
       // quantity even before React commits the state update.
       receivedItemsRef.current = nextItems;
       setReceivedItems(nextItems);
+      scannedSkusRef.current.add(product.sku);
       setScansThisSession(n => n + 1);
       const atCap = appliedTotal >= remaining;
       flash?.({
