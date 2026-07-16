@@ -174,6 +174,71 @@ export function computeOrderQty({ netNeed, unitsPerBox = 1, projectedStock = 0, 
 }
 
 /**
+ * Split a parent-family net need into per-flavour boxes ("6 boxes of
+ * Barebells" → "3 choc, 2 caramel, 1 cookies"). Pure; exported for tests.
+ *
+ * Shares come from each flavour's long-window velocity (the 28-day window is
+ * the smoothing — short-window noise on tiny vending volumes would churn the
+ * split every week). Cold start (no member has any sales) falls back to equal
+ * shares. Box rounding is largest-remainder so the flavour box counts always
+ * cover the need with at most one surplus box: floor each flavour's ideal box
+ * count, then hand out one box at a time to the largest fractional remainder
+ * (ties: higher velocity, then sku) until the need is covered.
+ *
+ * minShareForBox: a flavour selling at least this share of the family is
+ * guaranteed one box (when the need is at least that box), even if rounding
+ * gave it zero — the per-flavour floor from the design review, so a popular
+ * flavour can't be starved by two dominant siblings. May overshoot the need
+ * by design; the surplus is visible in the suggested lines the operator edits.
+ *
+ * members: [{ sku, name, unitsPerBox, velocityLong, ... }] (extra fields kept)
+ * Returns members decorated with { sharePct, units, boxes }, velocity-desc.
+ */
+export function splitParentNeed({ netNeed, members = [], minShareForBox = 0.2 }) {
+  const boxOf = (m) => (m.unitsPerBox > 0 ? m.unitsPerBox : 1);
+  const totalVel = members.reduce((a, m) => a + (m.velocityLong || 0), 0);
+  const shareOf = (m) =>
+    totalVel > 0 ? (m.velocityLong || 0) / totalVel : members.length ? 1 / members.length : 0;
+
+  const out = members.map((m) => ({
+    ...m,
+    sharePct: round(shareOf(m) * 100),
+    units: 0,
+    boxes: 0,
+    _share: shareOf(m),
+    _rem: 0,
+  }));
+
+  if (netNeed > 0 && out.length > 0) {
+    for (const m of out) {
+      const idealBoxes = (netNeed * m._share) / boxOf(m);
+      m.boxes = Math.floor(idealBoxes);
+      m._rem = idealBoxes - m.boxes;
+    }
+    const allocated = () => out.reduce((a, m) => a + m.boxes * boxOf(m), 0);
+    const byRemainder = (a, b) =>
+      b._rem - a._rem
+      || (b.velocityLong || 0) - (a.velocityLong || 0)
+      || String(a.sku).localeCompare(String(b.sku));
+    while (allocated() < netNeed) {
+      const next = [...out].sort(byRemainder)[0];
+      next.boxes += 1;
+      next._rem -= 1; // deprioritise but keep eligible if still short
+    }
+    // Per-flavour floor: a meaningful seller never rounds to nothing.
+    for (const m of out) {
+      if (m.boxes === 0 && m._share >= minShareForBox && netNeed >= boxOf(m)) {
+        m.boxes = 1;
+      }
+    }
+    for (const m of out) m.units = m.boxes * boxOf(m);
+  }
+
+  out.sort((a, b) => (b.velocityLong || 0) - (a.velocityLong || 0) || String(a.sku).localeCompare(String(b.sku)));
+  return out.map(({ _share, _rem, ...m }) => m);
+}
+
+/**
  * Fill target for a planogram-scoped line: the diagram's summed slot capacity
  * when resolvable, else the config maxStock. Pure; exported for tests.
  */
@@ -200,10 +265,12 @@ async function buildLocationGrossLines(location, now, meta, planogram = null) {
   const assignedSkus = location.assignedItems.map((a) => a.sku);
   const scope = planogram?.scope ?? null;
 
-  const [stockRows, configRows, mealConfigRows, velocity] = await Promise.all([
+  const [stockRows, configRows, mealConfigRows, parentConfigRows, parents, velocity] = await Promise.all([
     prisma.locationStock.findMany({ where: { locationId: location.id } }),
     prisma.locationConfig.findMany({ where: { locationId: location.id } }),
     prisma.locationMealConfig.findMany({ where: { locationId: location.id } }),
+    prisma.locationParentConfig.findMany({ where: { locationId: location.id } }),
+    prisma.productParent.findMany({ select: { id: true, name: true } }),
     getLocationVelocity(location.id, now),
   ]);
 
@@ -215,13 +282,21 @@ async function buildLocationGrossLines(location, now, meta, planogram = null) {
   const stockMap = Object.fromEntries(stockRows.map((s) => [s.sku, s.quantity]));
   const configMap = Object.fromEntries(configRows.map((c) => [c.sku, c]));
   const mealConfigMap = Object.fromEntries(mealConfigRows.map((m) => [m.mealType, m]));
+  const parentConfigMap = Object.fromEntries(parentConfigRows.map((c) => [c.parentId, c]));
+  const parentNameOf = Object.fromEntries(parents.map((p) => [p.id, p.name]));
   const velOf = (sku) => velocity[sku] || { vShort: 0, vLong: 0, unitsShort: 0, unitsLong: 0 };
 
   const lines = [];
-  const excluded = { skus: [], mealTypes: [] };
+  const excluded = { skus: [], mealTypes: [], parents: [] };
 
-  // --- Non-fresh: per SKU ---
-  for (const p of products.filter((p) => !p.isFreshMeal)) {
+  // --- Non-fresh, no family: per SKU ---
+  // Partition rule: a flavour with a parent NEVER appears as its own SKU line —
+  // it is counted exactly once, inside its family group below. The rule is
+  // evaluated per line type globally but scope (which flavours are actually in
+  // THIS machine) is applied per location inside each branch, so the same
+  // flavour can be slotted at machine A and absent at machine B without ever
+  // being double-counted.
+  for (const p of products.filter((p) => !p.isFreshMeal && !p.parentId)) {
     if (scope && !scope.skuSet.has(p.sku)) {
       excluded.skus.push({ sku: p.sku, name: p.name });
       continue;
@@ -323,6 +398,100 @@ async function buildLocationGrossLines(location, now, meta, planogram = null) {
     });
   }
 
+  // --- Product families: one line per parent, flavours summed ---
+  // Members at THIS location are the flavours actually in the machine: with a
+  // planogram, only slotted flavours count (a slot targeting the sku today; a
+  // 'parent' slot type arrives with the planogram phase — scope.parentSet is
+  // checked defensively so it lights up when that lands). Config precedence:
+  // planogram capacity → location_parent_config → summed per-SKU config.
+  const familyGroups = {};
+  for (const p of products.filter((p) => !p.isFreshMeal && p.parentId)) {
+    (familyGroups[p.parentId] ||= []).push(p);
+  }
+
+  for (const [parentId, allMembers] of Object.entries(familyGroups)) {
+    const parentName = parentNameOf[parentId] || allMembers[0].name;
+    const members = scope
+      ? allMembers.filter((p) => scope.skuSet.has(p.sku) || scope.parentSet?.has(parentId))
+      : allMembers;
+    if (members.length === 0) {
+      excluded.parents.push({ parentId, name: parentName });
+      continue;
+    }
+
+    const machineStock = members.reduce((a, p) => a + (stockMap[p.sku] || 0), 0);
+    const vShort = members.reduce((a, p) => a + velOf(p.sku).vShort, 0);
+    const vLong = members.reduce((a, p) => a + velOf(p.sku).vLong, 0);
+    const unitsLong = members.reduce((a, p) => a + velOf(p.sku).unitsLong, 0);
+    const blended = blendVelocity(vShort, vLong);
+    const cfg = parentConfigMap[parentId] || {};
+
+    // Family fill cap: summed slot capacity of the in-scope flavours when every
+    // one resolves; any unknown slot makes the diagram cap unknowable and the
+    // chain falls through to configs.
+    let scopeCapacity = null;
+    if (scope) {
+      let total = 0;
+      let known = true;
+      for (const p of members) {
+        const c = scope.capacityByTarget.get(`sku:${p.sku}`)
+          ?? scope.capacityByTarget.get(`parent:${parentId}`);
+        if (c == null) { known = false; break; }
+        total += c;
+      }
+      if (known) scopeCapacity = total;
+    }
+    const summedCfg = (field) => {
+      const vals = members.map((p) => configMap[p.sku]?.[field]).filter((v) => v != null);
+      return vals.length ? vals.reduce((a, v) => a + v, 0) : null;
+    };
+    const groupMax = scopeCapacity ?? cfg.maxStock ?? summedCfg('maxStock');
+    const groupMin = cfg.minStock ?? summedCfg('minStock');
+
+    const sug = computeSuggestion({
+      machineStock,
+      velocityTd: blended,
+      sellingDaysBeforeRestock: meta.sellingDaysBeforeRestock,
+      coverTradingDays: meta.coverTradingDays,
+      minStock: groupMin,
+      maxStock: groupMax,
+    });
+    if (!sug || sug.grossNeed <= 0) continue;
+
+    const groupSupplierId =
+      members.find((p) => p.preferredSupplierId)?.preferredSupplierId ?? null;
+    const avgCost = members.length
+      ? members.reduce((a, p) => a + (p.unitCost || 0), 0) / members.length
+      : 0;
+
+    lines.push({
+      type: 'parentGroup',
+      parentId,
+      name: parentName,
+      category: members[0].category ?? 'Other',
+      preferredSupplierId: groupSupplierId,
+      machineStock,
+      minStock: groupMin,
+      maxStock: groupMax,
+      unitsPerBox: 1, // per-flavour boxes come from the split in finalizeLines
+      unitCost: round(avgCost),
+      vShort,
+      vLong,
+      blendedVelocity: blended,
+      salesSample: unitsLong,
+      ...sug,
+      members: members.map((p) => ({
+        sku: p.sku,
+        name: p.name,
+        unitsPerBox: p.unitsPerBox || 1,
+        unitCost: p.unitCost || 0,
+        preferredSupplierId: p.preferredSupplierId ?? null,
+        currentStock: stockMap[p.sku] || 0,
+        velocityLong: velOf(p.sku).vLong, // raw
+      })),
+    });
+  }
+
   return { lines, excluded };
 }
 
@@ -337,7 +506,9 @@ function mergeLines(perLocationResults) {
 
   for (const { location, lines } of perLocationResults) {
     for (const s of lines) {
-      const key = s.type === 'freshMealGroup' ? `frive:${s.mealType}` : `sku:${s.sku}`;
+      const key = s.type === 'freshMealGroup' ? `frive:${s.mealType}`
+        : s.type === 'parentGroup' ? `parent:${s.parentId}`
+        : `sku:${s.sku}`;
       let line = merged.get(key);
 
       if (!line) {
@@ -345,8 +516,9 @@ function mergeLines(perLocationResults) {
         line = {
           id: key,
           type: s.type,
-          sku: s.sku,           // undefined for a Frive group
-          mealType: s.mealType, // undefined for a plain product
+          sku: s.sku,           // undefined for any group line
+          mealType: s.mealType, // undefined except Frive groups
+          parentId: s.parentId, // undefined except family groups
           isFreshMeal: s.type === 'freshMealGroup',
           name: s.name,
           category: s.category ?? (s.type === 'freshMealGroup' ? 'Fresh Meal' : 'Other'),
@@ -377,13 +549,16 @@ function mergeLines(perLocationResults) {
       else line.maxStock += s.maxStock;
       if (s.priority === 'critical') line.priority = 'critical';
 
-      if (s.type === 'freshMealGroup') {
+      if (s.type === 'freshMealGroup' || s.type === 'parentGroup') {
         for (const m of s.members || []) {
           line._memberSkus.add(m.sku);
           const mv = (line._memberVel[m.sku] ||= {
             sku: m.sku,
             name: m.name,
             preferredSupplierId: m.preferredSupplierId ?? null,
+            // Family members carry their own box size + cost for the split.
+            unitsPerBox: m.unitsPerBox || 1,
+            unitCost: m.unitCost || 0,
             velocityLong: 0, // raw accumulator
           });
           mv.velocityLong += m.velocityLong || 0;
@@ -422,8 +597,9 @@ function mergeLines(perLocationResults) {
 async function finalizeLines(mergedLines, supplierNameOf) {
   const skus = new Set();
   for (const line of mergedLines) {
-    if (line.type === 'freshMealGroup') line._memberSkus.forEach((s) => skus.add(s));
-    else skus.add(line.sku);
+    if (line.type === 'freshMealGroup' || line.type === 'parentGroup') {
+      line._memberSkus.forEach((s) => skus.add(s));
+    } else skus.add(line.sku);
   }
   const skuList = [...skus];
 
@@ -453,18 +629,45 @@ async function finalizeLines(mergedLines, supplierNameOf) {
       _velocity, _memberSkus, _memberVel, maxStockKnown, maxStock, ...rest
     } = line;
 
-    const memberSkus = line.type === 'freshMealGroup' ? [..._memberSkus] : [line.sku];
+    const isGroup = line.type === 'freshMealGroup' || line.type === 'parentGroup';
+    const memberSkus = isGroup ? [..._memberSkus] : [line.sku];
     const warehouseStock = memberSkus.reduce((a, s) => a + (whMap[s] || 0), 0);
     const pendingPOQty = memberSkus.reduce((a, s) => a + (pendMap[s] || 0), 0);
     const netNeed = computeNetNeed(line.grossNeed, warehouseStock, pendingPOQty);
-    const orderQty = computeOrderQty({
-      netNeed,
-      unitsPerBox: line.unitsPerBox,
-      projectedStock: line.projectedStock,
-      maxStock: maxStockKnown ? maxStock : null,
-    });
-    const box = line.unitsPerBox > 0 ? line.unitsPerBox : 1;
-    const boxes = Math.ceil(orderQty / box);
+
+    let orderQty;
+    let boxes;
+    let members;
+    if (line.type === 'parentGroup') {
+      // Family lines: cap the need at machine capacity like computeOrderQty
+      // does, then split into per-flavour boxes by sell rate. The parent line's
+      // orderQty/boxes are the SUMS of the flavour lines the PO will carry.
+      const cappedNeed = maxStockKnown
+        ? Math.min(netNeed, Math.max(0, maxStock - line.projectedStock))
+        : netNeed;
+      members = splitParentNeed({
+        netNeed: cappedNeed,
+        members: Object.values(_memberVel).map((m) => ({
+          ...m,
+          velocityLong: round(m.velocityLong),
+          warehouseStock: whMap[m.sku] || 0,
+        })),
+      });
+      orderQty = members.reduce((a, m) => a + m.units, 0);
+      boxes = members.reduce((a, m) => a + m.boxes, 0);
+    } else {
+      orderQty = computeOrderQty({
+        netNeed,
+        unitsPerBox: line.unitsPerBox,
+        projectedStock: line.projectedStock,
+        maxStock: maxStockKnown ? maxStock : null,
+      });
+      const box = line.unitsPerBox > 0 ? line.unitsPerBox : 1;
+      boxes = Math.ceil(orderQty / box);
+      members = line.type === 'freshMealGroup'
+        ? Object.values(_memberVel).map((m) => ({ ...m, velocityLong: round(m.velocityLong) }))
+        : undefined;
+    }
     const blended = round(_velocity);
 
     return {
@@ -485,9 +688,7 @@ async function finalizeLines(mergedLines, supplierNameOf) {
       suggestedQty: netNeed, // legacy alias (pre-rounding quantity)
       blendedVelocity: blended, // units per TRADING day
       daysOfCover: _velocity > 0 ? round(line.machineStock / _velocity) : null,
-      members: line.type === 'freshMealGroup'
-        ? Object.values(_memberVel).map((m) => ({ ...m, velocityLong: round(m.velocityLong) }))
-        : undefined,
+      members,
     };
   });
 }
@@ -502,6 +703,7 @@ async function finalizeLines(mergedLines, supplierNameOf) {
 export function mergeNotOnPlanogram(perLocation) {
   const skuMap = new Map();
   const mealMap = new Map();
+  const parentMap = new Map();
   for (const loc of perLocation || []) {
     if (!loc.applied || !loc.excluded) continue;
     for (const { sku, name } of loc.excluded.skus || []) {
@@ -514,8 +716,17 @@ export function mergeNotOnPlanogram(perLocation) {
       entry.locations.push(loc.locationName);
       mealMap.set(mealType, entry);
     }
+    for (const { parentId, name } of loc.excluded.parents || []) {
+      const entry = parentMap.get(parentId) || { parentId, name, locations: [] };
+      entry.locations.push(loc.locationName);
+      parentMap.set(parentId, entry);
+    }
   }
-  return { skus: [...skuMap.values()], mealTypes: [...mealMap.values()] };
+  return {
+    skus: [...skuMap.values()],
+    mealTypes: [...mealMap.values()],
+    parents: [...parentMap.values()],
+  };
 }
 
 /**

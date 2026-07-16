@@ -6,6 +6,7 @@ import {
   computeOrderQty,
   effectiveMaxStock,
   mergeNotOnPlanogram,
+  splitParentNeed,
 } from './order-suggestions.js';
 import { buildPlanogramScope } from './planogram-layout.js';
 
@@ -225,10 +226,107 @@ describe('mergeNotOnPlanogram — deduped warning list across locations', () => 
       { sku: 'JUICE', name: 'Ginger Shot', locations: ['Office B'] },
     ]);
     expect(merged.mealTypes).toEqual([{ mealType: 'Meat', locations: ['Office A'] }]);
+    expect(merged.parents).toEqual([]);
+  });
+
+  it('merges excluded product families', () => {
+    const merged = mergeNotOnPlanogram([
+      {
+        locationName: 'Office A', applied: true,
+        excluded: { skus: [], mealTypes: [], parents: [{ parentId: 'p1', name: 'Barebells' }] },
+      },
+      {
+        locationName: 'Office B', applied: true,
+        excluded: { skus: [], mealTypes: [], parents: [{ parentId: 'p1', name: 'Barebells' }] },
+      },
+    ]);
+    expect(merged.parents).toEqual([
+      { parentId: 'p1', name: 'Barebells', locations: ['Office A', 'Office B'] },
+    ]);
   });
 
   it('handles empty/missing input', () => {
-    expect(mergeNotOnPlanogram([])).toEqual({ skus: [], mealTypes: [] });
-    expect(mergeNotOnPlanogram(undefined)).toEqual({ skus: [], mealTypes: [] });
+    expect(mergeNotOnPlanogram([])).toEqual({ skus: [], mealTypes: [], parents: [] });
+    expect(mergeNotOnPlanogram(undefined)).toEqual({ skus: [], mealTypes: [], parents: [] });
+  });
+});
+
+describe('splitParentNeed', () => {
+  const members = [
+    { sku: 'BB-CHOC', name: 'Choc', unitsPerBox: 12, velocityLong: 6 },
+    { sku: 'BB-CARA', name: 'Caramel', unitsPerBox: 12, velocityLong: 3 },
+    { sku: 'BB-COOK', name: 'Cookies', unitsPerBox: 12, velocityLong: 1 },
+  ];
+
+  it('splits by velocity share and always covers the need', () => {
+    const out = splitParentNeed({ netNeed: 72, members }); // 6 boxes of 12
+    const bySku = Object.fromEntries(out.map((m) => [m.sku, m]));
+    // shares 60/30/10 → ideal boxes 3.6/1.8/0.6 → floors 3/1/0, remainders hand
+    // out the last two boxes to choc (.6) and caramel (.8)... caramel first.
+    expect(bySku['BB-CHOC'].boxes + bySku['BB-CARA'].boxes + bySku['BB-COOK'].boxes).toBe(6);
+    expect(out.reduce((a, m) => a + m.units, 0)).toBeGreaterThanOrEqual(72);
+    expect(bySku['BB-CHOC'].boxes).toBeGreaterThanOrEqual(bySku['BB-CARA'].boxes);
+    expect(bySku['BB-CHOC'].sharePct).toBe(60);
+  });
+
+  it('is deterministic and ordered by velocity', () => {
+    const a = splitParentNeed({ netNeed: 50, members });
+    const b = splitParentNeed({ netNeed: 50, members });
+    expect(a).toEqual(b);
+    expect(a.map((m) => m.sku)).toEqual(['BB-CHOC', 'BB-CARA', 'BB-COOK']);
+  });
+
+  it('handles mixed box sizes without stranding the need', () => {
+    const mixed = [
+      { sku: 'ED-MOCHA', unitsPerBox: 6, velocityLong: 2 },
+      { sku: 'ED-LATTE', unitsPerBox: 10, velocityLong: 2 },
+    ];
+    const out = splitParentNeed({ netNeed: 20, members: mixed });
+    expect(out.reduce((a, m) => a + m.units, 0)).toBeGreaterThanOrEqual(20);
+    // overshoot bounded: never more than the largest box beyond the need + floor boxes
+    expect(out.reduce((a, m) => a + m.units, 0)).toBeLessThanOrEqual(20 + 10);
+  });
+
+  it('equal-shares a cold start (no sales history at all)', () => {
+    const cold = members.map((m) => ({ ...m, velocityLong: 0 }));
+    const out = splitParentNeed({ netNeed: 36, members: cold });
+    expect(out.every((m) => m.boxes === 1)).toBe(true); // 3 boxes of 12 = 36
+    expect(out[0].sharePct).toBeCloseTo(33.33);
+  });
+
+  it('floors a meaningful seller that rounding starved to zero', () => {
+    // Cookies at exactly 20% share; small need rounds it to zero boxes.
+    const m2 = [
+      { sku: 'A', unitsPerBox: 12, velocityLong: 8 },
+      { sku: 'B', unitsPerBox: 12, velocityLong: 2 }, // 20% share
+    ];
+    const out = splitParentNeed({ netNeed: 12, members: m2 });
+    const b = out.find((m) => m.sku === 'B');
+    expect(b.boxes).toBe(1); // floored up, even though rounding gave it 0
+    expect(out.find((m) => m.sku === 'A').boxes).toBe(1);
+  });
+
+  it('does not floor a negligible seller and ignores need below one box', () => {
+    const m2 = [
+      { sku: 'A', unitsPerBox: 12, velocityLong: 9.5 },
+      { sku: 'B', unitsPerBox: 12, velocityLong: 0.5 }, // 5% share — no floor
+    ];
+    const out = splitParentNeed({ netNeed: 12, members: m2 });
+    expect(out.find((m) => m.sku === 'B').boxes).toBe(0);
+    // need smaller than the flavour's box: floor must not trigger either
+    const tiny = splitParentNeed({ netNeed: 6, members: m2 });
+    expect(tiny.reduce((a, m) => a + m.units, 0)).toBeGreaterThanOrEqual(6);
+  });
+
+  it('returns zeroed members for zero/negative need and empty members safely', () => {
+    const out = splitParentNeed({ netNeed: 0, members });
+    expect(out.every((m) => m.units === 0 && m.boxes === 0)).toBe(true);
+    expect(splitParentNeed({ netNeed: 10, members: [] })).toEqual([]);
+  });
+
+  it('treats missing unitsPerBox as 1', () => {
+    const out = splitParentNeed({ netNeed: 5, members: [{ sku: 'X', velocityLong: 1 }] });
+    expect(out[0].units).toBe(5);
+    expect(out[0].boxes).toBe(5);
   });
 });

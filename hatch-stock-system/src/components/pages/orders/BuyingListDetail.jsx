@@ -602,6 +602,11 @@ export default function BuyingListDetail() {
                               rotating menu
                             </span>
                           )}
+                          {item.parentName && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 ml-2" title="Flavour line from a product family — split suggested by sell rate">
+                              {item.parentName}
+                            </span>
+                          )}
                         </div>
                         {isDraft && (
                           <button
@@ -678,6 +683,11 @@ export default function BuyingListDetail() {
                             {!item.sku && item.isFreshMeal && (
                               <span className="text-[10px] px-1.5 py-0.5 rounded bg-teal-500/15 text-teal-300 ml-2" title="Ordered at meal-type level — the weekly menu rotates; actual flavours are allocated at receiving">
                                 rotating menu
+                              </span>
+                            )}
+                            {item.parentName && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 ml-2" title="Flavour line from a product family — split suggested by sell rate">
+                                {item.parentName}
                               </span>
                             )}
                           </td>
