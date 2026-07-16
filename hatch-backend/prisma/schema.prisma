@@ -30,10 +30,17 @@ model Product {
   isFreshMeal         Boolean  @default(false) @map("is_fresh_meal")
   mealType            String?  @map("meal_type")
   mealTypeConfirmed   Boolean  @default(false) @map("meal_type_confirmed")
+  // Generic parent grouping for stable flavour families (e.g. "Barebells").
+  // Unlike fresh meals, flavours are ordered as real per-SKU PO lines — the
+  // parent is a pure grouping row. A product is never in both systems
+  // (enforced in the product-parents route). Partial index on parent_id lives
+  // in manual SQL. See prisma/manual-sql/026_product_parents.sql.
+  parentId            String?  @map("parent_id")
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
 
   // Relations
+  parent            ProductParent?   @relation(fields: [parentId], references: [id], onDelete: SetNull)
   preferredSupplier Supplier?        @relation(fields: [preferredSupplierId], references: [id])
   warehouseStock    WarehouseStock[]
   locationStock     LocationStock[]
@@ -99,6 +106,7 @@ model Location {
   stock              LocationStock[]
   configs            LocationConfig[]
   mealConfigs        LocationMealConfig[]
+  parentConfigs      LocationParentConfig[]
   restocks           RestockRecord[]
   stockChecks        StockCheck[]
   assignedItems      LocationAssignment[]
@@ -185,6 +193,40 @@ model MealType {
   createdAt DateTime @default(now()) @map("created_at")
 
   @@map("meal_types")
+}
+
+// Parent product for a stable flavour family ("Barebells", "Estate Dairy").
+// Pure grouping row — never stocked, sold, or ordered; flavours are ordinary
+// products linked via Product.parentId (FK by id, so renames need no cascade —
+// deliberately unlike the fresh-meal name-string link).
+// See prisma/manual-sql/026_product_parents.sql.
+model ProductParent {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  products        Product[]
+  locationConfigs LocationParentConfig[]
+
+  @@map("product_parents")
+}
+
+// Per-(location, parent) capacity for flavour-family group rows — mirrors
+// LocationMealConfig. Current stock for a family is the SUM of member SKUs'
+// location_stock; only min/max capacity lives here. Consumed by ordering and
+// picking in later phases.
+model LocationParentConfig {
+  locationId String @map("location_id")
+  parentId   String @map("parent_id")
+  minStock   Int?   @map("min_stock")
+  maxStock   Int?   @map("max_stock")
+
+  location Location      @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  parent   ProductParent @relation(fields: [parentId], references: [id], onDelete: Cascade)
+
+  @@id([locationId, parentId])
+  @@map("location_parent_config")
 }
 
 // Per-(location, meal type) capacity for collapsed fresh-meal group rows.
