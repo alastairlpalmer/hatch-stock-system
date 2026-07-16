@@ -8,7 +8,8 @@ import {
   suppliersService,
   routesService,
   salesService,
-  mealTypesService
+  mealTypesService,
+  productParentsService
 } from '../services';
 import { useAuth } from './AuthContext';
 
@@ -27,6 +28,8 @@ const INITIAL_STATE = {
   locationConfig: {},  // { locationId: { sku: { minStock, maxStock } } }
   mealTypes: [],            // configurable fresh-meal buckets [{ id, name, sortOrder }]
   locationMealConfig: {},   // { locationId: { mealType: { minStock, maxStock } } }
+  productParents: [],       // product families [{ id, name, products: [{ sku, name, ... }] }]
+  locationParentConfig: {}, // { locationId: { parentId: { minStock, maxStock } } }
   stockBatches: [],
   removals: [],
   restockHistory: [],
@@ -75,7 +78,7 @@ export function StockProvider({ children }) {
   const initializeData = async () => {
     try {
       // Try to load from backend first
-      const [products, warehouses, locations, suppliers, routes, orders, sales, salesImports, warehouseStock, removals, stockBatches, mealTypes] = await Promise.all([
+      const [products, warehouses, locations, suppliers, routes, orders, sales, salesImports, warehouseStock, removals, stockBatches, mealTypes, productParents] = await Promise.all([
         productsService.getAll(),
         warehousesService.getAll(),
         locationsService.getAll(),
@@ -91,27 +94,32 @@ export function StockProvider({ children }) {
         inventoryService.getBatches(),
         // Configurable fresh-meal buckets (best-effort: tolerate older backends)
         mealTypesService.getAll().catch(() => []),
+        // Product families (best-effort, same idiom)
+        productParentsService.getAll().catch(() => []),
       ]);
 
       // Load location stock, config, and history for each location
       const locationStock = {};
       const locationConfig = {};
       const locationMealConfig = {};
+      const locationParentConfig = {};
       let allStockChecks = [];
       let allRestocks = [];
 
       await Promise.all(locations.map(async (loc) => {
         try {
-          const [stock, config, stockChecks, restocks, mealConfig] = await Promise.all([
+          const [stock, config, stockChecks, restocks, mealConfig, parentConfig] = await Promise.all([
             inventoryService.getLocationStock(loc.id),
             inventoryService.getLocationConfig(loc.id),
             inventoryService.getStockCheckHistory(loc.id),
             inventoryService.getRestockHistory(loc.id),
             mealTypesService.getLocationMealConfig(loc.id).catch(() => ({})),
+            productParentsService.getLocationParentConfig(loc.id).catch(() => ({})),
           ]);
           locationStock[loc.id] = stock;
           locationConfig[loc.id] = config;
           locationMealConfig[loc.id] = mealConfig;
+          locationParentConfig[loc.id] = parentConfig;
           // Add location info to history records for display
           allStockChecks = [...allStockChecks, ...stockChecks.map(sc => ({ ...sc, locationId: loc.id, locationName: loc.name }))];
           allRestocks = [...allRestocks, ...restocks.map(r => ({ ...r, locationId: loc.id, locationName: loc.name }))];
@@ -135,6 +143,8 @@ export function StockProvider({ children }) {
         locationConfig,
         mealTypes,
         locationMealConfig,
+        productParents,
+        locationParentConfig,
         removals,
         stockBatches,
         stockCheckHistory: allStockChecks,
@@ -587,6 +597,17 @@ export function StockProvider({ children }) {
       locationMealConfig: { ...prev.locationMealConfig, [locationId]: configData },
     }));
   }, [data, isOfflineMode, saveData]);
+
+  // Upsert per-location capacity for a product family (mirrors the meal-type
+  // config above; no offline branch — families are a connected-mode feature).
+  const updateProductParentConfig = useCallback(async (locationId, parentId, config) => {
+    await productParentsService.updateLocationParentConfig(locationId, parentId, config);
+    const configData = await productParentsService.getLocationParentConfig(locationId);
+    setData(prev => ({
+      ...prev,
+      locationParentConfig: { ...prev.locationParentConfig, [locationId]: configData },
+    }));
+  }, []);
 
   const addMealType = useCallback(async (body) => {
     const created = await mealTypesService.create(body);
@@ -1198,6 +1219,7 @@ export function StockProvider({ children }) {
     updateMealType,
     deleteMealType,
     updateProductMeal,
+    updateProductParentConfig,
 
     // Supplier operations
     addSupplier,

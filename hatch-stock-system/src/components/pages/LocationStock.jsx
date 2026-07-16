@@ -5,7 +5,7 @@ import { inventoryService } from '../../services/inventory.service';
 import PlanogramView from '../planogram/PlanogramView';
 
 export default function LocationStock() {
-  const { data, updateLocationStock, updateLocationConfig, updateLocationAssignedItems, updateMealTypeConfig, updateProductMeal } = useStock();
+  const { data, updateLocationStock, updateLocationConfig, updateLocationAssignedItems, updateMealTypeConfig, updateProductMeal, updateProductParentConfig } = useStock();
   const [selectedLocation, setSelectedLocation] = useState('');
   // 'list' = existing table; 'visual' = SVG fridge planogram
   const [view, setView] = useState('list');
@@ -204,13 +204,23 @@ export default function LocationStock() {
     });
   };
 
+  // Same, for a product family (Barebells etc.) — keyed by parentId.
+  const handleUpdateParentConfig = async (parentId, field, value) => {
+    const current = (data.locationParentConfig?.[selectedLocation] || {})[parentId] || {};
+    await updateProductParentConfig(selectedLocation, parentId, {
+      ...current,
+      [field]: parseInt(value) || 0,
+    });
+  };
+
   const products = getProductsForLocation();
   const unassignedProducts = getUnassignedProducts();
 
-  // Frive fresh meals collapse into meal-type group rows; everything else renders
-  // per-SKU as before.
+  // Frive fresh meals collapse into meal-type group rows; product-family
+  // flavours collapse into family rows; everything else renders per-SKU.
   const freshMeals = products.filter(p => p.isFreshMeal);
-  const regularProducts = products.filter(p => !p.isFreshMeal);
+  const parentedProducts = products.filter(p => !p.isFreshMeal && p.parentId);
+  const regularProducts = products.filter(p => !p.isFreshMeal && !p.parentId);
 
   // Regular products grouped by category (alphabetical, products alphabetical
   // within), matching the Stock Levels page layout
@@ -255,6 +265,28 @@ export default function LocationStock() {
       }));
   })();
 
+  // Product families collapse the same way. Reuses the meal-group row renderers
+  // (isFamily flags the differences: config keyed by parentId, no
+  // "unclassified" state). `mealType` carries the display name.
+  const parentConfig = data.locationParentConfig?.[selectedLocation] || {};
+  const familyGroups = (() => {
+    const byParent = {};
+    parentedProducts.forEach(p => {
+      (byParent[p.parentId] = byParent[p.parentId] || []).push(p);
+    });
+    const nameOf = new Map((data.productParents || []).map(pp => [pp.id, pp.name]));
+    return Object.entries(byParent)
+      .map(([parentId, items]) => ({
+        isFamily: true,
+        parentId,
+        mealType: nameOf.get(parentId) || 'Product family',
+        items: items.sort((x, y) => (x.name || x.sku).localeCompare(y.name || y.sku)),
+        totalQty: items.reduce((acc, p) => acc + getQty(p.sku), 0),
+        config: parentConfig[parentId] || {},
+      }))
+      .sort((a, b) => a.mealType.localeCompare(b.mealType));
+  })();
+
   // Gross margin from the VendLive-synced prices; null when either is missing
   const getMargin = (product) => {
     if (!product.salePrice || !product.unitCost) return null;
@@ -277,14 +309,15 @@ export default function LocationStock() {
     },
     { cost: 0, sale: 0, unpriced: 0 }
   );
-  // Low-stock: regular products counted per-SKU; each meal group counted once.
+  // Low-stock: regular products counted per-SKU; each meal group / family once.
   const lowStockCount =
     regularProducts.filter(p => {
       const config = locConfig[p.sku] || {};
       return config.minStock && getQty(p.sku) <= config.minStock;
     }).length +
-    mealGroups.filter(g => g.config.minStock && g.totalQty <= g.config.minStock).length;
-  const rowCount = regularProducts.length + mealGroups.length;
+    mealGroups.filter(g => g.config.minStock && g.totalQty <= g.config.minStock).length +
+    familyGroups.filter(g => g.config.minStock && g.totalQty <= g.config.minStock).length;
+  const rowCount = regularProducts.length + mealGroups.length + familyGroups.length;
 
   const hasAssignedItems = location?.assignedItems?.length > 0;
   // Mapped locations mirror their product list from the VendLive planogram on
@@ -428,20 +461,28 @@ export default function LocationStock() {
     );
   };
 
-  // One collapsed meal-type group row, plus member flavour rows when expanded.
+  // One collapsed group row (meal-type bucket OR product family — isFamily
+  // switches the config handler and drops the unclassified state), plus member
+  // flavour rows when expanded.
+  const groupExpandKey = (group) => (group.isFamily ? `fam:${group.parentId}` : group.mealType);
+  const groupConfigChange = (group, field, value) =>
+    group.isFamily
+      ? handleUpdateParentConfig(group.parentId, field, value)
+      : handleUpdateMealConfig(group.mealType, field, value);
+
   const renderMealGroup = (group) => {
-    const expanded = !!expandedGroups[group.mealType];
+    const expanded = !!expandedGroups[groupExpandKey(group)];
     const { status, color } = getGroupStockStatus(group.totalQty, group.config);
-    const unclassified = group.mealType === 'Unclassified';
+    const unclassified = !group.isFamily && group.mealType === 'Unclassified';
     // Restock planning aid: how many to load to reach the group's target (max).
     const toAdd = group.config.maxStock ? Math.max(0, group.config.maxStock - group.totalQty) : 0;
 
     return (
-      <React.Fragment key={`meal-${group.mealType}`}>
+      <React.Fragment key={`${group.isFamily ? 'fam' : 'meal'}-${group.mealType}`}>
         <tr className="border-b border-zinc-800/50 bg-teal-500/5 hover:bg-teal-500/10">
           <td className="px-4 py-3">
             <button
-              onClick={() => setExpandedGroups(prev => ({ ...prev, [group.mealType]: !expanded }))}
+              onClick={() => setExpandedGroups(prev => ({ ...prev, [groupExpandKey(group)]: !expanded }))}
               className="flex items-center gap-2 text-left"
             >
               <span className="text-zinc-500 text-xs w-3">{expanded ? '▾' : '▸'}</span>
@@ -457,7 +498,7 @@ export default function LocationStock() {
                 <input
                   type="number"
                   value={group.config.minStock || ''}
-                  onChange={e => handleUpdateMealConfig(group.mealType, 'minStock', e.target.value)}
+                  onChange={e => groupConfigChange(group, 'minStock', e.target.value)}
                   placeholder="0"
                   className="w-20 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm text-center focus:outline-none focus:border-emerald-500"
                 />
@@ -466,7 +507,7 @@ export default function LocationStock() {
                 <input
                   type="number"
                   value={group.config.maxStock || ''}
-                  onChange={e => handleUpdateMealConfig(group.mealType, 'maxStock', e.target.value)}
+                  onChange={e => groupConfigChange(group, 'maxStock', e.target.value)}
                   placeholder="0"
                   className="w-20 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm text-center focus:outline-none focus:border-emerald-500"
                 />
@@ -504,7 +545,9 @@ export default function LocationStock() {
         </tr>
         {expanded && (
           group.items.length === 0 ? (
-            <tr><td colSpan={colSpan} className="px-4 py-3 pl-10 text-zinc-600 text-xs">No flavours stocked this week.</td></tr>
+            <tr><td colSpan={colSpan} className="px-4 py-3 pl-10 text-zinc-600 text-xs">
+              {group.isFamily ? 'No flavours assigned here.' : 'No flavours stocked this week.'}
+            </td></tr>
           ) : (
             group.items.map(product => renderProductRow(product, { indent: true }))
           )
@@ -639,16 +682,16 @@ export default function LocationStock() {
   // Mobile (below md) card for one collapsed meal-type group, plus member
   // flavour cards when expanded. Same handlers as renderMealGroup.
   const renderMealGroupCard = (group) => {
-    const expanded = !!expandedGroups[group.mealType];
+    const expanded = !!expandedGroups[groupExpandKey(group)];
     const { status, color } = getGroupStockStatus(group.totalQty, group.config);
-    const unclassified = group.mealType === 'Unclassified';
+    const unclassified = !group.isFamily && group.mealType === 'Unclassified';
     const toAdd = group.config.maxStock ? Math.max(0, group.config.maxStock - group.totalQty) : 0;
 
     return (
-      <React.Fragment key={`meal-${group.mealType}`}>
+      <React.Fragment key={`${group.isFamily ? 'fam' : 'meal'}-${group.mealType}`}>
         <div className="border-b border-zinc-800/50 bg-teal-500/5 px-4 py-3 space-y-3">
           <button
-            onClick={() => setExpandedGroups(prev => ({ ...prev, [group.mealType]: !expanded }))}
+            onClick={() => setExpandedGroups(prev => ({ ...prev, [groupExpandKey(group)]: !expanded }))}
             className="flex items-center justify-between gap-2 w-full min-h-[2.5rem] text-left"
           >
             <span className="flex items-center gap-2 min-w-0">
@@ -689,7 +732,7 @@ export default function LocationStock() {
                   type="number"
                   inputMode="numeric"
                   value={group.config.minStock || ''}
-                  onChange={e => handleUpdateMealConfig(group.mealType, 'minStock', e.target.value)}
+                  onChange={e => groupConfigChange(group, 'minStock', e.target.value)}
                   placeholder="0"
                   className="mt-1 w-full h-10 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm text-center focus:outline-none focus:border-emerald-500"
                 />
@@ -700,7 +743,7 @@ export default function LocationStock() {
                   type="number"
                   inputMode="numeric"
                   value={group.config.maxStock || ''}
-                  onChange={e => handleUpdateMealConfig(group.mealType, 'maxStock', e.target.value)}
+                  onChange={e => groupConfigChange(group, 'maxStock', e.target.value)}
                   placeholder="0"
                   className="mt-1 w-full h-10 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm text-center focus:outline-none focus:border-emerald-500"
                 />
@@ -710,7 +753,9 @@ export default function LocationStock() {
         </div>
         {expanded && (
           group.items.length === 0 ? (
-            <div className="border-b border-zinc-800/50 px-4 py-3 pl-8 text-zinc-600 text-xs">No flavours stocked this week.</div>
+            <div className="border-b border-zinc-800/50 px-4 py-3 pl-8 text-zinc-600 text-xs">
+              {group.isFamily ? 'No flavours assigned here.' : 'No flavours stocked this week.'}
+            </div>
           ) : (
             group.items.map(product => renderProductCard(product, { indent: true }))
           )
@@ -852,6 +897,12 @@ export default function LocationStock() {
               getGroupStockStatus={getGroupStockStatus}
               mealGroups={mealGroups}
               mealTypes={data.mealTypes}
+              parentGroups={familyGroups.map(g => ({
+                parentId: g.parentId,
+                name: g.mealType,
+                totalQty: g.totalQty,
+                config: g.config,
+              }))}
               products={data.products}
               location={location}
             />
@@ -966,6 +1017,21 @@ export default function LocationStock() {
                       </React.Fragment>
                     )}
 
+                    {/* Product families — collapsed into one row per family */}
+                    {familyGroups.length > 0 && (
+                      <React.Fragment key="product-families">
+                        <tr className="bg-teal-900/40">
+                          <td colSpan={colSpan} className="px-4 py-2">
+                            <span className="text-teal-300 font-medium text-xs uppercase tracking-wide">Product Families</span>
+                            <span className="text-zinc-500 text-xs ml-3">
+                              {familyGroups.length} famil{familyGroups.length === 1 ? 'y' : 'ies'} · {familyGroups.reduce((acc, g) => acc + g.totalQty, 0)} units here · min/max set per family
+                            </span>
+                          </td>
+                        </tr>
+                        {familyGroups.map(group => renderMealGroup(group))}
+                      </React.Fragment>
+                    )}
+
                     {/* Everything else — per-SKU, grouped by category */}
                     {groupedProducts.map(group => (
                       <React.Fragment key={group.category}>
@@ -1004,6 +1070,19 @@ export default function LocationStock() {
                         </span>
                       </div>
                       {mealGroups.map(group => renderMealGroupCard(group))}
+                    </React.Fragment>
+                  )}
+
+                  {/* Product families — collapsed into one card per family */}
+                  {familyGroups.length > 0 && (
+                    <React.Fragment key="product-families-mobile">
+                      <div className="bg-teal-900/40 px-4 py-2">
+                        <span className="text-teal-300 font-medium text-xs uppercase tracking-wide">Product Families</span>
+                        <span className="text-zinc-500 text-xs ml-3">
+                          {familyGroups.length} famil{familyGroups.length === 1 ? 'y' : 'ies'} · {familyGroups.reduce((acc, g) => acc + g.totalQty, 0)} units here
+                        </span>
+                      </div>
+                      {familyGroups.map(group => renderMealGroupCard(group))}
                     </React.Fragment>
                   )}
 

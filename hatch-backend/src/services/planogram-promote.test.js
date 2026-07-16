@@ -40,7 +40,7 @@ describe('buildPromotionPlan', () => {
     expect(plan.errors).toEqual([]);
     expect(plan.toCloseIds.sort()).toEqual(['c1', 'c3']);
     expect(plan.toCreate).toEqual([
-      { shelf: 1, position: 2, slotCode: '1C', targetType: 'sku', sku: 'COKE', mealType: null, capacity: null },
+      { shelf: 1, position: 2, slotCode: '1C', targetType: 'sku', sku: 'COKE', mealType: null, parentId: null, capacity: null },
     ]);
   });
 

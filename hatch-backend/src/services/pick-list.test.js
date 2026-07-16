@@ -314,6 +314,101 @@ describe('computeLocationNeeds', () => {
       stockOf: () => 0,
     });
     expect(needs).toEqual([]);
-    expect(notOnPlanogram).toEqual({ skus: ['COKE'], mealTypes: ['Meat'] });
+    expect(notOnPlanogram).toEqual({ skus: ['COKE'], mealTypes: ['Meat'], parents: [] });
+  });
+});
+
+describe('computeLocationNeeds — product families', () => {
+  const base = {
+    freshSkus: new Set(),
+    membersByMealType: {},
+    membersByParent: {
+      p1: [{ sku: 'BB-CHOC', name: 'Choc' }, { sku: 'BB-CARA', name: 'Caramel' }],
+    },
+    availableOf: { 'BB-CHOC': 100, 'BB-CARA': 100 },
+    earliestExpiryOf: () => null,
+  };
+
+  it('parent slot fills the family split by warehouse availability', () => {
+    const scope = {
+      skuSet: new Set(),
+      mealTypeSet: new Set(),
+      parentSet: new Set(['p1']),
+      capacityByTarget: new Map([['parent:p1', 12]]),
+    };
+    const { needs } = computeLocationNeeds({
+      ...base,
+      scope,
+      configs: [],
+      mealConfigs: [],
+      parentConfigs: [],
+      stockOf: (sku) => (sku === 'BB-CHOC' ? 2 : 0), // family stock 2, need 10
+    });
+    const total = needs.reduce((a, n) => a + n.qty, 0);
+    expect(total).toBe(10);
+    expect(needs.every((n) => ['BB-CHOC', 'BB-CARA'].includes(n.sku))).toBe(true);
+  });
+
+  it('a member with its OWN sku slot fills per-slot and leaves the family split', () => {
+    const scope = {
+      skuSet: new Set(['BB-CHOC']),
+      mealTypeSet: new Set(),
+      parentSet: new Set(['p1']),
+      capacityByTarget: new Map([['sku:BB-CHOC', 8], ['parent:p1', 6]]),
+    };
+    const { needs } = computeLocationNeeds({
+      ...base,
+      scope,
+      configs: [],
+      mealConfigs: [],
+      parentConfigs: [],
+      stockOf: () => 0,
+    });
+    const bySku = Object.fromEntries(needs.map((n) => [n.sku, n.qty]));
+    expect(bySku['BB-CHOC']).toBe(8); // own slot, exact
+    expect(bySku['BB-CARA']).toBe(6); // family slot entirely on the other flavour
+  });
+
+  it('legacy path (no diagram): parent config splits across members without their own config', () => {
+    const { needs, notOnPlanogram } = computeLocationNeeds({
+      ...base,
+      scope: null,
+      configs: [{ sku: 'BB-CHOC', maxStock: 5 }],
+      mealConfigs: [],
+      parentConfigs: [{ parentId: 'p1', maxStock: 10 }],
+      stockOf: () => 0,
+    });
+    const bySku = Object.fromEntries(needs.map((n) => [n.sku, n.qty]));
+    expect(bySku['BB-CHOC']).toBe(5); // its own config
+    expect(bySku['BB-CARA']).toBe(10); // full family target on the unconfigured member
+    expect(notOnPlanogram).toBeNull();
+  });
+
+  it('flags a configured family with no coverage on the diagram', () => {
+    const scope = {
+      skuSet: new Set(),
+      mealTypeSet: new Set(),
+      parentSet: new Set(),
+      capacityByTarget: new Map(),
+    };
+    const { notOnPlanogram } = computeLocationNeeds({
+      ...base,
+      scope,
+      configs: [],
+      mealConfigs: [],
+      parentConfigs: [{ parentId: 'p1', maxStock: 10 }],
+      stockOf: () => 0,
+    });
+    expect(notOnPlanogram.parents).toEqual(['p1']);
+    // covered by a member sku slot -> not flagged
+    const covered = computeLocationNeeds({
+      ...base,
+      scope: { ...scope, skuSet: new Set(['BB-CHOC']), capacityByTarget: new Map([['sku:BB-CHOC', 8]]) },
+      configs: [],
+      mealConfigs: [],
+      parentConfigs: [{ parentId: 'p1', maxStock: 10 }],
+      stockOf: () => 0,
+    });
+    expect(covered.notOnPlanogram.parents).toEqual([]);
   });
 });

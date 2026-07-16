@@ -43,6 +43,8 @@ export default function useNeedsAttention() {
   // Product groups (fail-soft like the rest): used to spot new flavours that
   // name-match a group but were never assigned to it.
   const [productParents, setProductParents] = useState([]);
+  // Flavour starvation: family stock looks fine but the best seller is at 0.
+  const [starvation, setStarvation] = useState([]);
   const { lists: pickLists, loading: pickListsLoading } = usePickLists({ limit: 20 });
 
   useEffect(() => {
@@ -60,6 +62,9 @@ export default function useNeedsAttention() {
       .catch(() => {});
     productParentsService.getAll()
       .then((res) => { if (!cancelled) setProductParents(Array.isArray(res) ? res : []); })
+      .catch(() => {});
+    productParentsService.getStarvation()
+      .then((res) => { if (!cancelled) setStarvation(Array.isArray(res?.items) ? res.items : []); })
       .catch(() => {});
     return () => { cancelled = true; };
   }, []);
@@ -246,6 +251,20 @@ export default function useNeedsAttention() {
       }
     }
 
+    // 11b. A family's total stock hides a starved best-seller: the machine
+    // shows "Barebells: 8" while chocolate — the flavour people actually buy —
+    // sits at zero. Parent-level min/max can't catch this, and the missing
+    // sales also skew the data behind the order split, so it self-reinforces.
+    if (starvation.length > 0) {
+      out.push({
+        id: 'family-flavour-starved',
+        severity: 'amber',
+        title: `${starvation.length} machine${starvation.length === 1 ? '' : 's'} stock a family but not its best-selling flavour`,
+        detail: starvation.slice(0, 2).map((s) => `${s.flavourName} at ${s.locationName}`).join(' · '),
+        to: '/locations',
+      });
+    }
+
     // 12. Products that look like they belong to a product group but aren't
     // assigned — the usual cause is a new flavour auto-created by VendLive
     // sync, which arrives with no group and silently misses family-level
@@ -271,7 +290,7 @@ export default function useNeedsAttention() {
 
     // red first, catalogue order within severity (push order already encodes rank).
     return [...out.filter((i) => i.severity === 'red'), ...out.filter((i) => i.severity === 'amber')];
-  }, [data, health, expiryRows, pickLists, productParents]);
+  }, [data, health, expiryRows, pickLists, productParents, starvation]);
 
   // A dismissal hides an item only while its SIGNATURE (rendered title, which
   // carries the counts) still matches and it is under 7 days old — a changed

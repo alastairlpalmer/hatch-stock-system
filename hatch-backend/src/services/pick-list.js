@@ -133,24 +133,35 @@ export function splitGroupNeed(need, members) {
  * Without a scope (no diagram) the legacy fill-to-config-max behaviour is
  * unchanged and notOnPlanogram is null.
  *
+ * Product families ("Barebells" + flavours): a slot targeting the family fills
+ * it with whatever flavours the warehouse has (same availability/FEFO split as
+ * meal groups). A flavour with its OWN sku slot at this location fills that
+ * slot per-SKU and is left out of the family split — slot-level truth wins
+ * over aggregation for physical machine fill (deliberately different from the
+ * ordering engine, which always aggregates for purchasing).
+ *
  * @param {Object} p
  * @param {Object|null} p.scope - buildPlanogramScope output or null
  * @param {Array}  p.configs - LocationConfig rows [{ sku, maxStock }] (maxStock set)
  * @param {Array}  p.mealConfigs - LocationMealConfig rows [{ mealType, maxStock }]
+ * @param {Array}  p.parentConfigs - LocationParentConfig rows [{ parentId, maxStock }]
  * @param {Set}    p.freshSkus - all fresh-meal SKUs
  * @param {Object} p.membersByMealType - { mealType: [{ sku, name }] }
+ * @param {Object} p.membersByParent - { parentId: [{ sku, name }] }
  * @param {Function} p.stockOf - (sku) => current qty at this location
  * @param {Object} p.availableOf - { sku: warehouse units available }
  * @param {Function} p.earliestExpiryOf - (sku) => earliest batch expiry | null
  * @returns {{ needs: Array<{ sku: string, qty: number }>,
- *             notOnPlanogram: { skus: string[], mealTypes: string[] } | null }}
+ *             notOnPlanogram: { skus: string[], mealTypes: string[], parents: string[] } | null }}
  */
 export function computeLocationNeeds({
   scope,
   configs,
   mealConfigs,
+  parentConfigs = [],
   freshSkus,
   membersByMealType,
+  membersByParent = {},
   stockOf,
   availableOf,
   earliestExpiryOf,
@@ -162,9 +173,9 @@ export function computeLocationNeeds({
     (configs || []).filter((c) => !freshSkus.has(c.sku)).map((c) => [c.sku, c.maxStock]),
   );
   const mealMax = new Map((mealConfigs || []).map((m) => [m.mealType, m.maxStock]));
+  const parentMaxCfg = new Map((parentConfigs || []).map((p) => [p.parentId, p.maxStock]));
 
-  const splitGroup = (mealType, groupMax) => {
-    const members = membersByMealType[mealType] || [];
+  const splitAcross = (members, groupMax) => {
     if (members.length === 0) return;
     const groupStock = members.reduce((sum, m) => sum + (stockOf(m.sku) || 0), 0);
     const groupNeed = Math.max(0, groupMax - groupStock);
@@ -177,10 +188,20 @@ export function computeLocationNeeds({
     for (const [sku, qty] of Object.entries(split)) addNeed(sku, qty);
   };
 
+  const splitGroup = (mealType, groupMax) => splitAcross(membersByMealType[mealType] || [], groupMax);
+  // Members already filled per-SKU elsewhere (own slot / own config) stay out
+  // of the family split — their stock and need are accounted at their own
+  // target, never twice.
+  const splitFamily = (parentId, groupMax, memberExcluded) =>
+    splitAcross((membersByParent[parentId] || []).filter((m) => !memberExcluded(m.sku)), groupMax);
+
   if (!scope) {
     // Legacy path — fill every configured target to its config max.
     for (const [sku, max] of configMax) addNeed(sku, Math.max(0, max - (stockOf(sku) || 0)));
     for (const [mealType, max] of mealMax) splitGroup(mealType, max);
+    for (const [parentId, max] of parentMaxCfg) {
+      splitFamily(parentId, max, (sku) => configMax.has(sku));
+    }
     return { needs, notOnPlanogram: null };
   }
 
@@ -196,10 +217,21 @@ export function computeLocationNeeds({
     if (target == null) continue;
     splitGroup(mealType, target);
   }
+  const parentSet = scope.parentSet || new Set();
+  for (const parentId of parentSet) {
+    const target = scope.capacityByTarget.get(`parent:${parentId}`) ?? parentMaxCfg.get(parentId) ?? null;
+    if (target == null) continue;
+    splitFamily(parentId, target, (sku) => scope.skuSet.has(sku));
+  }
 
   const notOnPlanogram = {
     skus: [...configMax.keys()].filter((sku) => !scope.skuSet.has(sku)),
     mealTypes: [...mealMax.keys()].filter((mt) => !scope.mealTypeSet.has(mt)),
+    // A family is covered by a parent slot OR by every-member sku slots being
+    // its de-facto placement; flag only fully-unplaced configured families.
+    parents: [...parentMaxCfg.keys()].filter((id) =>
+      !parentSet.has(id)
+      && !(membersByParent[id] || []).some((m) => scope.skuSet.has(m.sku))),
   };
   return { needs, notOnPlanogram };
 }
@@ -244,17 +276,24 @@ export async function generatePickList({
   if (locations.length === 0) throw httpError(400, 'No active locations to pick for');
 
   const locIds = locations.map((l) => l.id);
-  const [configRows, mealConfigRows, stockRows, freshProducts, planograms] = await Promise.all([
+  const [configRows, mealConfigRows, parentConfigRows, stockRows, freshProducts, parentedProducts, productParents, planograms] = await Promise.all([
     prisma.locationConfig.findMany({ where: { locationId: { in: locIds }, maxStock: { not: null } } }),
     prisma.locationMealConfig.findMany({ where: { locationId: { in: locIds }, maxStock: { not: null } } }),
+    prisma.locationParentConfig.findMany({ where: { locationId: { in: locIds }, maxStock: { not: null } } }),
     prisma.locationStock.findMany({ where: { locationId: { in: locIds } } }),
     prisma.product.findMany({
       where: { isFreshMeal: true },
       select: { sku: true, name: true, mealType: true },
     }),
+    prisma.product.findMany({
+      where: { isFreshMeal: false, parentId: { not: null } },
+      select: { sku: true, name: true, parentId: true },
+    }),
+    prisma.productParent.findMany({ select: { id: true, name: true } }),
     Promise.all(locIds.map((id) => getEffectiveLayout(id, { prefer: 'next' }))),
   ]);
   const planogramByLocation = new Map(locIds.map((id, i) => [id, planograms[i]]));
+  const parentNameOf = new Map(productParents.map((p) => [p.id, p.name]));
 
   const stockOf = new Map(stockRows.map((s) => [`${s.locationId}|${s.sku}`, s.quantity]));
   const freshSkus = new Set(freshProducts.map((p) => p.sku));
@@ -262,11 +301,17 @@ export async function generatePickList({
   for (const p of freshProducts) {
     (membersByMealType[p.mealType || 'Unclassified'] ||= []).push(p);
   }
+  const membersByParent = {};
+  for (const p of parentedProducts) {
+    (membersByParent[p.parentId] ||= []).push(p);
+  }
 
-  // Candidate SKUs = everything a config, a fresh group or a planogram slot
-  // could ask for (capacity-only slots have no config row but still pick).
+  // Candidate SKUs = everything a config, a fresh group, a product family or a
+  // planogram slot could ask for (capacity-only slots have no config row but
+  // still pick).
   const candidateSkus = new Set(freshSkus);
   for (const c of configRows) candidateSkus.add(c.sku);
+  for (const p of parentedProducts) candidateSkus.add(p.sku);
   for (const p of planograms) {
     if (p) for (const sku of p.scope.skuSet) candidateSkus.add(sku);
   }
@@ -291,6 +336,8 @@ export async function generatePickList({
   for (const c of configRows) (configsByLocation[c.locationId] ||= []).push(c);
   const mealConfigsByLocation = {};
   for (const m of mealConfigRows) (mealConfigsByLocation[m.locationId] ||= []).push(m);
+  const parentConfigsByLocation = {};
+  for (const p of parentConfigRows) (parentConfigsByLocation[p.locationId] ||= []).push(p);
 
   // ---- Per-location needs, aggregated per SKU (route order preserved) ----
   const needBySku = new Map(); // sku -> { totalQty, perLocation: [{ locationId, locationName, qty }] }
@@ -312,14 +359,16 @@ export async function generatePickList({
       scope: planogram?.scope ?? null,
       configs: configsByLocation[location.id] || [],
       mealConfigs: mealConfigsByLocation[location.id] || [],
+      parentConfigs: parentConfigsByLocation[location.id] || [],
       freshSkus,
       membersByMealType,
+      membersByParent,
       stockOf: (sku) => stockOf.get(`${location.id}|${sku}`) || 0,
       availableOf,
       earliestExpiryOf,
     });
     for (const { sku, qty } of needs) addNeed(sku, location, qty);
-    if (notOnPlanogram && (notOnPlanogram.skus.length || notOnPlanogram.mealTypes.length)) {
+    if (notOnPlanogram && (notOnPlanogram.skus.length || notOnPlanogram.mealTypes.length || notOnPlanogram.parents.length)) {
       notOnPlanogramPerLocation.push({
         locationId: location.id,
         locationName: location.name,
@@ -341,11 +390,12 @@ export async function generatePickList({
     for (const r of rows) productNames.set(r.sku, r.name);
   }
 
-  // Excluded SKUs carry their product name so the UI needn't resolve them.
+  // Excluded SKUs/families carry their names so the UI needn't resolve them.
   const notOnPlanogram = notOnPlanogramPerLocation.length
     ? notOnPlanogramPerLocation.map((l) => ({
         ...l,
         skus: l.skus.map((sku) => ({ sku, name: productNames.get(sku) || sku })),
+        parents: (l.parents || []).map((id) => ({ parentId: id, name: parentNameOf.get(id) || id })),
       }))
     : null;
 

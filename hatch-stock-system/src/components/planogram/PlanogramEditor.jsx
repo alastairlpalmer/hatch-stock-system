@@ -28,10 +28,10 @@ const keyOf = (shelf, position) => `${shelf}-${position}`;
 
 function sameTarget(a, b) {
   if (!a || !b) return false;
-  return a.targetType === b.targetType && a.sku === b.sku && a.mealType === b.mealType;
+  return a.targetType === b.targetType && a.sku === b.sku && a.mealType === b.mealType && a.parentId === b.parentId;
 }
 
-export default function PlanogramEditor({ locationId, payload, products, mealGroups, mealTypes, location, revision = 'current', onSaved, onCancel }) {
+export default function PlanogramEditor({ locationId, payload, products, mealGroups, mealTypes, parentGroups, location, revision = 'current', onSaved, onCancel }) {
   const [shelves, setShelves] = useState(() =>
     payload?.layout?.shelves?.length
       ? payload.layout.shelves
@@ -44,6 +44,7 @@ export default function PlanogramEditor({ locationId, payload, products, mealGro
         targetType: a.targetType,
         sku: a.sku || undefined,
         mealType: a.mealType || undefined,
+        parentId: a.parentId || undefined,
         // Per-slot capacity override; travels with the placement on move/swap.
         capacity: a.capacity ?? undefined,
       };
@@ -68,19 +69,26 @@ export default function PlanogramEditor({ locationId, payload, products, mealGro
 
   const productBySku = useMemo(() => new Map((products || []).map((p) => [p.sku, p])), [products]);
 
-  // Palette vocabulary: this location's mirrored products; fresh meals as groups.
+  // Palette vocabulary: this location's mirrored products; fresh meals as
+  // groups; product-family flavours as family chips (place the family — any
+  // flavour fills the facing) with the flavours also available individually.
   const palette = useMemo(() => {
     const assigned = new Set(location?.assignedItems || []);
     const list = (products || []).filter((p) => assigned.has(p.sku));
     const groupNames = new Set();
+    const familyIds = new Set();
     const byCategory = {};
     for (const p of list) {
       if (p.isFreshMeal) groupNames.add(p.mealType || 'Unclassified');
       else {
+        if (p.parentId) familyIds.add(p.parentId);
         const cat = p.category || 'Uncategorised';
         (byCategory[cat] = byCategory[cat] || []).push(p);
       }
     }
+    const families = (parentGroups || [])
+      .filter((g) => familyIds.has(g.parentId))
+      .sort((a, b) => a.name.localeCompare(b.name));
     const order = (mealTypes || []).map((m) => m.name);
     const groups = [...groupNames].sort((a, b) => {
       const ia = order.indexOf(a); const ib = order.indexOf(b);
@@ -92,23 +100,28 @@ export default function PlanogramEditor({ locationId, payload, products, mealGro
         category,
         items: items.sort((x, y) => (x.name || x.sku).localeCompare(y.name || y.sku)),
       }));
-    return { groups, categories };
-  }, [location, products, mealTypes]);
+    return { groups, families, categories };
+  }, [location, products, mealTypes, parentGroups]);
 
   // Placement counts so the palette shows what's already in the fridge
   const placedCounts = useMemo(() => {
     const counts = new Map();
     for (const t of Object.values(slots)) {
-      const k = t.targetType === 'mealType' ? `g:${t.mealType}` : `s:${t.sku}`;
+      const k = t.targetType === 'mealType' ? `g:${t.mealType}`
+        : t.targetType === 'parent' ? `p:${t.parentId}`
+        : `s:${t.sku}`;
       counts.set(k, (counts.get(k) || 0) + 1);
     }
     return counts;
   }, [slots]);
 
   const groupQty = (name) => (mealGroups || []).find((g) => g.mealType === name)?.totalQty ?? 0;
+  const familyName = (parentId) => (parentGroups || []).find((g) => g.parentId === parentId)?.name || 'Product family';
 
   const targetLabel = (t) =>
-    t.targetType === 'mealType' ? t.mealType : productBySku.get(t.sku)?.name || t.sku;
+    t.targetType === 'mealType' ? t.mealType
+      : t.targetType === 'parent' ? familyName(t.parentId)
+      : productBySku.get(t.sku)?.name || t.sku;
 
   // ---- mutations ----
 
@@ -292,6 +305,7 @@ export default function PlanogramEditor({ locationId, payload, products, mealGro
   const q = search.trim().toLowerCase();
   const matches = (name) => !q || name.toLowerCase().includes(q);
   const visibleGroups = palette.groups.filter(matches);
+  const visibleFamilies = (palette.families || []).filter((f) => matches(f.name));
   const visibleCategories = palette.categories
     .map((c) => ({ ...c, items: c.items.filter((p) => matches(p.name || p.sku)) }))
     .filter((c) => c.items.length > 0);
@@ -370,6 +384,30 @@ export default function PlanogramEditor({ locationId, payload, products, mealGro
             </div>
           )}
 
+          {visibleFamilies.length > 0 && (
+            <div>
+              <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1.5">Product families</div>
+              <div className="space-y-1">
+                {visibleFamilies.map((f) => {
+                  const target = { targetType: 'parent', parentId: f.parentId };
+                  const placed = placedCounts.get(`p:${f.parentId}`) || 0;
+                  return (
+                    <PaletteChip
+                      key={f.parentId}
+                      label={f.name}
+                      sub={`${f.totalQty ?? 0} units · any flavour${placed ? ` · in ${placed} slot${placed > 1 ? 's' : ''}` : ''}`}
+                      teal
+                      placed={placed > 0}
+                      active={sameTarget(armed, target)}
+                      onDragStart={(e) => startPaletteDrag(e, target)}
+                      onClick={() => setArmed((a) => (sameTarget(a, target) ? null : target))}
+                    />
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {visibleCategories.map((c) => (
             <div key={c.category}>
               <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1.5">{c.category}</div>
@@ -393,7 +431,7 @@ export default function PlanogramEditor({ locationId, payload, products, mealGro
             </div>
           ))}
 
-          {visibleGroups.length === 0 && visibleCategories.length === 0 && (
+          {visibleGroups.length === 0 && visibleFamilies.length === 0 && visibleCategories.length === 0 && (
             <p className="text-zinc-600 text-sm">No matching products.</p>
           )}
         </div>
@@ -422,7 +460,7 @@ export default function PlanogramEditor({ locationId, payload, products, mealGro
                         isOver
                           ? 'border-emerald-400 bg-emerald-500/20'
                           : target
-                            ? target.targetType === 'mealType'
+                            ? target.targetType === 'mealType' || target.targetType === 'parent'
                               ? 'border-teal-500/40 bg-teal-500/10 text-teal-300'
                               : 'border-zinc-700 bg-zinc-800/70 text-zinc-200'
                             : `border-dashed border-zinc-700 text-zinc-600 ${armed ? 'cursor-pointer hover:border-emerald-500' : ''}`

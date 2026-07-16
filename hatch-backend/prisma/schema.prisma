@@ -163,9 +163,13 @@ model SlotAssignment {
   shelf      Int // 1 = top
   position   Int // 0-based within shelf; A = 0
   slotCode   String    @map("slot_code") // "1A" — denormalised for restock sheets
-  targetType String    @map("target_type") // 'sku' | 'mealType'
+  targetType String    @map("target_type") // 'sku' | 'mealType' | 'parent'
   sku        String?
   mealType   String?   @map("meal_type")
+  // Product-family slot ("any Barebells flavour in this facing"). References
+  // product_parents.id but deliberately NO FK, matching sku/mealType above —
+  // append-only history must survive churn. See manual-sql/027_planogram_parent_slots.sql.
+  parentId   String?   @map("parent_id")
   // Per-slot fill capacity override (units in this facing). The shelf default
   // lives in MachineLayout.shelves entries as unitsPerSlot; effective capacity
   // = capacity ?? shelf.unitsPerSlot, summed per target across its slots.

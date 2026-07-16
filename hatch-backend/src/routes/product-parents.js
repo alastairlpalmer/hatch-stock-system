@@ -2,6 +2,7 @@ import express from 'express';
 import { z } from 'zod';
 import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
+import { getLocationVelocity } from '../services/order-suggestions.js';
 
 const router = express.Router();
 
@@ -24,6 +25,67 @@ router.get('/', asyncHandler(async (req, res) => {
     include: { products: { select: memberSelect, orderBy: { name: 'asc' } } },
   });
   res.json(parents);
+}));
+
+// Flavour starvation: machines where a family's TOTAL stock looks healthy but
+// its best-selling flavour is at zero. Parent-level min/max can't see this —
+// and a starved flavour stops generating the sales data that drives the order
+// split, so it self-reinforces. Feeds the Dashboard attention rail.
+router.get('/starvation', asyncHandler(async (req, res) => {
+  const [members, parents, locations] = await Promise.all([
+    prisma.product.findMany({
+      where: { parentId: { not: null }, isFreshMeal: false },
+      select: { sku: true, name: true, parentId: true },
+    }),
+    prisma.productParent.findMany({ select: { id: true, name: true } }),
+    prisma.location.findMany({ where: { archivedAt: null }, select: { id: true, name: true } }),
+  ]);
+  if (members.length === 0) return res.json({ items: [] });
+
+  const parentNameOf = new Map(parents.map((p) => [p.id, p.name]));
+  const membersByParent = new Map();
+  for (const m of members) {
+    if (!membersByParent.has(m.parentId)) membersByParent.set(m.parentId, []);
+    membersByParent.get(m.parentId).push(m);
+  }
+
+  const memberSkus = members.map((m) => m.sku);
+  const [stockRows, velocities] = await Promise.all([
+    prisma.locationStock.findMany({
+      where: { locationId: { in: locations.map((l) => l.id) }, sku: { in: memberSkus } },
+      select: { locationId: true, sku: true, quantity: true },
+    }),
+    Promise.all(locations.map((l) => getLocationVelocity(l.id))),
+  ]);
+  const stockOf = new Map(stockRows.map((r) => [`${r.locationId}|${r.sku}`, r.quantity]));
+
+  const items = [];
+  locations.forEach((location, i) => {
+    const velocity = velocities[i];
+    for (const [parentId, fam] of membersByParent) {
+      const withStats = fam.map((m) => ({
+        ...m,
+        stock: stockOf.get(`${location.id}|${m.sku}`) || 0,
+        vLong: velocity[m.sku]?.vLong || 0,
+      }));
+      const familyStock = withStats.reduce((a, m) => a + m.stock, 0);
+      if (familyStock <= 0) continue; // genuinely empty — ordinary low-stock alerts cover it
+      const top = withStats.reduce((a, m) => (m.vLong > (a?.vLong || 0) ? m : a), null);
+      if (top && top.vLong > 0 && top.stock === 0) {
+        items.push({
+          locationId: location.id,
+          locationName: location.name,
+          parentId,
+          parentName: parentNameOf.get(parentId) || parentId,
+          flavourSku: top.sku,
+          flavourName: top.name,
+          familyStock,
+        });
+      }
+    }
+  });
+
+  res.json({ items });
 }));
 
 const nameSchema = z.object({ name: z.string().min(1).max(60) });

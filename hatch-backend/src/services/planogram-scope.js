@@ -29,7 +29,7 @@ export async function getEffectiveLayout(locationId, { prefer = 'current' } = {}
   const openAssignments = await prisma.slotAssignment.findMany({
     where: { layoutId: layout.id, validTo: null },
     select: {
-      shelf: true, position: true, targetType: true, sku: true, mealType: true, capacity: true,
+      shelf: true, position: true, targetType: true, sku: true, mealType: true, parentId: true, capacity: true,
     },
   });
 
