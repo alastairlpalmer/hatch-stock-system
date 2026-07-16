@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useStock } from '../../context/StockContext';
+import SearchInput from '../ui/SearchInput';
 
 /**
  * Admin → Fresh Meals.
@@ -167,12 +168,11 @@ function PromoteMissed({ products, updateProductMeal }) {
           If the system didn't recognise a Frive meal, find it here and flag it — it then drops into Needs Review below to pick a bucket.
         </p>
       </div>
-      <input
-        type="text"
+      <SearchInput
+        className="max-w-md"
         value={query}
-        onChange={e => setQuery(e.target.value)}
+        onChange={setQuery}
         placeholder="Search products by name or SKU…"
-        className="w-full max-w-md bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500"
       />
       {q && (
         matches.length === 0 ? (
@@ -209,6 +209,7 @@ function ReviewQueue({ title, products, mealTypeNames, updateProductMeal, emptyM
         <p className="text-zinc-600 text-sm">{emptyMessage}</p>
       ) : (
         <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg overflow-hidden">
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-zinc-800">
@@ -230,6 +231,7 @@ function ReviewQueue({ title, products, mealTypeNames, updateProductMeal, emptyM
               ))}
             </tbody>
           </table>
+          </div>
         </div>
       )}
     </div>

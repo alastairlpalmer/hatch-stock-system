@@ -8,6 +8,7 @@ import buyingListsService from '../../services/buyingLists.service';
 import vendliveService from '../../services/vendlive.service';
 import productsService from '../../services/products.service';
 import ProductSearchCombobox from '../ui/ProductSearchCombobox';
+import SearchInput from '../ui/SearchInput';
 
 // Compact "2h ago" / "just now" formatter for sync timestamps.
 function formatRelativeTime(ts) {
@@ -1587,24 +1588,12 @@ export default function Orders() {
 
       {/* Order search */}
       <div className="flex items-center gap-3">
-        <div className="relative flex-1 max-w-md">
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={e => setSearchQuery(e.target.value)}
-            placeholder="Search orders — supplier, product, SKU, invoice ref..."
-            className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500 placeholder:text-zinc-600"
-          />
-          {isSearching && (
-            <button
-              onClick={() => setSearchQuery('')}
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300"
-              title="Clear search"
-            >
-              ×
-            </button>
-          )}
-        </div>
+        <SearchInput
+          className="flex-1 max-w-md"
+          value={searchQuery}
+          onChange={setSearchQuery}
+          placeholder="Search orders — supplier, product, SKU, invoice ref..."
+        />
         {isSearching && (
           <span className="text-xs text-zinc-500">
             {pendingOrders.length + completedOrders.length} match{pendingOrders.length + completedOrders.length === 1 ? '' : 'es'}

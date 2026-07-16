@@ -5,6 +5,7 @@ import { formatCurrency } from '../../../utils/helpers';
 function MarginTable({ rows, empty }) {
   if (!rows || rows.length === 0) return <p className="px-6 pb-6 text-sm text-zinc-500">{empty}</p>;
   return (
+    <div className="overflow-x-auto">
     <table className="w-full text-sm">
       <thead>
         <tr className="border-b border-zinc-800">
@@ -59,6 +60,7 @@ function MarginTable({ rows, empty }) {
         })}
       </tbody>
     </table>
+    </div>
   );
 }
 

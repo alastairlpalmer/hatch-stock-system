@@ -3,9 +3,12 @@ import { useStock } from '../../context/StockContext';
 import inventoryService from '../../services/inventory.service';
 import vendliveService from '../../services/vendlive.service';
 import { daysUntilExpiry } from '../../utils/expiryDays';
+import SearchInput from '../ui/SearchInput';
+import { useToast } from '../ui/Toast';
 
 export default function Inventory() {
   const { data, addProduct, updateProduct, bulkImportProducts, updateWarehouseStock, bulkUpdateWarehouseStock, createBatch, updateBatch, deleteBatch, transferWarehouseStock, refresh } = useStock();
+  const toast = useToast();
   // Single-warehouse installs (the norm today) hide every warehouse selector,
   // column and per-row warehouse label. Adding a second warehouse in the DB
   // lights them all back up — nothing is hard-deleted.
@@ -224,24 +227,12 @@ export default function Inventory() {
   const searchedMissingExpiry = missingExpiryBatches.filter(b => matchesBatchSearch(b.sku));
 
   const batchSearchBox = (
-    <div className="relative flex-1 max-w-md">
-      <input
-        type="search"
-        value={batchSearch}
-        onChange={e => setBatchSearch(e.target.value)}
-        placeholder="Search batches — product, SKU, category..."
-        className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500 placeholder:text-zinc-600"
-      />
-      {batchSearch.trim() && (
-        <button
-          onClick={() => setBatchSearch('')}
-          className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-zinc-500 hover:text-zinc-300"
-          title="Clear search"
-        >
-          ×
-        </button>
-      )}
-    </div>
+    <SearchInput
+      className="flex-1 max-w-md"
+      value={batchSearch}
+      onChange={setBatchSearch}
+      placeholder="Search batches — product, SKU, category..."
+    />
   );
 
   const saveBatchExpiry = async (batchId) => {
@@ -256,8 +247,10 @@ export default function Inventory() {
         delete next[batchId];
         return next;
       });
+      toast.success('Expiry date saved');
     } catch (err) {
       setError(err.message || 'Failed to set expiry date');
+      toast.error('Could not save the expiry date — try again');
     } finally {
       setSavingExpiryId(null);
     }
@@ -1594,24 +1587,12 @@ export default function Inventory() {
 
           {/* Stock search — works in single-warehouse and all-warehouses views */}
           <div className="flex items-center gap-3">
-            <div className="relative flex-1 max-w-md">
-              <input
-                type="text"
-                value={stockSearch}
-                onChange={e => setStockSearch(e.target.value)}
-                placeholder="Search stock — product, SKU, category..."
-                className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500 placeholder:text-zinc-600"
-              />
-              {isStockSearching && (
-                <button
-                  onClick={() => setStockSearch('')}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300"
-                  title="Clear search"
-                >
-                  ×
-                </button>
-              )}
-            </div>
+            <SearchInput
+              className="flex-1 max-w-md"
+              value={stockSearch}
+              onChange={setStockSearch}
+              placeholder="Search stock — product, SKU, category..."
+            />
             {isStockSearching && (
               <span className="text-xs text-zinc-500">includes out-of-stock items</span>
             )}

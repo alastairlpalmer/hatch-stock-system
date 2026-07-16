@@ -593,6 +593,7 @@ export default function RestockMachine() {
 
               <div className="border-t border-zinc-800 pt-4">
                 <h4 className="text-sm font-medium text-zinc-400 mb-3">Items Restocked</h4>
+                <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-zinc-800">
@@ -609,6 +610,7 @@ export default function RestockMachine() {
                     ))}
                   </tbody>
                 </table>
+                </div>
               </div>
 
               {(viewingRestock.photoUrl || viewingRestock.image) && (
@@ -624,6 +626,7 @@ export default function RestockMachine() {
             </div>
           ) : (
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg overflow-hidden">
+              <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-zinc-800">
@@ -678,6 +681,7 @@ export default function RestockMachine() {
                   )}
                 </tbody>
               </table>
+              </div>
             </div>
           )}
         </div>
@@ -686,6 +690,7 @@ export default function RestockMachine() {
       {/* Stock Check History Tab */}
       {activeSubTab === 'checks' && (
         <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg overflow-hidden">
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-zinc-800">
@@ -725,6 +730,7 @@ export default function RestockMachine() {
               )}
             </tbody>
           </table>
+          </div>
         </div>
       )}
     </div>
