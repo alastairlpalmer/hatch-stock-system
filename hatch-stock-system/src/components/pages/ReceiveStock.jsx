@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useStock } from '../../context/StockContext';
+import QtyInput from '../ui/QtyInput';
 import BarcodeScanner from '../scanner/BarcodeScanner';
 import { productsService } from '../../services/products.service';
 import { ordersService } from '../../services/orders.service';
@@ -73,6 +75,20 @@ export default function ReceiveStock() {
   const [expandedReceipts, setExpandedReceipts] = useState({});
 
   const pendingOrders = data.orders.filter(o => o.status === 'pending');
+
+  // Deep link: /orders/receive?orderId=… pre-selects that order (links from
+  // the Orders landing page and Needs Attention). Consumed once — the param
+  // is cleared so Back/refresh behaves normally afterwards.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const deepLinkOrderId = searchParams.get('orderId');
+  useEffect(() => {
+    if (!deepLinkOrderId) return;
+    const order = data.orders.find(o => o.id === deepLinkOrderId && o.status === 'pending');
+    if (!order) return; // orders still loading, or already received
+    selectOrder(order);
+    setSearchParams({}, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deepLinkOrderId, data.orders]);
 
   useEffect(() => {
     if (activeSubTab !== 'history') return;
@@ -411,7 +427,7 @@ export default function ReceiveStock() {
     <button
       onClick={() => updateLot(sku, lotIdx, 'hasDamage', !lot.hasDamage)}
       title={lot.hasDamage ? 'Mark as undamaged' : 'Mark as damaged'}
-      className={`w-8 h-8 rounded flex items-center justify-center transition-colors ${
+      className={`w-10 h-10 rounded flex items-center justify-center transition-colors ${
         lot.hasDamage
           ? 'bg-red-500/20 text-red-400 border border-red-500/50'
           : 'bg-zinc-800 text-zinc-500 border border-zinc-700 hover:border-zinc-600'
@@ -663,15 +679,11 @@ export default function ReceiveStock() {
                               </div>
                               <div className="md:col-span-2">
                                 <div className="text-[10px] uppercase tracking-wide text-zinc-500 md:hidden">Qty</div>
-                                <input
-                                  type="number"
-                                  min="0"
-                                  value={lot.quantity || ''}
-                                  onChange={e => {
-                                    const parsed = parseInt(e.target.value, 10) || 0;
-                                    updateLot(item.sku, lotIdx, 'quantity', Math.max(parsed, 0));
-                                  }}
-                                  className={`${inputClass} text-center ${over ? 'border-red-500 focus:border-red-500' : ''}`}
+                                <QtyInput
+                                  value={lot.quantity}
+                                  onChange={n => updateLot(item.sku, lotIdx, 'quantity', n)}
+                                  invalid={over}
+                                  aria-label="Flavour allocation quantity"
                                 />
                               </div>
                               <div className="md:col-span-2">
@@ -694,9 +706,9 @@ export default function ReceiveStock() {
                               <div className="md:col-span-1 md:text-right">
                                 <button
                                   onClick={() => removeLot(item.sku, lotIdx)}
-                                  className="text-xs text-zinc-500 hover:text-red-400"
+                                  className="text-xs text-zinc-400 hover:text-red-400 min-h-[40px] px-3 rounded border border-zinc-700 bg-zinc-800/60"
                                 >
-                                  remove
+                                  Remove
                                 </button>
                               </div>
                             </div>
@@ -725,7 +737,7 @@ export default function ReceiveStock() {
                           <div className="flex items-center justify-between gap-2 flex-wrap">
                             <button
                               onClick={() => addFlavourLot(item.sku)}
-                              className="text-xs text-emerald-400 hover:text-emerald-300"
+                              className="text-xs text-emerald-400 hover:text-emerald-300 min-h-[40px] px-3 rounded border border-emerald-500/30 bg-emerald-500/10"
                             >
                               + Add flavour
                             </button>
@@ -773,15 +785,11 @@ export default function ReceiveStock() {
                           <>
                             <div className="md:col-span-2">
                               <div className="text-[10px] uppercase tracking-wide text-zinc-500 md:hidden">Receiving now</div>
-                              <input
-                                type="number"
-                                min="0"
-                                value={mainLot.quantity || ''}
-                                onChange={e => {
-                                  const parsed = parseInt(e.target.value, 10) || 0;
-                                  updateLot(item.sku, 0, 'quantity', Math.max(parsed, 0));
-                                }}
-                                className={`${inputClass} text-center ${over ? 'border-red-500 focus:border-red-500' : ''}`}
+                              <QtyInput
+                                value={mainLot.quantity}
+                                onChange={n => updateLot(item.sku, 0, 'quantity', n)}
+                                invalid={over}
+                                aria-label={`Receiving now — ${product?.name || item.sku}`}
                               />
                             </div>
                             <div className="md:col-span-2">
@@ -814,24 +822,20 @@ export default function ReceiveStock() {
                               <span className="text-xs text-zinc-500">Lot {lotIdx + 1}</span>
                               <button
                                 onClick={() => removeLot(item.sku, lotIdx)}
-                                className="text-xs text-zinc-500 hover:text-red-400"
+                                className="text-xs text-zinc-400 hover:text-red-400 min-h-[40px] px-3 rounded border border-zinc-700 bg-zinc-800/60"
                                 title="Remove this lot"
                               >
-                                remove
+                                Remove
                               </button>
                             </div>
                             <div className="hidden md:block md:col-span-2" />
                             <div className="md:col-span-2">
                               <div className="text-[10px] uppercase tracking-wide text-zinc-500 md:hidden">Qty</div>
-                              <input
-                                type="number"
-                                min="0"
-                                value={lot.quantity || ''}
-                                onChange={e => {
-                                  const parsed = parseInt(e.target.value, 10) || 0;
-                                  updateLot(item.sku, lotIdx, 'quantity', Math.max(parsed, 0));
-                                }}
-                                className={`${inputClass} text-center ${over ? 'border-red-500 focus:border-red-500' : ''}`}
+                              <QtyInput
+                                value={lot.quantity}
+                                onChange={n => updateLot(item.sku, lotIdx, 'quantity', n)}
+                                invalid={over}
+                                aria-label={`Lot ${lotIdx + 1} quantity`}
                               />
                             </div>
                             <div className="md:col-span-2">
@@ -859,7 +863,7 @@ export default function ReceiveStock() {
                         <div className="flex items-center justify-between gap-2 flex-wrap">
                           <button
                             onClick={() => addLot(item.sku)}
-                            className="text-xs text-emerald-400 hover:text-emerald-300"
+                            className="text-xs text-emerald-400 hover:text-emerald-300 min-h-[40px] px-3 rounded border border-emerald-500/30 bg-emerald-500/10"
                             title="Add another expiry lot for this product"
                           >
                             + Split lot
