@@ -19,6 +19,7 @@ import { useStock } from '../../../context/StockContext';
 import { useRestockRun } from '../../../context/RestockRunContext';
 import { pickListsService } from '../../../services/pickLists.service';
 import { StatusChip } from './PickLists';
+import QtyInput from '../../ui/QtyInput';
 
 // ---------- date helpers ----------
 
@@ -175,16 +176,15 @@ function ItemRow({ item, targetDate, readOnly, onToggle, onQtyChange }) {
             {editing ? (
               <div className="flex items-center gap-2">
                 <label className="text-xs text-zinc-500">Pack qty</label>
-                <input
-                  type="number"
-                  min="0"
+                <QtyInput
                   value={item.packedQty ?? item.totalQty}
-                  onChange={(e) => onQtyChange(item.sku, e.target.value)}
-                  className="w-20 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-emerald-500"
+                  onChange={(n) => onQtyChange(item.sku, n)}
+                  className="w-36"
+                  aria-label={`Pack quantity — ${item.name || item.sku}`}
                 />
                 <button
                   onClick={() => setEditing(false)}
-                  className="text-xs text-emerald-400 hover:text-emerald-300"
+                  className="text-xs text-emerald-400 hover:text-emerald-300 min-h-[40px] px-3 rounded border border-emerald-500/30 bg-emerald-500/10"
                 >
                   Done
                 </button>
@@ -321,7 +321,11 @@ export default function PickListDetail() {
   const [expiryWarningsOpen, setExpiryWarningsOpen] = useState(false);
 
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const [takenBy, setTakenBy] = useState('');
+  // Same key the restock/stock-check pages use — one shared "who is doing
+  // the run" name across the whole Monday workflow, typed once per device.
+  const [takenBy, setTakenBy] = useState(() => {
+    try { return localStorage.getItem('hatch_checker_name') || ''; } catch { return ''; }
+  });
   const [completing, setCompleting] = useState(false);
   const [completeError, setCompleteError] = useState(null);
   const [conflict, setConflict] = useState(false);
@@ -857,7 +861,10 @@ export default function PickListDetail() {
                   <input
                     type="text"
                     value={takenBy}
-                    onChange={(e) => setTakenBy(e.target.value)}
+                    onChange={(e) => {
+                      setTakenBy(e.target.value);
+                      try { localStorage.setItem('hatch_checker_name', e.target.value); } catch { /* private mode */ }
+                    }}
                     placeholder="Your name"
                     className="w-full sm:w-64 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500"
                   />
