@@ -108,16 +108,24 @@ export default function Inventory() {
 
   // Stock Levels rows: zero-quantity items hidden, grouped by product
   // category (alphabetical), products alphabetical within each group.
-  // While searching, zero-stock items are INCLUDED so the search answers
-  // "do we have any X?" honestly with a 0 rather than hiding the row.
-  // Returns { groups: [{ category, items }], hiddenCount }.
+  // Product-family flavours (Barebells etc.) group under their FAMILY name
+  // instead of their category, so the warehouse view matches how they're
+  // ordered and picked. While searching, zero-stock items are INCLUDED so the
+  // search answers "do we have any X?" honestly with a 0 rather than hiding
+  // the row. Returns { groups: [{ category, isFamily, items }], hiddenCount }.
   const groupStockRows = (rows) => {
     const searched = rows.filter(r => matchesStockSearch(r.sku));
     const visible = isStockSearching ? searched : searched.filter(r => r.total > 0);
+    const parentNameOf = new Map((data.productParents || []).map(pp => [pp.id, pp.name]));
     const groups = {};
+    const familyNames = new Set();
     visible.forEach(row => {
       const product = data.products.find(p => p.sku === row.sku);
-      const category = product?.category || 'Uncategorised';
+      const familyName = product && !product.isFreshMeal && product.parentId
+        ? parentNameOf.get(product.parentId)
+        : null;
+      if (familyName) familyNames.add(familyName);
+      const category = familyName || product?.category || 'Uncategorised';
       if (!groups[category]) groups[category] = [];
       groups[category].push({ ...row, product });
     });
@@ -126,6 +134,7 @@ export default function Inventory() {
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([category, items]) => ({
           category,
+          isFamily: familyNames.has(category),
           items: items.sort((x, y) =>
             (x.product?.name || x.sku).localeCompare(y.product?.name || y.sku)
           ),
@@ -1629,7 +1638,7 @@ export default function Inventory() {
                       {groups.map(group => (
                         <React.Fragment key={group.category}>
                           <div className="bg-zinc-800/60 px-4 py-2">
-                            <span className="text-emerald-400 font-medium text-xs uppercase tracking-wide">{group.category}</span>
+                            <span className={`font-medium text-xs uppercase tracking-wide ${group.isFamily ? 'text-teal-300' : 'text-emerald-400'}`}>{group.category}{group.isFamily && <span className="text-zinc-500 normal-case"> · family</span>}</span>
                             <span className="text-zinc-500 text-xs ml-3">
                               {group.items.length} product{group.items.length === 1 ? '' : 's'} · {group.items.reduce((acc, r) => acc + r.total, 0)} units
                             </span>
@@ -1715,7 +1724,7 @@ export default function Inventory() {
                             <React.Fragment key={group.category}>
                               <tr className="bg-zinc-800/60">
                                 <td colSpan={colCount} className="px-4 py-2">
-                                  <span className="text-emerald-400 font-medium text-xs uppercase tracking-wide">{group.category}</span>
+                                  <span className={`font-medium text-xs uppercase tracking-wide ${group.isFamily ? 'text-teal-300' : 'text-emerald-400'}`}>{group.category}{group.isFamily && <span className="text-zinc-500 normal-case"> · family</span>}</span>
                                   <span className="text-zinc-500 text-xs ml-3">
                                     {group.items.length} product{group.items.length === 1 ? '' : 's'} · {group.items.reduce((acc, r) => acc + r.total, 0)} units
                                   </span>
@@ -1784,7 +1793,7 @@ export default function Inventory() {
                       {groups.map(group => (
                         <React.Fragment key={group.category}>
                           <div className="bg-zinc-800/60 px-4 py-2">
-                            <span className="text-emerald-400 font-medium text-xs uppercase tracking-wide">{group.category}</span>
+                            <span className={`font-medium text-xs uppercase tracking-wide ${group.isFamily ? 'text-teal-300' : 'text-emerald-400'}`}>{group.category}{group.isFamily && <span className="text-zinc-500 normal-case"> · family</span>}</span>
                             <span className="text-zinc-500 text-xs ml-3">
                               {group.items.length} product{group.items.length === 1 ? '' : 's'} · {group.items.reduce((acc, r) => acc + r.total, 0)} units
                             </span>
@@ -1874,7 +1883,7 @@ export default function Inventory() {
                           <React.Fragment key={group.category}>
                             <tr className="bg-zinc-800/60">
                               <td colSpan={6} className="px-4 py-2">
-                                <span className="text-emerald-400 font-medium text-xs uppercase tracking-wide">{group.category}</span>
+                                <span className={`font-medium text-xs uppercase tracking-wide ${group.isFamily ? 'text-teal-300' : 'text-emerald-400'}`}>{group.category}{group.isFamily && <span className="text-zinc-500 normal-case"> · family</span>}</span>
                                 <span className="text-zinc-500 text-xs ml-3">
                                   {group.items.length} product{group.items.length === 1 ? '' : 's'} · {group.items.reduce((acc, r) => acc + r.total, 0)} units
                                 </span>
