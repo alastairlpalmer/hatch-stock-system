@@ -39,6 +39,17 @@ export default function Inventory() {
     return query.split(/\s+/).every(token => haystack.includes(token));
   };
 
+  // Expiry / All Batches search (product name, SKU or category) — shared by
+  // the two batch-centric tabs so the query survives switching between them.
+  const [batchSearch, setBatchSearch] = useState('');
+  const matchesBatchSearch = (sku) => {
+    const query = batchSearch.trim().toLowerCase();
+    if (!query) return true;
+    const product = data.products.find(p => p.sku === sku);
+    const haystack = `${product?.name || ''} ${sku} ${product?.category || ''}`.toLowerCase();
+    return query.split(/\s+/).every(token => haystack.includes(token));
+  };
+
   // Add Stock states
   const [showAddStock, setShowAddStock] = useState(false);
   // Explicit flag for "adding a brand-new product". The new product's SKU
@@ -206,6 +217,33 @@ export default function Inventory() {
   });
   // Batches signed in without an expiry date — surfaced for correction
   const missingExpiryBatches = getBatches().filter(b => !b.expiryDate);
+
+  // Search-narrowed views for the Expiry and All Batches tabs. Summary cards
+  // and the tab badge stay unfiltered — they always reflect the whole
+  // warehouse, only the lists narrow.
+  const searchedBatches = () => getBatches().filter(b => matchesBatchSearch(b.sku));
+  const searchedMissingExpiry = missingExpiryBatches.filter(b => matchesBatchSearch(b.sku));
+
+  const batchSearchBox = (
+    <div className="relative flex-1 max-w-md">
+      <input
+        type="search"
+        value={batchSearch}
+        onChange={e => setBatchSearch(e.target.value)}
+        placeholder="Search batches — product, SKU, category..."
+        className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500 placeholder:text-zinc-600"
+      />
+      {batchSearch.trim() && (
+        <button
+          onClick={() => setBatchSearch('')}
+          className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-zinc-500 hover:text-zinc-300"
+          title="Clear search"
+        >
+          ×
+        </button>
+      )}
+    </div>
+  );
 
   const saveBatchExpiry = async (batchId) => {
     const value = expiryEdits[batchId];
@@ -1905,6 +1943,9 @@ export default function Inventory() {
             </div>
           </div>
 
+          {/* Search — narrows the Missing Expiry and Requiring Attention lists */}
+          {batchSearchBox}
+
           {/* Batches signed in without an expiry date — correct them inline */}
           {missingExpiryBatches.length > 0 && (
             <div className="bg-zinc-900/50 border border-amber-700/50 rounded-lg overflow-hidden">
@@ -1914,7 +1955,10 @@ export default function Inventory() {
               </div>
               {/* Mobile cards */}
               <div className="md:hidden">
-                {missingExpiryBatches
+                {searchedMissingExpiry.length === 0 && (
+                  <p className="px-4 py-6 text-center text-zinc-600 text-sm">No dateless batches match the search</p>
+                )}
+                {[...searchedMissingExpiry]
                   .sort((a, b) => new Date(b.receivedAt) - new Date(a.receivedAt))
                   .map(batch => {
                     const product = data.products.find(p => p.sku === batch.sku);
@@ -1968,7 +2012,7 @@ export default function Inventory() {
                   </tr>
                 </thead>
                 <tbody>
-                  {missingExpiryBatches
+                  {[...searchedMissingExpiry]
                     .sort((a, b) => new Date(b.receivedAt) - new Date(a.receivedAt))
                     .map(batch => {
                       const product = data.products.find(p => p.sku === batch.sku);
@@ -2021,7 +2065,7 @@ export default function Inventory() {
             {/* Mobile cards */}
             <div className="md:hidden">
               {(() => {
-                const attention = getBatches()
+                const attention = searchedBatches()
                   .filter(b => {
                     const status = getExpiryStatus(b.expiryDate);
                     return status && (status.status === 'expired' || status.status === 'critical' || status.status === 'warning');
@@ -2070,7 +2114,7 @@ export default function Inventory() {
                 </tr>
               </thead>
               <tbody>
-                {getBatches()
+                {searchedBatches()
                   .filter(b => {
                     const status = getExpiryStatus(b.expiryDate);
                     return status && (status.status === 'expired' || status.status === 'critical' || status.status === 'warning');
@@ -2101,7 +2145,7 @@ export default function Inventory() {
                       </tr>
                     );
                   })}
-                {getBatches().filter(b => {
+                {searchedBatches().filter(b => {
                   const status = getExpiryStatus(b.expiryDate);
                   return status && (status.status === 'expired' || status.status === 'critical' || status.status === 'warning');
                 }).length === 0 && (
@@ -2119,6 +2163,8 @@ export default function Inventory() {
       )}
 
       {activeSubTab === 'batches' && (
+        <div className="space-y-4">
+        {batchSearchBox}
         <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg overflow-hidden">
           <div className="px-4 py-3 border-b border-zinc-800 flex items-center gap-2">
             <h3 className="text-sm font-medium text-zinc-400">All Batches</h3>
@@ -2127,7 +2173,7 @@ export default function Inventory() {
           {/* Mobile cards */}
           <div className="md:hidden">
             {(() => {
-              const batches = getBatches();
+              const batches = searchedBatches();
               if (batches.length === 0) {
                 return <p className="px-4 py-8 text-center text-zinc-600 text-sm">No batch records</p>;
               }
@@ -2260,7 +2306,7 @@ export default function Inventory() {
             </thead>
             <tbody>
               {(() => {
-                const batches = getBatches();
+                const batches = searchedBatches();
                 if (batches.length === 0) {
                   return (
                     <tr>
@@ -2378,6 +2424,7 @@ export default function Inventory() {
             </tbody>
           </table>
           </div>
+        </div>
         </div>
       )}
     </div>

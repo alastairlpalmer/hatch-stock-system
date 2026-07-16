@@ -86,7 +86,7 @@ export default function OrdersLanding() {
               return (
                 <Link
                   key={order.id}
-                  to="/orders/receive"
+                  to={`/orders/receive?orderId=${order.id}`}
                   className="flex items-center gap-3 px-4 py-3 hover:bg-zinc-800/40 group"
                 >
                   <div className="flex-1 min-w-0">

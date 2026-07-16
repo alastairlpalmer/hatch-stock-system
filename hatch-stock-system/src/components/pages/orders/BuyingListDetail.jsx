@@ -619,6 +619,7 @@ export default function BuyingListDetail() {
                           {isDraft ? (
                             <input
                               type="number"
+                              inputMode="numeric"
                               min="0"
                               value={item.quantity}
                               onChange={e => updateItem(idx, 'quantity', parseInt(e.target.value) || 0)}
@@ -637,6 +638,7 @@ export default function BuyingListDetail() {
                           {isDraft ? (
                             <input
                               type="number"
+                              inputMode="numeric"
                               step="0.01"
                               min="0"
                               value={item.unitCost ?? 0}
@@ -683,6 +685,7 @@ export default function BuyingListDetail() {
                             {isDraft ? (
                               <input
                                 type="number"
+                                inputMode="numeric"
                                 min="0"
                                 value={item.quantity}
                                 onChange={e => updateItem(idx, 'quantity', parseInt(e.target.value) || 0)}
@@ -700,6 +703,7 @@ export default function BuyingListDetail() {
                             {isDraft ? (
                               <input
                                 type="number"
+                                inputMode="numeric"
                                 step="0.01"
                                 min="0"
                                 value={item.unitCost ?? 0}
