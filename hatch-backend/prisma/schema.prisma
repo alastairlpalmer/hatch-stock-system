@@ -300,6 +300,11 @@ model Order {
   status         String    @default("pending") // pending, received, cancelled
   deliveryMethod String?   @map("delivery_method")
   deliveryTo     String?   @map("delivery_to")
+  // Delivery destination: a warehouse (receiving pre-selects it) OR a free-text
+  // custom address. Previously collected by the PO form but silently dropped
+  // here — manual-sql/025 adds the columns.
+  warehouseId    String?   @map("warehouse_id")
+  customAddress  String?   @map("custom_address")
   deliveryFee    Float?    @map("delivery_fee")
   notes          String?
   invoiceRef     String?   @map("invoice_ref")

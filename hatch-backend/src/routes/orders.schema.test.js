@@ -30,6 +30,10 @@ describe('orderUpdateSchema (PUT /orders/:id)', () => {
 
     expect(parsed.items).toHaveLength(2);
     expect(parsed.items[0]).toEqual({ sku: 'SKU-1', quantity: 10, unitPrice: 1.5 });
+    // Destination fields must survive — before manual-sql/025 they were
+    // silently stripped and the warehouse selection never persisted.
+    expect(parsed.warehouseId).toBe('wh-1');
+    expect(parsed.customAddress).toBeNull();
     expect(parsed.deliveryFee).toBe(4.99);
     expect(parsed.expectedDate).toBe('2026-06-20');
     expect(parsed).not.toHaveProperty('subtotal');
@@ -84,6 +88,13 @@ describe('orderCreateSchema (POST /orders)', () => {
     expect(parsed.expectedDate).toBe('2026-07-05');
     expect(parsed.buyingListId).toBe('bl-1');
     expect(parsed.items[0]).toEqual({ sku: 'SKU-1', quantity: 5, unitPrice: 2.5 });
+  });
+
+  it('keeps the delivery destination (warehouseId / customAddress)', () => {
+    const wh = orderCreateSchema.parse({ warehouseId: 'wh-1', customAddress: null, items: validItems });
+    expect(wh.warehouseId).toBe('wh-1');
+    const custom = orderCreateSchema.parse({ warehouseId: null, customAddress: '12 Scriven St', items: validItems });
+    expect(custom.customAddress).toBe('12 Scriven St');
   });
 
   it('accepts a minimal payload — only items are required', () => {

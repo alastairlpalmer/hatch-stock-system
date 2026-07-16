@@ -33,6 +33,25 @@ export default function BuyingLists() {
   const [lists, setLists] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [creating, setCreating] = useState(false);
+
+  // Hand-built list: starts with no lines; products are added in the detail
+  // view. The other button routes through the suggestion planner.
+  const startBlankList = async () => {
+    if (creating) return;
+    setCreating(true);
+    try {
+      const list = await buyingListsService.create({
+        name: `Buying list — ${format(new Date(), 'd MMM yyyy')}`,
+        items: [],
+      });
+      navigate(`/orders/buying-lists/${list.id}`);
+    } catch (err) {
+      console.error('Failed to create buying list:', err);
+      setError('Failed to create a blank list — check the connection and try again.');
+      setCreating(false);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -59,13 +78,23 @@ export default function BuyingLists() {
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <h2 className="text-xl font-semibold">Buying Lists</h2>
-        <button
-          onClick={() => navigate('/orders/purchase?generate=1')}
-          className="flex items-center justify-center gap-1.5 px-3 py-2.5 bg-emerald-500 text-zinc-900 rounded text-sm font-medium hover:bg-emerald-400 transition-colors"
-        >
-          <Plus size={16} />
-          New buying list
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={startBlankList}
+            disabled={creating}
+            className="flex items-center justify-center gap-1.5 px-3 py-2.5 bg-zinc-700 text-zinc-200 rounded text-sm font-medium hover:bg-zinc-600 transition-colors disabled:opacity-50"
+          >
+            <Plus size={16} />
+            {creating ? 'Creating…' : 'Start blank'}
+          </button>
+          <button
+            onClick={() => navigate('/orders/purchase?generate=1')}
+            className="flex items-center justify-center gap-1.5 px-3 py-2.5 bg-emerald-500 text-zinc-900 rounded text-sm font-medium hover:bg-emerald-400 transition-colors"
+          >
+            <Plus size={16} />
+            Plan weekly buy
+          </button>
+        </div>
       </div>
 
       {loading ? (

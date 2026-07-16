@@ -7,6 +7,7 @@ import ordersService from '../../services/orders.service';
 import buyingListsService from '../../services/buyingLists.service';
 import vendliveService from '../../services/vendlive.service';
 import productsService from '../../services/products.service';
+import ProductSearchCombobox from '../ui/ProductSearchCombobox';
 
 // Compact "2h ago" / "just now" formatter for sync timestamps.
 function formatRelativeTime(ts) {
@@ -171,7 +172,7 @@ function OrderCard({ order, data, onEdit, onDelete }) {
             )}
           </div>
           <div className="text-sm text-zinc-500 mt-1">
-            → {order.deliveryType === 'warehouse' ? (warehouse?.name || order.warehouseId) : order.customAddress}
+            → {order.warehouseId ? (warehouse?.name || order.warehouseId) : (order.customAddress || order.deliveryTo || 'Warehouse')}
             {order.expectedDate && ` • Expected: ${order.expectedDate}`}
           </div>
         </div>
@@ -731,7 +732,9 @@ export default function Orders() {
     setForm({
       supplierId: order.supplierId || '',
       deliveryMethod: order.deliveryMethod || 'standard',
-      deliveryType: order.deliveryType || 'warehouse',
+      // Online orders don't store deliveryType — derive it from which
+      // destination field is set.
+      deliveryType: order.customAddress && !order.warehouseId ? 'custom' : 'warehouse',
       warehouseId: order.warehouseId || '',
       customAddress: order.customAddress || '',
       items: order.items.map(i => ({
@@ -1496,32 +1499,42 @@ export default function Orders() {
               {form.items.map((item, idx) => {
                 const lineTotal = (parseInt(item.quantity) || 0) * (parseFloat(item.unitPrice) || 0);
                 return (
-                  <div key={idx} className="grid grid-cols-12 gap-2 items-center">
-                    <select
-                      value={item.sku}
-                      onChange={e => updateItem(idx, 'sku', e.target.value)}
-                      className="col-span-5 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500"
-                    >
-                      <option value="">Select product</option>
-                      {data.products.map(p => <option key={p.sku} value={p.sku}>{p.name} ({p.sku})</option>)}
-                    </select>
-                    <input
-                      type="number"
-                      placeholder="Qty"
-                      value={item.quantity}
-                      onChange={e => updateItem(idx, 'quantity', e.target.value)}
-                      className="col-span-2 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500"
-                    />
-                    <input
-                      type="number"
-                      step="0.01"
-                      placeholder="Price"
-                      value={item.unitPrice}
-                      onChange={e => updateItem(idx, 'unitPrice', e.target.value)}
-                      className="col-span-2 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500"
-                    />
-                    <div className="col-span-2 text-right text-zinc-300 text-sm">£{lineTotal.toFixed(2)}</div>
-                    <button onClick={() => removeItem(idx)} className="col-span-1 text-zinc-500 hover:text-red-400">×</button>
+                  <div key={idx} className="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:items-center rounded-lg border border-zinc-800 sm:border-0 p-2 sm:p-0">
+                    <div className="sm:col-span-5">
+                      <ProductSearchCombobox
+                        products={data.products}
+                        value={item.sku}
+                        onSelect={sku => updateItem(idx, 'sku', sku)}
+                        recentsKey="hatch-recent-products-po"
+                      />
+                    </div>
+                    {/* On phones the qty/price/total/remove line sits under the
+                        product; sm:contents lifts them back into the 12-col row. */}
+                    <div className="grid grid-cols-12 gap-2 items-center sm:contents">
+                      <input
+                        type="number"
+                        inputMode="numeric"
+                        placeholder="Qty"
+                        value={item.quantity}
+                        onChange={e => updateItem(idx, 'quantity', e.target.value)}
+                        className="col-span-4 sm:col-span-2 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500"
+                      />
+                      <input
+                        type="number"
+                        inputMode="decimal"
+                        step="0.01"
+                        placeholder="Price"
+                        value={item.unitPrice}
+                        onChange={e => updateItem(idx, 'unitPrice', e.target.value)}
+                        className="col-span-4 sm:col-span-2 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500"
+                      />
+                      <div className="col-span-3 sm:col-span-2 text-right text-zinc-300 text-sm">£{lineTotal.toFixed(2)}</div>
+                      <button
+                        onClick={() => removeItem(idx)}
+                        aria-label="Remove item"
+                        className="col-span-1 min-h-[40px] flex items-center justify-center text-zinc-500 hover:text-red-400"
+                      >×</button>
+                    </div>
                   </div>
                 );
               })}
