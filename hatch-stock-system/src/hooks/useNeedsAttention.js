@@ -4,6 +4,7 @@ import { vendliveService } from '../services/vendlive.service';
 import { inventoryService } from '../services/inventory.service';
 import { attentionService } from '../services/attention.service';
 import usePickLists from './usePickLists';
+import { daysUntilExpiry } from '../utils/expiryDays';
 
 // Builds the Dashboard's prioritised "Needs attention" list. Free items come
 // straight from StockContext and render immediately; three independent
@@ -118,13 +119,12 @@ export default function useNeedsAttention() {
     }
 
     // 3/5. Warehouse batch expiry (same thresholds as the Dashboard panels).
-    const now = Date.now();
     const liveBatches = (data.stockBatches || []).filter((b) => b.remainingQty > 0 && b.expiryDate);
     let expiredCount = 0;
     let expiredUnits = 0;
     let criticalCount = 0;
     liveBatches.forEach((b) => {
-      const daysUntil = Math.ceil((new Date(b.expiryDate) - now) / 86400000);
+      const daysUntil = daysUntilExpiry(b.expiryDate);
       if (daysUntil < 0) { expiredCount += 1; expiredUnits += b.remainingQty; }
       else if (daysUntil <= 7) criticalCount += 1;
     });

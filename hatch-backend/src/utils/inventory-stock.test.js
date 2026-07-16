@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   recomputeWarehouseStock,
   consumeBatchesFEFO,
+  consumePlannedBatches,
   setWarehouseStockAbsolute,
 } from './inventory-stock.js';
 
@@ -166,6 +167,83 @@ describe('consumeBatchesFEFO', () => {
     expect(consumed).toEqual([]);
     expect(shortfall).toBe(8);
     expect(tx._batches.find((b) => b.id === 'b1').remainingQty).toBe(0);
+  });
+});
+
+describe('consumePlannedBatches', () => {
+  it('consumes exactly the planned batches when the plan still holds', async () => {
+    const tx = makeTx([
+      { id: 'early', warehouseId: WH, sku: SKU, remainingQty: 20, expiryDate: new Date('2026-02-01') },
+      { id: 'late', warehouseId: WH, sku: SKU, remainingQty: 20, expiryDate: new Date('2026-03-01') },
+    ]);
+    const plan = [{ batchId: 'early', qty: 15 }, { batchId: 'late', qty: 5 }];
+    const { consumed, shortfall, offPlanQty } = await consumePlannedBatches(tx, WH, SKU, 20, plan);
+    expect(shortfall).toBe(0);
+    expect(offPlanQty).toBe(0);
+    expect(tx._batches.find((b) => b.id === 'early').remainingQty).toBe(5);
+    expect(tx._batches.find((b) => b.id === 'late').remainingQty).toBe(15);
+    expect(consumed).toEqual([
+      { batchId: 'early', take: 15 },
+      { batchId: 'late', take: 5 },
+    ]);
+  });
+
+  it('takes less than planned when packedQty was reduced, in plan order', async () => {
+    const tx = makeTx([
+      { id: 'early', warehouseId: WH, sku: SKU, remainingQty: 20, expiryDate: new Date('2026-02-01') },
+      { id: 'late', warehouseId: WH, sku: SKU, remainingQty: 20, expiryDate: new Date('2026-03-01') },
+    ]);
+    const plan = [{ batchId: 'early', qty: 15 }, { batchId: 'late', qty: 5 }];
+    const { offPlanQty } = await consumePlannedBatches(tx, WH, SKU, 10, plan);
+    expect(offPlanQty).toBe(0);
+    // First planned lot covers the whole reduced quantity.
+    expect(tx._batches.find((b) => b.id === 'early').remainingQty).toBe(10);
+    expect(tx._batches.find((b) => b.id === 'late').remainingQty).toBe(20);
+  });
+
+  it('falls back to FEFO for units a planned batch can no longer cover, reporting offPlanQty', async () => {
+    const tx = makeTx([
+      // Planned lot was drained to 3 by something else since generation.
+      { id: 'planned', warehouseId: WH, sku: SKU, remainingQty: 3, expiryDate: new Date('2026-02-01') },
+      { id: 'other', warehouseId: WH, sku: SKU, remainingQty: 20, expiryDate: new Date('2026-03-01') },
+    ]);
+    const plan = [{ batchId: 'planned', qty: 10 }];
+    const { shortfall, offPlanQty } = await consumePlannedBatches(tx, WH, SKU, 10, plan);
+    expect(shortfall).toBe(0);
+    expect(offPlanQty).toBe(7);
+    expect(tx._batches.find((b) => b.id === 'planned').remainingQty).toBe(0);
+    expect(tx._batches.find((b) => b.id === 'other').remainingQty).toBe(13);
+  });
+
+  it('reports a shortfall when neither the plan nor fallback stock covers it', async () => {
+    const tx = makeTx([
+      { id: 'planned', warehouseId: WH, sku: SKU, remainingQty: 4, expiryDate: new Date('2026-02-01') },
+    ]);
+    const plan = [{ batchId: 'planned', qty: 10 }];
+    const { shortfall, offPlanQty } = await consumePlannedBatches(tx, WH, SKU, 10, plan);
+    expect(shortfall).toBe(6);
+    expect(offPlanQty).toBe(0);
+  });
+
+  it('treats a missing/deleted planned batch as fallback work', async () => {
+    const tx = makeTx([
+      { id: 'other', warehouseId: WH, sku: SKU, remainingQty: 20, expiryDate: new Date('2026-03-01') },
+    ]);
+    const plan = [{ batchId: 'gone', qty: 10 }];
+    const { shortfall, offPlanQty } = await consumePlannedBatches(tx, WH, SKU, 10, plan);
+    expect(shortfall).toBe(0);
+    expect(offPlanQty).toBe(10);
+    expect(tx._batches.find((b) => b.id === 'other').remainingQty).toBe(10);
+  });
+
+  it('handles an empty or absent plan as pure FEFO', async () => {
+    const tx = makeTx([
+      { id: 'early', warehouseId: WH, sku: SKU, remainingQty: 20, expiryDate: new Date('2026-02-01') },
+    ]);
+    const { shortfall, offPlanQty } = await consumePlannedBatches(tx, WH, SKU, 5, undefined);
+    expect(shortfall).toBe(0);
+    expect(offPlanQty).toBe(5);
+    expect(tx._batches.find((b) => b.id === 'early').remainingQty).toBe(15);
   });
 });
 

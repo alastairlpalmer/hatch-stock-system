@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useStock } from '../../context/StockContext';
 import inventoryService from '../../services/inventory.service';
 import vendliveService from '../../services/vendlive.service';
+import { daysUntilExpiry } from '../../utils/expiryDays';
 
 export default function Inventory() {
   const { data, addProduct, updateProduct, bulkImportProducts, updateWarehouseStock, bulkUpdateWarehouseStock, createBatch, updateBatch, deleteBatch, transferWarehouseStock, refresh } = useStock();
@@ -193,12 +194,10 @@ export default function Inventory() {
     return batches.filter(b => b.warehouseId === selectedWarehouse && b.remainingQty > 0);
   };
 
-  // Get expiry status
+  // Get expiry status — calendar-day math shared with the backend
   const getExpiryStatus = (expiryDate) => {
-    if (!expiryDate) return null;
-    const now = new Date();
-    const expiry = new Date(expiryDate);
-    const daysUntil = Math.ceil((expiry - now) / (1000 * 60 * 60 * 24));
+    const daysUntil = daysUntilExpiry(expiryDate);
+    if (daysUntil === null) return null;
 
     if (daysUntil < 0) return { status: 'expired', label: 'Expired', days: daysUntil, color: 'text-red-400 bg-red-500/20' };
     if (daysUntil <= 7) return { status: 'critical', label: `${daysUntil}d`, days: daysUntil, color: 'text-red-400 bg-red-500/20' };
@@ -1620,7 +1619,75 @@ export default function Inventory() {
 
           {selectedWarehouse === 'all' ? (
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg overflow-hidden">
-              <div className="overflow-x-auto">
+              {/* Mobile: stacked cards — the matrix (one column per warehouse) is
+                  the widest table in the app and unusable at phone width */}
+              <div className="md:hidden">
+                {(() => {
+                  const allRows = Object.entries(getAllStock()).map(([sku, locs]) => ({
+                    sku,
+                    locs,
+                    total: Object.values(locs).reduce((a, b) => a + b, 0),
+                  }));
+                  if (allRows.length === 0) {
+                    return (
+                      <p className="px-4 py-8 text-center text-zinc-600 text-sm">
+                        No stock recorded yet. Use "Add Stock" or "Upload CSV" to add inventory.
+                      </p>
+                    );
+                  }
+                  const { groups, hiddenCount } = groupStockRows(allRows);
+                  if (groups.length === 0) {
+                    return (
+                      <p className="px-4 py-8 text-center text-zinc-600 text-sm">
+                        {isStockSearching ? 'No stock items match your search.' : `All ${hiddenCount} item(s) are out of stock.`}
+                      </p>
+                    );
+                  }
+                  return (
+                    <>
+                      {groups.map(group => (
+                        <React.Fragment key={group.category}>
+                          <div className="bg-zinc-800/60 px-4 py-2">
+                            <span className="text-emerald-400 font-medium text-xs uppercase tracking-wide">{group.category}</span>
+                            <span className="text-zinc-500 text-xs ml-3">
+                              {group.items.length} product{group.items.length === 1 ? '' : 's'} · {group.items.reduce((acc, r) => acc + r.total, 0)} units
+                            </span>
+                          </div>
+                          {group.items.map(({ sku, locs, total, product }) => (
+                            <div key={sku} className="border-b border-zinc-800/50 px-4 py-3">
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <div className="text-zinc-200 text-sm">{product?.name || '-'}</div>
+                                  <div className="text-zinc-600 text-xs">{sku}</div>
+                                </div>
+                                <div className="text-right shrink-0">
+                                  <p className="text-emerald-400 font-bold text-lg leading-tight">{total}</p>
+                                  <p className="text-zinc-500 text-xs">units</p>
+                                </div>
+                              </div>
+                              {data.warehouses.length > 1 && (
+                                <div className="mt-1 text-xs text-zinc-500">
+                                  {data.warehouses
+                                    .filter(wh => (locs[wh.id] || 0) > 0)
+                                    .map(wh => `${wh.name} ×${locs[wh.id]}`)
+                                    .join(' · ') || 'No stock'}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </React.Fragment>
+                      ))}
+                      {hiddenCount > 0 && (
+                        <p className="px-4 py-2 text-center text-zinc-600 text-xs">
+                          {hiddenCount} out-of-stock item{hiddenCount === 1 ? '' : 's'} hidden
+                        </p>
+                      )}
+                    </>
+                  );
+                })()}
+              </div>
+              {/* Desktop matrix */}
+              <div className="hidden md:block overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-zinc-800">

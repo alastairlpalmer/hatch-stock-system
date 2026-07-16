@@ -77,6 +77,59 @@ export async function consumeBatchesFEFO(tx, warehouseId, sku, quantity) {
 }
 
 /**
+ * Drain `quantity` units following a stored allocation PLAN (the batch lines a
+ * pick list showed the packer), falling back to FEFO for anything the planned
+ * batches can no longer cover. This keeps the system's decrement aligned with
+ * the lots the packer physically pulled: before this, completion re-ran FEFO
+ * fresh, so if stock moved between generation and completion the packer pulled
+ * one lot while the system decremented another.
+ *
+ * plan: [{ batchId, qty }] in the order the packer saw them.
+ * Returns { consumed, shortfall, offPlanQty } — offPlanQty is how many units
+ * had to come from batches OUTSIDE the plan (0 when the plan held).
+ */
+export async function consumePlannedBatches(tx, warehouseId, sku, quantity, plan) {
+  let remaining = quantity;
+  const consumed = [];
+
+  for (const line of Array.isArray(plan) ? plan : []) {
+    if (remaining <= 0) break;
+    if (!line?.batchId || !(line.qty > 0)) continue;
+    let take = Math.min(line.qty, remaining);
+
+    // Same guarded-decrement discipline as consumeBatchesFEFO.
+    const updated = await tx.stockBatch.updateMany({
+      where: { id: line.batchId, remainingQty: { gte: take } },
+      data: { remainingQty: { decrement: take } },
+    });
+    if (updated.count === 0) {
+      const fresh = await tx.stockBatch.findUnique({ where: { id: line.batchId } });
+      take = Math.min(Math.max(0, fresh?.remainingQty ?? 0), remaining);
+      if (take <= 0) continue;
+      const retried = await tx.stockBatch.updateMany({
+        where: { id: line.batchId, remainingQty: { gte: take } },
+        data: { remainingQty: { decrement: take } },
+      });
+      if (retried.count === 0) continue;
+    }
+
+    consumed.push({ batchId: line.batchId, take });
+    remaining -= take;
+  }
+
+  let offPlanQty = 0;
+  let shortfall = 0;
+  if (remaining > 0) {
+    const fallback = await consumeBatchesFEFO(tx, warehouseId, sku, remaining);
+    offPlanQty = remaining - fallback.shortfall;
+    shortfall = fallback.shortfall;
+    consumed.push(...fallback.consumed.map(({ batch, take }) => ({ batchId: batch.id, take })));
+  }
+
+  return { consumed, shortfall, offPlanQty };
+}
+
+/**
  * Set the absolute target quantity for a (warehouse, sku) by materialising the
  * delta as batch changes, then recomputing the aggregate:
  *   - an INCREASE becomes a new no-expiry "adjustment" batch for the difference

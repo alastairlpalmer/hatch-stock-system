@@ -407,6 +407,11 @@ export default function RestockRun() {
                       </p>
                       <p className="text-xs text-zinc-500">
                         {loc.plannedUnits} unit{loc.plannedUnits === 1 ? '' : 's'} planned
+                        {(loc.trimmedUnits || 0) > 0 && (
+                          <span className="ml-1.5 rounded bg-amber-500/15 px-1.5 py-0.5 text-amber-400">
+                            {loc.trimmedUnits} short — warehouse ran out
+                          </span>
+                        )}
                       </p>
                     </div>
                     <div className="flex flex-shrink-0 flex-col items-end gap-1">
@@ -504,8 +509,29 @@ export default function RestockRun() {
                       <span>Per-product breakdown</span>
                       {skuTableOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
                     </button>
+                    {/* Mobile: stacked per-product cards (the 5-col table scrolls sideways on a phone) */}
                     {skuTableOpen && (
-                      <div className="overflow-x-auto">
+                      <div className="md:hidden divide-y divide-zinc-800/50">
+                        {reconciliation.perSku.map((row) => {
+                          const inVan = (row.remaining || 0) > 0;
+                          return (
+                            <div key={row.sku} className={`py-2.5 tabular-nums ${inVan ? 'text-zinc-100' : 'text-zinc-500'}`}>
+                              <div className="flex items-center justify-between gap-3">
+                                <span className="min-w-0 truncate text-sm">{row.name || row.sku}</span>
+                                <span className={`shrink-0 text-sm font-semibold ${inVan ? 'text-amber-400' : ''}`}>
+                                  {row.remaining} in van
+                                </span>
+                              </div>
+                              <div className="mt-0.5 text-xs text-zinc-500">
+                                Packed {row.packed} · Loaded {row.loaded} · Returned {row.returned}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                    {skuTableOpen && (
+                      <div className="hidden md:block overflow-x-auto">
                         <table className="w-full text-sm">
                           <thead>
                             <tr className="border-b border-zinc-800 text-xs text-zinc-500">

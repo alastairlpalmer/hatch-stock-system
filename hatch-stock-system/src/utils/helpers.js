@@ -108,43 +108,6 @@ export function getStockStatus(current, min, max) {
 }
 
 /**
- * Calculate expiry status
- */
-export function getExpiryStatus(expiryDate) {
-  if (!expiryDate) return null;
-  
-  const now = new Date();
-  const expiry = new Date(expiryDate);
-  const daysUntil = Math.ceil((expiry - now) / (1000 * 60 * 60 * 24));
-  
-  if (daysUntil < 0) {
-    return { status: 'expired', label: 'Expired', days: daysUntil, color: 'red' };
-  }
-  if (daysUntil <= 7) {
-    return { status: 'critical', label: `${daysUntil}d`, days: daysUntil, color: 'red' };
-  }
-  if (daysUntil <= 30) {
-    return { status: 'warning', label: `${daysUntil}d`, days: daysUntil, color: 'yellow' };
-  }
-  return { status: 'ok', label: `${daysUntil}d`, days: daysUntil, color: 'emerald' };
-}
-
-/**
- * Debounce function
- */
-export function debounce(func, wait) {
-  let timeout;
-  return function executedFunction(...args) {
-    const later = () => {
-      clearTimeout(timeout);
-      func(...args);
-    };
-    clearTimeout(timeout);
-    timeout = setTimeout(later, wait);
-  };
-}
-
-/**
  * Deep clone object
  */
 export function deepClone(obj) {

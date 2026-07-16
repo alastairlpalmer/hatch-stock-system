@@ -156,13 +156,17 @@ function ItemRow({ item, targetDate, readOnly, onToggle, onQtyChange }) {
           </span>
         </div>
 
-        {/* Per-location chips */}
+        {/* Per-location chips — trimmed stops flagged so a short machine is
+            visible here, not just discovered at the machine door */}
         {(item.perLocation?.length || 0) > 0 && (
           <div className={`text-xs mt-0.5 ${ticked ? 'text-zinc-600' : 'text-zinc-400'}`}>
             {item.perLocation.map((pl, i) => (
               <span key={pl.locationId || i}>
                 {i > 0 && <span className="text-zinc-600"> · </span>}
                 {pl.locationName} ×{pl.qty}
+                {(pl.trimmed || 0) > 0 && (
+                  <span className="text-amber-400"> (−{pl.trimmed} short)</span>
+                )}
               </span>
             ))}
           </div>
@@ -328,6 +332,9 @@ export default function PickListDetail() {
   });
   const [completing, setCompleting] = useState(false);
   const [completeError, setCompleteError] = useState(null);
+  // Lines where completion had to pull from different lots than the plan shown
+  // to the packer (stock moved since generation).
+  const [deviations, setDeviations] = useState(null);
   const [conflict, setConflict] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
   const [justCompleted, setJustCompleted] = useState(false);
@@ -337,6 +344,9 @@ export default function PickListDetail() {
   const [actionError, setActionError] = useState(null);
 
   const persistTimer = useRef(null);
+  const retryTimer = useRef(null);
+  const pendingItemsRef = useRef(null); // unsaved items payload awaiting persist
+  const persistNowRef = useRef(null);   // latest persistNow, callable from unmount
   const itemsRef = useRef(items);
   useEffect(() => { itemsRef.current = items; }, [items]);
 
@@ -375,8 +385,20 @@ export default function PickListDetail() {
     return () => { cancelled = true; };
   }, [id]);
 
-  // Clear any pending debounce on unmount.
-  useEffect(() => () => clearTimeout(persistTimer.current), []);
+  // Flush any pending tick-off save on unmount or when the tab is hidden —
+  // previously the unmount cleanup just cancelled the debounce timer, so
+  // ticks made in the last 700ms before navigating away were silently lost.
+  useEffect(() => {
+    const flush = () => { persistNowRef.current?.(); };
+    window.addEventListener('pagehide', flush);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      clearTimeout(persistTimer.current);
+      clearTimeout(retryTimer.current);
+      flush();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const isDraft = list?.status === 'draft';
   const warehouseName = useMemo(
@@ -390,18 +412,34 @@ export default function PickListDetail() {
   const progressPct = totalCount > 0 ? Math.round((packedCount / totalCount) * 100) : 0;
 
   // ----- optimistic tick-off with debounced persistence -----
+  // Pending payload lives in a ref so it can be flushed from unmount/pagehide;
+  // a failed save keeps the payload and retries once after a short pause
+  // (further edits re-arm the debounce and supersede it).
+
+  const persistNow = async () => {
+    const pending = pendingItemsRef.current;
+    if (!pending) return;
+    pendingItemsRef.current = null;
+    clearTimeout(persistTimer.current);
+    clearTimeout(retryTimer.current);
+    try {
+      await pickListsService.update(id, { items: pending });
+      setSaveState('saved');
+    } catch (err) {
+      setSaveState('error');
+      // Keep the payload unless a newer edit already replaced it.
+      if (!pendingItemsRef.current) pendingItemsRef.current = pending;
+      retryTimer.current = setTimeout(() => persistNowRef.current?.(), 4000);
+    }
+  };
+  persistNowRef.current = persistNow;
 
   const schedulePersist = (nextItems) => {
+    pendingItemsRef.current = nextItems;
     clearTimeout(persistTimer.current);
+    clearTimeout(retryTimer.current);
     setSaveState('saving');
-    persistTimer.current = setTimeout(async () => {
-      try {
-        await pickListsService.update(id, { items: nextItems });
-        setSaveState('saved');
-      } catch (err) {
-        setSaveState('error');
-      }
-    }, 700);
+    persistTimer.current = setTimeout(() => persistNowRef.current?.(), 700);
   };
 
   const applyItems = (updater) => {
@@ -443,7 +481,10 @@ export default function PickListDetail() {
     if (completing) return;
     setCompleting(true);
     setCompleteError(null);
+    // The explicit final save below supersedes any pending debounced payload.
     clearTimeout(persistTimer.current);
+    clearTimeout(retryTimer.current);
+    pendingItemsRef.current = null;
     try {
       // Unticked items are excluded: packedQty 0 so complete() skips them.
       const finalItems = itemsRef.current.map((it) =>
@@ -451,6 +492,7 @@ export default function PickListDetail() {
       );
       await pickListsService.update(id, { items: finalItems });
       const result = await pickListsService.complete(id, { takenBy: takenBy.trim() });
+      setDeviations(Array.isArray(result?.deviations) ? result.deviations : null);
       setItems(
         [...((result?.items && result.items.length ? result.items : finalItems))].sort((a, b) =>
           (a.name || a.sku || '').localeCompare(b.name || b.sku || '')
@@ -692,6 +734,19 @@ export default function PickListDetail() {
           <p className="text-zinc-400 text-xs mt-1">
             {packedCount} of {totalCount} products packed for {formatTargetDate(list.targetDate)}.
           </p>
+          {deviations && deviations.length > 0 && (
+            <div className="mt-2 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded p-2">
+              Stock moved since this list was generated — some units were booked out from
+              different date-lots than the pull lines showed:{' '}
+              {deviations.map((d, i) => (
+                <span key={d.sku}>
+                  {i > 0 && ', '}
+                  {d.name || d.sku} ({d.offPlanQty} unit{d.offPlanQty === 1 ? '' : 's'})
+                </span>
+              ))}
+              . Double-check the expiry flags on what you actually pulled.
+            </div>
+          )}
           <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2">
             <button
               onClick={() => navigate(`/restock/run?pickListId=${id}`)}

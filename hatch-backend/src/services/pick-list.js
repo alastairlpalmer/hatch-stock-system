@@ -1,5 +1,5 @@
 import prisma from '../utils/db.js';
-import { consumeBatchesFEFO, recomputeWarehouseStock } from '../utils/inventory-stock.js';
+import { consumePlannedBatches, recomputeWarehouseStock } from '../utils/inventory-stock.js';
 import { getEffectiveLayout } from './planogram-scope.js';
 
 /**
@@ -361,10 +361,13 @@ export async function generatePickList({
       shortfalls.push({ sku, name, requested: totalQty, available });
       // Trim the deficit from the LAST location in route order so the first
       // stops on the run stay fully served — deterministic and explainable.
+      // Each cut is recorded on the perLocation entry (trimmed) so the run
+      // view can flag WHICH stop is short instead of it shrinking silently.
       let deficit = totalQty - available;
       for (let i = perLocation.length - 1; i >= 0 && deficit > 0; i--) {
         const cut = Math.min(perLocation[i].qty, deficit);
         perLocation[i].qty -= cut;
+        if (cut > 0) perLocation[i].trimmed = (perLocation[i].trimmed || 0) + cut;
         deficit -= cut;
       }
       totalQty = available;
@@ -390,7 +393,9 @@ export async function generatePickList({
       name,
       totalQty,
       packed: false,
-      perLocation: perLocation.filter((p) => p.qty > 0),
+      // Keep zero-qty entries that were trimmed away — the run view flags
+      // those stops as short rather than silently omitting them.
+      perLocation: perLocation.filter((p) => p.qty > 0 || (p.trimmed || 0) > 0),
       batches: allocation,
     });
   }
@@ -557,7 +562,9 @@ export async function getPickListRun(id) {
     const planned = [];
     for (const item of items) {
       for (const p of Array.isArray(item.perLocation) ? item.perLocation : []) {
-        if (p.locationId === locationId) planned.push({ sku: item.sku, name: item.name, qty: p.qty });
+        if (p.locationId === locationId) {
+          planned.push({ sku: item.sku, name: item.name, qty: p.qty, trimmed: p.trimmed || 0 });
+        }
       }
     }
 
@@ -568,6 +575,9 @@ export async function getPickListRun(id) {
       locationName: locationNameById.get(locationId),
       planned,
       plannedUnits: planned.reduce((sum, p) => sum + p.qty, 0),
+      // Units this stop lost to warehouse shortfall trimming at generation —
+      // >0 means the stop is knowingly under-served, not fully stocked.
+      trimmedUnits: planned.reduce((sum, p) => sum + (p.trimmed || 0), 0),
       stockCheck: check
         ? {
             id: check.id,
@@ -675,8 +685,11 @@ export async function returnPickListLeftovers(id, { items, performedBy = null })
 
 /**
  * Complete a draft pick list: consume the packed quantities from the warehouse
- * (FEFO, allocated FRESH at completion time — stock may have moved since
- * generation), journal a StockRemoval, and flip the list to `packed`.
+ * following the STORED batch plan the packer was shown (falling back to FEFO
+ * for units the planned lots can no longer cover), journal a StockRemoval, and
+ * flip the list to `packed`. Lines that had to deviate from the plan are
+ * reported in `deviations` so the UI can tell the packer which pull lines no
+ * longer match reality.
  *
  * If live stock can no longer cover any line the whole transaction rolls back
  * and a 409 error carrying `shortfalls` is thrown — the caller should advise
@@ -697,12 +710,18 @@ export async function completePickList(id, { takenBy = null } = {}) {
 
     const removalItems = [];
     const shortfalls = [];
+    const deviations = [];
     for (const item of Array.isArray(list.items) ? list.items : []) {
       const qty = item.packedQty ?? item.totalQty ?? 0;
       if (qty <= 0) continue;
-      const { shortfall } = await consumeBatchesFEFO(tx, list.warehouseId, item.sku, qty);
+      const { shortfall, offPlanQty } = await consumePlannedBatches(
+        tx, list.warehouseId, item.sku, qty, item.batches,
+      );
       if (shortfall > 0) {
         shortfalls.push({ sku: item.sku, name: item.name, requested: qty, available: qty - shortfall });
+      }
+      if (offPlanQty > 0) {
+        deviations.push({ sku: item.sku, name: item.name, offPlanQty });
       }
       removalItems.push({ sku: item.sku, quantity: qty });
     }
@@ -739,6 +758,6 @@ export async function completePickList(id, { takenBy = null } = {}) {
       data: { removalId: removal.id },
     });
 
-    return { pickList, removal };
+    return { pickList, removal, deviations: deviations.length ? deviations : null };
   });
 }

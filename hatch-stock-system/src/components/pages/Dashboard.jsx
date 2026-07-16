@@ -4,6 +4,7 @@ import { useStock } from '../../context/StockContext';
 import { vendliveService } from '../../services/vendlive.service';
 import { inventoryService } from '../../services/inventory.service';
 import NeedsAttention from './dashboard/NeedsAttention';
+import { daysUntilExpiry } from '../../utils/expiryDays';
 
 function StatCard({ label, value, accent, to }) {
   const colors = {
@@ -298,10 +299,8 @@ export default function Dashboard() {
 
   // Expiry tracking
   const getExpiryStatus = (expiryDate) => {
-    if (!expiryDate) return null;
-    const now = new Date();
-    const expiry = new Date(expiryDate);
-    const daysUntil = Math.ceil((expiry - now) / (1000 * 60 * 60 * 24));
+    const daysUntil = daysUntilExpiry(expiryDate);
+    if (daysUntil === null) return null;
     if (daysUntil < 0) return 'expired';
     if (daysUntil <= 7) return 'critical';
     if (daysUntil <= 30) return 'warning';
@@ -378,7 +377,7 @@ export default function Dashboard() {
             {criticalBatches.map(batch => {
               const product = data.products.find(p => p.sku === batch.sku);
               const warehouse = data.warehouses.find(w => w.id === batch.warehouseId);
-              const daysLeft = Math.ceil((new Date(batch.expiryDate) - new Date()) / (1000 * 60 * 60 * 24));
+              const daysLeft = daysUntilExpiry(batch.expiryDate);
               return (
                 <div key={batch.id} className="flex items-center justify-between py-2 border-b border-red-900/30 last:border-0">
                   <div>
@@ -404,7 +403,7 @@ export default function Dashboard() {
             {warningBatches.slice(0, 5).map(batch => {
               const product = data.products.find(p => p.sku === batch.sku);
               const warehouse = data.warehouses.find(w => w.id === batch.warehouseId);
-              const daysLeft = Math.ceil((new Date(batch.expiryDate) - new Date()) / (1000 * 60 * 60 * 24));
+              const daysLeft = daysUntilExpiry(batch.expiryDate);
               return (
                 <div key={batch.id} className="flex items-center justify-between py-2 border-b border-amber-900/30 last:border-0">
                   <div>
