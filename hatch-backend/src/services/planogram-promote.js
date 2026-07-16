@@ -47,7 +47,7 @@ export async function promoteDraftLayout(locationId) {
 
   const draftRows = await prisma.slotAssignment.findMany({
     where: { layoutId: draft.id, validTo: null },
-    select: { shelf: true, position: true, targetType: true, sku: true, mealType: true, capacity: true },
+    select: { shelf: true, position: true, targetType: true, sku: true, mealType: true, parentId: true, capacity: true },
   });
 
   return prisma.$transaction(async (tx) => {
@@ -60,7 +60,7 @@ export async function promoteDraftLayout(locationId) {
 
     const currentOpenRows = await tx.slotAssignment.findMany({
       where: { layoutId: current.id, validTo: null },
-      select: { id: true, shelf: true, position: true, targetType: true, sku: true, mealType: true, capacity: true },
+      select: { id: true, shelf: true, position: true, targetType: true, sku: true, mealType: true, parentId: true, capacity: true },
     });
 
     const plan = buildPromotionPlan(currentOpenRows, {

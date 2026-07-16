@@ -107,7 +107,7 @@ describe('diffSlotAssignments', () => {
     ]);
     expect(toCloseIds).toEqual(['r1']);
     expect(toCreate).toEqual([
-      { shelf: 1, position: 0, slotCode: '1A', targetType: 'sku', sku: 'B', mealType: null, capacity: null },
+      { shelf: 1, position: 0, slotCode: '1A', targetType: 'sku', sku: 'B', mealType: null, parentId: null, capacity: null },
     ]);
   });
 
@@ -118,7 +118,7 @@ describe('diffSlotAssignments', () => {
     ]);
     expect(toCloseIds).toEqual(['r1']);
     expect(toCreate).toEqual([
-      { shelf: 2, position: 4, slotCode: '2E', targetType: 'sku', sku: 'C', mealType: null, capacity: null },
+      { shelf: 2, position: 4, slotCode: '2E', targetType: 'sku', sku: 'C', mealType: null, parentId: null, capacity: null },
     ]);
   });
 
@@ -307,6 +307,107 @@ describe('computeUnplaced', () => {
     expect(computeUnplaced(assignments, products)).toEqual({
       skus: ['LOOSE'],
       mealTypes: ['Veg/Vegan', 'Unclassified'],
+      parents: [],
     });
+  });
+});
+
+describe('parent (product family) slots', () => {
+  it('validateLayout accepts parent targets and requires parentId', () => {
+    const shelves = [{ shelf: 1, slots: 4 }];
+    expect(validateLayout(shelves, [
+      { shelf: 1, position: 0, targetType: 'parent', parentId: 'p1' },
+    ])).toEqual([]);
+    const errors = validateLayout(shelves, [
+      { shelf: 1, position: 0, targetType: 'parent' },
+    ]);
+    expect(errors.some((e) => e.includes("requires a parentId"))).toBe(true);
+  });
+
+  it('targetKey and diffSlotAssignments treat parentId as the identity', () => {
+    expect(targetKey({ targetType: 'parent', parentId: 'p1' })).toBe('parent:p1');
+    const open = [{ id: 'row1', shelf: 1, position: 0, targetType: 'parent', parentId: 'p1', capacity: null }];
+    // same parent — no churn
+    const same = diffSlotAssignments(open, [{ shelf: 1, position: 0, targetType: 'parent', parentId: 'p1' }]);
+    expect(same.toCloseIds).toEqual([]);
+    expect(same.toCreate).toEqual([]);
+    // different parent — history cycles and parentId lands on the new row
+    const moved = diffSlotAssignments(open, [{ shelf: 1, position: 0, targetType: 'parent', parentId: 'p2' }]);
+    expect(moved.toCloseIds).toEqual(['row1']);
+    expect(moved.toCreate[0].parentId).toBe('p2');
+    expect(moved.toCreate[0].sku).toBeNull();
+  });
+
+  it('buildPlanogramScope exposes parentSet and family capacity', () => {
+    const scope = buildPlanogramScope(
+      [
+        { shelf: 1, position: 0, targetType: 'parent', parentId: 'p1', capacity: null },
+        { shelf: 1, position: 1, targetType: 'parent', parentId: 'p1', capacity: 10 },
+        { shelf: 1, position: 2, targetType: 'sku', sku: 'COKE', capacity: null },
+      ],
+      [{ shelf: 1, slots: 6, unitsPerSlot: 8 }],
+    );
+    expect([...scope.parentSet]).toEqual(['p1']);
+    expect(scope.capacityByTarget.get('parent:p1')).toBe(18); // 8 + 10
+    expect(scope.skuSet.has('COKE')).toBe(true);
+  });
+
+  it('detectStale flags a parent slot when the family has no members here', () => {
+    const out = detectStale(
+      [{ targetType: 'parent', parentId: 'p1' }, { targetType: 'parent', parentId: 'p2' }],
+      new Set(),
+      new Map(),
+      new Map([['p1', 2]]),
+    );
+    expect(out[0].stale).toBe(false);
+    expect(out[1].stale).toBe(true);
+  });
+
+  it('computeUnplaced counts family members as placed via own slot OR parent slot', () => {
+    const products = [
+      { sku: 'BB-CHOC', isFreshMeal: false, parentId: 'p1' },
+      { sku: 'BB-CARA', isFreshMeal: false, parentId: 'p1' },
+      { sku: 'ED-MOCHA', isFreshMeal: false, parentId: 'p2' },
+      { sku: 'COKE', isFreshMeal: false },
+    ];
+    // p1 covered by parent slot; p2 has nothing; COKE unplaced as before
+    const out = computeUnplaced(
+      [{ targetType: 'parent', parentId: 'p1' }],
+      products,
+    );
+    expect(out.parents).toEqual(['p2']);
+    expect(out.skus).toEqual(['COKE']);
+    // p2 covered by a member's own sku slot -> not unplaced
+    const covered = computeUnplaced(
+      [{ targetType: 'parent', parentId: 'p1' }, { targetType: 'sku', sku: 'ED-MOCHA' }],
+      products,
+    );
+    expect(covered.parents).toEqual([]);
+  });
+
+  it('buildRestockSheetRows renders a parent slot as a named group row', () => {
+    const { rows, totalAdd } = buildRestockSheetRows(
+      [
+        { shelf: 1, position: 0, slotCode: '1A', targetType: 'parent', parentId: 'p1' },
+        { shelf: 1, position: 1, slotCode: '1B', targetType: 'parent', parentId: 'p1' },
+      ],
+      {
+        qtyBySku: new Map(),
+        groupQty: new Map(),
+        skuMax: new Map(),
+        groupMax: new Map(),
+        nameBySku: new Map(),
+        parentQty: new Map([['p1', 4]]),
+        parentMax: new Map([['p1', 12]]),
+        parentName: new Map([['p1', 'Barebells']]),
+      },
+    );
+    expect(rows[0].label).toBe('Barebells');
+    expect(rows[0].isGroup).toBe(true);
+    expect(rows[0].primary).toBe(true);
+    expect(rows[0].add).toBe(8);
+    expect(rows[1].primary).toBe(false);
+    expect(rows[1].primarySlotCode).toBe('1A');
+    expect(totalAdd).toBe(8);
   });
 });

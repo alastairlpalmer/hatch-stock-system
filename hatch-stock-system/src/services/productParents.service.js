@@ -43,6 +43,15 @@ export const productParentsService = {
   },
 
   /**
+   * Machines where a family's total stock is healthy but its best-selling
+   * flavour is at zero. @returns {Promise<{items: Array}>}
+   */
+  getStarvation: async () => {
+    const response = await api.get('/product-parents/starvation');
+    return response.data;
+  },
+
+  /**
    * Get per-location group capacity.
    * @returns {Promise<Object>} { parentId: { minStock, maxStock } }
    */

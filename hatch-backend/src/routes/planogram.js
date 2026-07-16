@@ -41,14 +41,16 @@ const assignmentSchema = z
   .object({
     shelf: z.number().int().min(1),
     position: z.number().int().min(0),
-    targetType: z.enum(['sku', 'mealType']),
+    targetType: z.enum(['sku', 'mealType', 'parent']),
     sku: z.string().min(1).optional().nullable(),
     mealType: z.string().min(1).optional().nullable(),
+    parentId: z.string().min(1).optional().nullable(),
     capacity: capacitySchema, // per-slot override of the shelf default
   })
-  .refine((a) => (a.targetType === 'sku' ? !!a.sku : !!a.mealType), {
-    message: "sku targets require 'sku'; mealType targets require 'mealType'",
-  });
+  .refine(
+    (a) => (a.targetType === 'sku' ? !!a.sku : a.targetType === 'parent' ? !!a.parentId : !!a.mealType),
+    { message: "sku targets require 'sku'; mealType targets require 'mealType'; parent targets require 'parentId'" },
+  );
 
 export const savePlanogramSchema = z.object({
   shelves: z.array(shelfSchema).min(1),
@@ -68,7 +70,7 @@ async function loadLocationProducts(locationId) {
   if (skus.length === 0) return [];
   return prisma.product.findMany({
     where: { sku: { in: skus } },
-    select: { sku: true, name: true, category: true, isFreshMeal: true, mealType: true },
+    select: { sku: true, name: true, category: true, isFreshMeal: true, mealType: true, parentId: true },
   });
 }
 
@@ -83,15 +85,17 @@ async function buildPlanogramPayload(locationId, revision = 'current') {
   const layout = await prisma.machineLayout.findUnique({
     where: { locationId_revision: { locationId, revision } },
   });
-  if (!layout) return { layout: null, assignments: [], unplaced: { skus: [], mealTypes: [] } };
+  if (!layout) return { layout: null, assignments: [], unplaced: { skus: [], mealTypes: [], parents: [] } };
 
-  const [openRows, locationProducts] = await Promise.all([
+  const [openRows, locationProducts, productParents] = await Promise.all([
     prisma.slotAssignment.findMany({
       where: { layoutId: layout.id, validTo: null },
       orderBy: [{ shelf: 'asc' }, { position: 'asc' }],
     }),
     loadLocationProducts(locationId),
+    prisma.productParent.findMany({ select: { id: true, name: true } }),
   ]);
+  const parentNameOf = new Map(productParents.map((p) => [p.id, p.name]));
 
   const productBySku = new Map(locationProducts.map((p) => [p.sku, p]));
   // Slot targets can reference SKUs no longer assigned to the location (stale
@@ -109,16 +113,20 @@ async function buildPlanogramPayload(locationId, revision = 'current') {
 
   const assignedSkuSet = new Set(locationProducts.map((p) => p.sku));
   const mealTypeMemberCounts = new Map();
+  const parentMemberCounts = new Map();
   for (const p of locationProducts) {
-    if (!p.isFreshMeal) continue;
-    const group = p.mealType || 'Unclassified';
-    mealTypeMemberCounts.set(group, (mealTypeMemberCounts.get(group) || 0) + 1);
+    if (p.isFreshMeal) {
+      const group = p.mealType || 'Unclassified';
+      mealTypeMemberCounts.set(group, (mealTypeMemberCounts.get(group) || 0) + 1);
+    } else if (p.parentId) {
+      parentMemberCounts.set(p.parentId, (parentMemberCounts.get(p.parentId) || 0) + 1);
+    }
   }
 
   const shelvesByNumber = new Map(
     (Array.isArray(layout.shelves) ? layout.shelves : []).map((s) => [s.shelf, s]),
   );
-  const assignments = detectStale(openRows, assignedSkuSet, mealTypeMemberCounts).map((a) => ({
+  const assignments = detectStale(openRows, assignedSkuSet, mealTypeMemberCounts, parentMemberCounts).map((a) => ({
     id: a.id,
     shelf: a.shelf,
     position: a.position,
@@ -126,6 +134,8 @@ async function buildPlanogramPayload(locationId, revision = 'current') {
     targetType: a.targetType,
     sku: a.sku,
     mealType: a.mealType,
+    parentId: a.parentId,
+    parentName: a.parentId ? (parentNameOf.get(a.parentId) ?? null) : null,
     capacity: a.capacity ?? null,
     // capacity ?? shelf unitsPerSlot ?? null — what this facing actually holds
     effectiveCapacity: resolveSlotCapacity(a, shelvesByNumber),
@@ -143,7 +153,11 @@ async function buildPlanogramPayload(locationId, revision = 'current') {
       updatedAt: layout.updatedAt,
     },
     assignments,
-    unplaced: computeUnplaced(openRows, locationProducts),
+    unplaced: (() => {
+      const u = computeUnplaced(openRows, locationProducts);
+      // Family ids -> named entries so the UI needn't resolve them.
+      return { ...u, parents: u.parents.map((id) => ({ parentId: id, name: parentNameOf.get(id) || id })) };
+    })(),
   };
 }
 
@@ -181,7 +195,7 @@ router.put('/location/:locationId', asyncHandler(async (req, res) => {
 
   const openRows = await prisma.slotAssignment.findMany({
     where: { layoutId: layout.id, validTo: null },
-    select: { id: true, shelf: true, position: true, targetType: true, sku: true, mealType: true, capacity: true },
+    select: { id: true, shelf: true, position: true, targetType: true, sku: true, mealType: true, parentId: true, capacity: true },
   });
   const { toCloseIds, toCreate, toUpdateCapacity } = diffSlotAssignments(openRows, assignments);
 
@@ -235,7 +249,7 @@ router.post('/location/:locationId/draft', asyncHandler(async (req, res) => {
 
   const openRows = await prisma.slotAssignment.findMany({
     where: { layoutId: current.id, validTo: null },
-    select: { shelf: true, position: true, slotCode: true, targetType: true, sku: true, mealType: true, capacity: true },
+    select: { shelf: true, position: true, slotCode: true, targetType: true, sku: true, mealType: true, parentId: true, capacity: true },
   });
 
   await prisma.$transaction(async (tx) => {
@@ -306,14 +320,14 @@ publicRestockSheetRouter.get('/:token', asyncHandler(async (req, res) => {
   // Draft layouts carry a token too (uuid default) but are never public.
   if (!layout || layout.revision !== 'current') return res.status(404).json({ error: 'Not found' });
 
-  const [assignments, stockRows, configRows, mealConfigRows] = await Promise.all([
+  const [assignments, stockRows, configRows, mealConfigRows, parentConfigRows, productParents] = await Promise.all([
     prisma.slotAssignment.findMany({
       where: { layoutId: layout.id, validTo: null },
-      select: { shelf: true, position: true, slotCode: true, targetType: true, sku: true, mealType: true, capacity: true },
+      select: { shelf: true, position: true, slotCode: true, targetType: true, sku: true, mealType: true, parentId: true, capacity: true },
     }),
     prisma.locationStock.findMany({
       where: { locationId: layout.locationId },
-      select: { sku: true, quantity: true, updatedAt: true, product: { select: { name: true, isFreshMeal: true, mealType: true } } },
+      select: { sku: true, quantity: true, updatedAt: true, product: { select: { name: true, isFreshMeal: true, mealType: true, parentId: true } } },
     }),
     prisma.locationConfig.findMany({
       where: { locationId: layout.locationId },
@@ -323,6 +337,11 @@ publicRestockSheetRouter.get('/:token', asyncHandler(async (req, res) => {
       where: { locationId: layout.locationId },
       select: { mealType: true, maxStock: true },
     }),
+    prisma.locationParentConfig.findMany({
+      where: { locationId: layout.locationId },
+      select: { parentId: true, maxStock: true },
+    }),
+    prisma.productParent.findMany({ select: { id: true, name: true } }),
   ]);
 
   const qtyBySku = new Map(stockRows.map((r) => [r.sku, r.quantity]));
@@ -340,14 +359,19 @@ publicRestockSheetRouter.get('/:token', asyncHandler(async (req, res) => {
   }
 
   const groupQty = new Map();
+  const parentQty = new Map();
   for (const r of stockRows) {
-    if (!r.product?.isFreshMeal) continue;
-    const group = r.product.mealType || 'Unclassified';
-    groupQty.set(group, (groupQty.get(group) || 0) + r.quantity);
+    if (r.product?.isFreshMeal) {
+      const group = r.product.mealType || 'Unclassified';
+      groupQty.set(group, (groupQty.get(group) || 0) + r.quantity);
+    } else if (r.product?.parentId) {
+      parentQty.set(r.product.parentId, (parentQty.get(r.product.parentId) || 0) + r.quantity);
+    }
   }
 
   const skuMax = new Map(configRows.filter((r) => r.maxStock != null).map((r) => [r.sku, r.maxStock]));
   const groupMax = new Map(mealConfigRows.filter((r) => r.maxStock != null).map((r) => [r.mealType, r.maxStock]));
+  const parentMax = new Map(parentConfigRows.filter((r) => r.maxStock != null).map((r) => [r.parentId, r.maxStock]));
 
   // Diagram slot capacity overrides the config max where resolvable — keeps
   // the 3PL sheet's "add" targets consistent with pick-list generation.
@@ -355,6 +379,7 @@ publicRestockSheetRouter.get('/:token', asyncHandler(async (req, res) => {
   for (const [key, cap] of scope.capacityByTarget) {
     if (cap == null) continue;
     if (key.startsWith('sku:')) skuMax.set(key.slice(4), cap);
+    else if (key.startsWith('parent:')) parentMax.set(key.slice('parent:'.length), cap);
     else groupMax.set(key.slice('mealType:'.length), cap);
   }
 
@@ -364,6 +389,9 @@ publicRestockSheetRouter.get('/:token', asyncHandler(async (req, res) => {
     skuMax,
     groupMax,
     nameBySku,
+    parentQty,
+    parentMax,
+    parentName: new Map(productParents.map((p) => [p.id, p.name])),
   });
 
   const stockUpdatedAt = stockRows.reduce(

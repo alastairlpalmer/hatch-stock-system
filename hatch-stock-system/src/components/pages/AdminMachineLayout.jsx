@@ -171,11 +171,13 @@ export default function AdminMachineLayout() {
     const assigned = new Set(location?.assignedItems || []);
     const products = (data.products || []).filter((p) => assigned.has(p.sku));
     const groups = new Set();
+    const familyIds = new Set();
     const byCategory = {};
     for (const p of products) {
       if (p.isFreshMeal) {
         groups.add(p.mealType || 'Unclassified');
       } else {
+        if (p.parentId) familyIds.add(p.parentId);
         const cat = p.category || 'Uncategorised';
         (byCategory[cat] = byCategory[cat] || []).push(p);
       }
@@ -185,36 +187,49 @@ export default function AdminMachineLayout() {
       const ia = order.indexOf(a); const ib = order.indexOf(b);
       return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib) || a.localeCompare(b);
     });
+    // Families with at least one flavour assigned here ("any flavour" slots)
+    const families = (data.productParents || [])
+      .filter((pp) => familyIds.has(pp.id))
+      .map((pp) => ({ parentId: pp.id, name: pp.name }))
+      .sort((a, b) => a.name.localeCompare(b.name));
     const categories = Object.entries(byCategory)
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([category, items]) => ({ category, items: items.sort((x, y) => (x.name || x.sku).localeCompare(y.name || y.sku)) }));
-    return { mealGroups, categories, assignedSet: assigned };
-  }, [location, data.products, data.mealTypes]);
+    return { mealGroups, families, categories, assignedSet: assigned };
+  }, [location, data.products, data.mealTypes, data.productParents]);
 
   // Stale in the DRAFT: sku target no longer in the location's mirrored list
   const isStaleTarget = (target) => {
     if (!target) return false;
     if (target.targetType === 'sku') return !pickerData.assignedSet.has(target.sku);
+    if (target.targetType === 'parent') return !pickerData.families.some((f) => f.parentId === target.parentId);
     return !pickerData.mealGroups.includes(target.mealType);
   };
 
   const targetLabel = (target) => {
     if (!target) return null;
     if (target.targetType === 'mealType') return target.mealType;
+    if (target.targetType === 'parent') {
+      return (data.productParents || []).find((pp) => pp.id === target.parentId)?.name || 'Product family';
+    }
     return productBySku.get(target.sku)?.name || target.sku;
   };
 
-  // Not-placed: location products/groups without a draft slot
+  // Not-placed: location products/groups without a draft slot. A family
+  // flavour counts as placed via its own slot OR its family's slot.
   const notPlaced = useMemo(() => {
     const placedSkus = new Set();
     const placedGroups = new Set();
+    const placedParents = new Set();
     for (const t of Object.values(draft.slots)) {
       if (t.targetType === 'sku') placedSkus.add(t.sku);
+      else if (t.targetType === 'parent') placedParents.add(t.parentId);
       else placedGroups.add(t.mealType);
     }
     return {
       mealGroups: pickerData.mealGroups.filter((g) => !placedGroups.has(g)),
-      products: pickerData.categories.flatMap((c) => c.items).filter((p) => !placedSkus.has(p.sku)),
+      products: pickerData.categories.flatMap((c) => c.items)
+        .filter((p) => !placedSkus.has(p.sku) && !(p.parentId && placedParents.has(p.parentId))),
     };
   }, [draft.slots, pickerData]);
 
@@ -318,7 +333,7 @@ export default function AdminMachineLayout() {
 
 function sameTarget(a, b) {
   if (!a || !b) return false;
-  return a.targetType === b.targetType && a.sku === b.sku && a.mealType === b.mealType;
+  return a.targetType === b.targetType && a.sku === b.sku && a.mealType === b.mealType && a.parentId === b.parentId;
 }
 
 function draftFromPayload(p) {
@@ -329,6 +344,7 @@ function draftFromPayload(p) {
       targetType: a.targetType,
       sku: a.sku || undefined,
       mealType: a.mealType || undefined,
+      parentId: a.parentId || undefined,
     };
   }
   return { shelves: p.layout.shelves || [], slots };
@@ -374,7 +390,7 @@ function ShelfRow({
                     : stale
                       ? 'border-amber-500/50 bg-amber-500/10 text-amber-300'
                       : target
-                        ? target.targetType === 'mealType'
+                        ? target.targetType === 'mealType' || target.targetType === 'parent'
                           ? 'border-teal-500/40 bg-teal-500/10 text-teal-300'
                           : 'border-zinc-700 bg-zinc-800/70 text-zinc-200'
                         : `border-dashed border-zinc-700 text-zinc-600 ${armed ? 'hover:border-emerald-500 hover:text-emerald-400' : 'hover:border-zinc-500'}`
@@ -408,6 +424,7 @@ function SlotPicker({ pickerData, onPick, onClear, onClose, hasTarget }) {
   const q = search.trim().toLowerCase();
   const matches = (name) => !q || name.toLowerCase().includes(q);
   const groups = pickerData.mealGroups.filter(matches);
+  const families = (pickerData.families || []).filter((f) => matches(f.name));
   const categories = pickerData.categories
     .map((c) => ({ ...c, items: c.items.filter((p) => matches(p.name || p.sku)) }))
     .filter((c) => c.items.length > 0);
@@ -438,6 +455,20 @@ function SlotPicker({ pickerData, onPick, onClear, onClose, hasTarget }) {
             ))}
           </div>
         )}
+        {families.length > 0 && (
+          <div>
+            <div className="text-[10px] uppercase tracking-wide text-zinc-500 px-1 mb-1">Product families</div>
+            {families.map((f) => (
+              <button
+                key={f.parentId}
+                onClick={() => onPick({ targetType: 'parent', parentId: f.parentId })}
+                className="w-full text-left px-2 py-1.5 rounded text-sm text-teal-300 hover:bg-zinc-800"
+              >
+                {f.name} <span className="text-zinc-600 text-xs">(any flavour)</span>
+              </button>
+            ))}
+          </div>
+        )}
         {categories.map((c) => (
           <div key={c.category}>
             <div className="text-[10px] uppercase tracking-wide text-zinc-500 px-1 mb-1">{c.category}</div>
@@ -452,7 +483,7 @@ function SlotPicker({ pickerData, onPick, onClear, onClose, hasTarget }) {
             ))}
           </div>
         ))}
-        {groups.length === 0 && categories.length === 0 && (
+        {groups.length === 0 && families.length === 0 && categories.length === 0 && (
           <div className="text-zinc-600 text-sm px-1 py-2">No matches.</div>
         )}
         {hasTarget && (

@@ -18,6 +18,7 @@ export default function PlanogramView({
   getGroupStockStatus,
   mealGroups,
   mealTypes,
+  parentGroups,
   products,
   location,
 }) {
@@ -121,6 +122,7 @@ export default function PlanogramView({
 
   const productBySku = useMemo(() => new Map((products || []).map((p) => [p.sku, p])), [products]);
   const groupByName = useMemo(() => new Map((mealGroups || []).map((g) => [g.mealType, g])), [mealGroups]);
+  const familyById = useMemo(() => new Map((parentGroups || []).map((g) => [g.parentId, g])), [parentGroups]);
 
   const { slotModels, staleCount } = useMemo(() => {
     const models = {};
@@ -128,10 +130,13 @@ export default function PlanogramView({
     if (!payload?.assignments) return { slotModels: models, staleCount: 0 };
 
     // How many slots each target occupies (×N marker on shared totals)
+    const slotKey = (a) =>
+      a.targetType === 'mealType' ? `g:${a.mealType}`
+        : a.targetType === 'parent' ? `p:${a.parentId}`
+        : `s:${a.sku}`;
     const slotCounts = new Map();
     for (const a of payload.assignments) {
-      const key = a.targetType === 'mealType' ? `g:${a.mealType}` : `s:${a.sku}`;
-      slotCounts.set(key, (slotCounts.get(key) || 0) + 1);
+      slotCounts.set(slotKey(a), (slotCounts.get(slotKey(a)) || 0) + 1);
     }
 
     for (const a of payload.assignments) {
@@ -148,6 +153,15 @@ export default function PlanogramView({
         if (group?.config?.minStock || group?.config?.maxStock) {
           lines.push(`Min ${group.config.minStock || 0} · Max ${group.config.maxStock || 0}`);
         }
+      } else if (a.targetType === 'parent') {
+        const family = familyById.get(a.parentId);
+        label = a.parentName || family?.name || 'Product family';
+        qty = family ? family.totalQty : 0;
+        color = family ? getGroupStockStatus(family.totalQty, family.config).color : 'zinc';
+        subtitle = 'Product family · any flavour';
+        if (family?.config?.minStock || family?.config?.maxStock) {
+          lines.push(`Min ${family.config.minStock || 0} · Max ${family.config.maxStock || 0}`);
+        }
       } else {
         const product = a.product || productBySku.get(a.sku);
         label = product?.name || a.sku;
@@ -156,7 +170,7 @@ export default function PlanogramView({
         subtitle = a.sku;
       }
 
-      const count = slotCounts.get(a.targetType === 'mealType' ? `g:${a.mealType}` : `s:${a.sku}`) || 1;
+      const count = slotCounts.get(slotKey(a)) || 1;
       if (count > 1) lines.push(`Total across ${count} slots — per-slot split unknown`);
       if (a.effectiveCapacity != null) {
         lines.push(`Holds ${a.effectiveCapacity} units${a.capacity != null ? ' (slot override)' : ''}`);
@@ -170,12 +184,12 @@ export default function PlanogramView({
         multiSlotCount: count,
         statusColor: color,
         stale: a.stale,
-        isGroup: a.targetType === 'mealType',
+        isGroup: a.targetType === 'mealType' || a.targetType === 'parent',
         tooltip: { title: label, subtitle, lines },
       };
     }
     return { slotModels: models, staleCount: stale };
-  }, [payload, productBySku, groupByName, getQty, getStockStatus, getGroupStockStatus]);
+  }, [payload, productBySku, groupByName, familyById, getQty, getStockStatus, getGroupStockStatus]);
 
   // Unplaced products/groups that actually have stock — the weekly gap-check.
   const notPlaced = useMemo(() => {
@@ -185,12 +199,18 @@ export default function PlanogramView({
       const group = groupByName.get(g);
       if (group && group.totalQty > 0) items.push({ key: `g-${g}`, label: g, qty: group.totalQty, isGroup: true });
     }
+    for (const p of payload.unplaced.parents || []) {
+      const family = familyById.get(p.parentId);
+      if (family && family.totalQty > 0) {
+        items.push({ key: `p-${p.parentId}`, label: p.name || family.name, qty: family.totalQty, isGroup: true });
+      }
+    }
     for (const sku of payload.unplaced.skus || []) {
       const qty = getQty(sku);
       if (qty > 0) items.push({ key: sku, label: productBySku.get(sku)?.name || sku, qty, isGroup: false });
     }
     return items;
-  }, [payload, groupByName, getQty, productBySku]);
+  }, [payload, groupByName, familyById, getQty, productBySku]);
 
   if (loading) return <div className="text-zinc-500 text-sm py-12 text-center">Loading planogram…</div>;
   if (error) {
@@ -268,6 +288,7 @@ export default function PlanogramView({
           products={products}
           mealGroups={mealGroups}
           mealTypes={mealTypes}
+          parentGroups={parentGroups}
           location={location}
           revision={revision}
           onSaved={(fresh) => { setPayload(fresh); setEditing(false); }}
@@ -373,7 +394,7 @@ export default function PlanogramView({
               <span className="inline-block w-2 h-2 rounded-full bg-amber-500" />
               <span className="text-zinc-400">Stale — product left the location</span>
             </div>
-            <p className="text-zinc-600 pt-1">Teal names are fresh-meal groups (rotating flavours).</p>
+            <p className="text-zinc-600 pt-1">Teal names are fresh-meal groups (rotating flavours) or product families (any flavour).</p>
           </div>
         </div>
       </div>

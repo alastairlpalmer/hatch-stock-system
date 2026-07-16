@@ -90,6 +90,8 @@ export function validateLayout(shelves, assignments = []) {
       if (!a.sku) errors.push(`Assignment ${code}: targetType 'sku' requires a sku`);
     } else if (a.targetType === 'mealType') {
       if (!a.mealType) errors.push(`Assignment ${code}: targetType 'mealType' requires a mealType`);
+    } else if (a.targetType === 'parent') {
+      if (!a.parentId) errors.push(`Assignment ${code}: targetType 'parent' requires a parentId`);
     } else {
       errors.push(`Assignment ${code}: unknown targetType '${a.targetType}'`);
     }
@@ -107,7 +109,9 @@ export function validateLayout(shelves, assignments = []) {
  * not a product move, so it must never cycle the history row.
  */
 export function targetKey(a) {
-  return a.targetType === 'mealType' ? `mealType:${a.mealType}` : `sku:${a.sku}`;
+  if (a.targetType === 'mealType') return `mealType:${a.mealType}`;
+  if (a.targetType === 'parent') return `parent:${a.parentId}`;
+  return `sku:${a.sku}`;
 }
 
 /**
@@ -149,6 +153,7 @@ export function diffSlotAssignments(openRows, next) {
         targetType: a.targetType,
         sku: a.targetType === 'sku' ? a.sku : null,
         mealType: a.targetType === 'mealType' ? a.mealType : null,
+        parentId: a.targetType === 'parent' ? a.parentId : null,
         capacity: a.capacity ?? null,
       });
     } else if ((existing.capacity ?? null) !== (a.capacity ?? null)) {
@@ -182,10 +187,10 @@ export function resolveSlotCapacity(assignment, shelvesByNumber) {
  * would silently understate the fill target, so unknown means unknown and the
  * caller falls back to the config maxStock.
  *
- * openAssignments: [{ shelf, position, targetType, sku, mealType, capacity? }]
+ * openAssignments: [{ shelf, position, targetType, sku, mealType, parentId, capacity? }]
  * shelves: MachineLayout.shelves JSON — [{ shelf, slots, unitsPerSlot? }]
  * Returns {
- *   skuSet: Set<sku>, mealTypeSet: Set<mealType>,
+ *   skuSet: Set<sku>, mealTypeSet: Set<mealType>, parentSet: Set<parentId>,
  *   capacityByTarget: Map(targetKey -> int|null),
  *   slotCountByTarget: Map(targetKey -> int),
  * }
@@ -197,12 +202,14 @@ export function buildPlanogramScope(openAssignments, shelves) {
 
   const skuSet = new Set();
   const mealTypeSet = new Set();
+  const parentSet = new Set();
   const capacityByTarget = new Map();
   const slotCountByTarget = new Map();
 
   for (const a of openAssignments || []) {
     const key = targetKey(a);
     if (a.targetType === 'sku') skuSet.add(a.sku);
+    else if (a.targetType === 'parent') parentSet.add(a.parentId);
     else mealTypeSet.add(a.mealType);
 
     slotCountByTarget.set(key, (slotCountByTarget.get(key) || 0) + 1);
@@ -215,7 +222,7 @@ export function buildPlanogramScope(openAssignments, shelves) {
     }
   }
 
-  return { skuSet, mealTypeSet, capacityByTarget, slotCountByTarget };
+  return { skuSet, mealTypeSet, parentSet, capacityByTarget, slotCountByTarget };
 }
 
 /**
@@ -224,14 +231,20 @@ export function buildPlanogramScope(openAssignments, shelves) {
  * - sku slot: the SKU has dropped out of the location's mirrored assignment
  *   list (weekly VendLive planogram churn);
  * - mealType slot: the bucket has zero member flavours assigned this week
- *   (soft warning — a legitimate transient between menus).
+ *   (soft warning — a legitimate transient between menus);
+ * - parent slot: the family has zero member flavours assigned here.
  */
-export function detectStale(assignments, assignedSkuSet, mealTypeMemberCounts = new Map()) {
+export function detectStale(
+  assignments,
+  assignedSkuSet,
+  mealTypeMemberCounts = new Map(),
+  parentMemberCounts = new Map(),
+) {
   return assignments.map((a) => ({
     ...a,
     stale:
-      a.targetType === 'sku'
-        ? !assignedSkuSet.has(a.sku)
+      a.targetType === 'sku' ? !assignedSkuSet.has(a.sku)
+        : a.targetType === 'parent' ? (parentMemberCounts.get(a.parentId) || 0) === 0
         : (mealTypeMemberCounts.get(a.mealType) || 0) === 0,
   }));
 }
@@ -249,13 +262,16 @@ export function detectStale(assignments, assignedSkuSet, mealTypeMemberCounts = 
  * add = max(0, target - current) when a max is configured; null target ->
  * add null (sheet renders "fill" guidance instead of a number).
  *
- * assignments: open rows [{ shelf, position, slotCode, targetType, sku, mealType }]
+ * assignments: open rows [{ shelf, position, slotCode, targetType, sku, mealType, parentId }]
  * ctx: {
  *   qtyBySku:  Map(sku -> current qty),
  *   groupQty:  Map(mealType -> summed group qty),
  *   skuMax:    Map(sku -> maxStock | undefined),
  *   groupMax:  Map(mealType -> maxStock | undefined),
  *   nameBySku: Map(sku -> product name),
+ *   parentQty:  Map(parentId -> summed family qty)      (optional),
+ *   parentMax:  Map(parentId -> maxStock | undefined)   (optional),
+ *   parentName: Map(parentId -> family name)            (optional),
  * }
  * Returns { rows, totalAdd }.
  */
@@ -272,8 +288,11 @@ export function buildRestockSheetRows(assignments, ctx) {
   let totalAdd = 0;
   const rows = ordered.map((a) => {
     const key = targetKey(a);
-    const isGroup = a.targetType === 'mealType';
-    const label = isGroup ? a.mealType : (ctx.nameBySku.get(a.sku) || a.sku);
+    const isParent = a.targetType === 'parent';
+    const isGroup = a.targetType === 'mealType' || isParent;
+    const label = isParent
+      ? (ctx.parentName?.get(a.parentId) || 'Product family')
+      : isGroup ? a.mealType : (ctx.nameBySku.get(a.sku) || a.sku);
     const primarySlotCode = primaryByTarget.get(key);
     const primary = primarySlotCode === a.slotCode;
 
@@ -281,8 +300,12 @@ export function buildRestockSheetRows(assignments, ctx) {
     let target = null;
     let add = null;
     if (primary) {
-      current = isGroup ? (ctx.groupQty.get(a.mealType) || 0) : (ctx.qtyBySku.get(a.sku) || 0);
-      const max = isGroup ? ctx.groupMax.get(a.mealType) : ctx.skuMax.get(a.sku);
+      current = isParent ? (ctx.parentQty?.get(a.parentId) || 0)
+        : isGroup ? (ctx.groupQty.get(a.mealType) || 0)
+        : (ctx.qtyBySku.get(a.sku) || 0);
+      const max = isParent ? ctx.parentMax?.get(a.parentId)
+        : isGroup ? ctx.groupMax.get(a.mealType)
+        : ctx.skuMax.get(a.sku);
       if (max != null && max > 0) {
         target = max;
         add = Math.max(0, max - current);
@@ -298,6 +321,7 @@ export function buildRestockSheetRows(assignments, ctx) {
       targetType: a.targetType,
       sku: a.sku || null,
       mealType: a.mealType || null,
+      parentId: a.parentId || null,
       isGroup,
       primary,
       primarySlotCode: primary ? null : primarySlotCode,
@@ -317,27 +341,36 @@ export function buildRestockSheetRows(assignments, ctx) {
  * group (that is what gets slotted), everything else by SKU. The caller
  * intersects with quantities to decide what is worth flagging.
  *
- * locationProducts: [{ sku, isFreshMeal, mealType }]
- * Returns { skus: [...], mealTypes: [...] }
+ * Product-family members count as placed when EITHER their own SKU has a slot
+ * or their family has a parent slot; a family with no coverage at all is
+ * reported once in `parents` (never as individual member SKUs).
+ *
+ * locationProducts: [{ sku, isFreshMeal, mealType, parentId? }]
+ * Returns { skus: [...], mealTypes: [...], parents: [parentId, ...] }
  */
 export function computeUnplaced(assignments, locationProducts) {
   const placedSkus = new Set();
   const placedGroups = new Set();
+  const placedParents = new Set();
   for (const a of assignments) {
     if (a.targetType === 'sku') placedSkus.add(a.sku);
+    else if (a.targetType === 'parent') placedParents.add(a.parentId);
     else placedGroups.add(a.mealType);
   }
 
   const skus = [];
   const groups = new Set();
+  const parents = new Set();
   for (const p of locationProducts) {
     if (p.isFreshMeal) {
       const group = p.mealType || 'Unclassified';
       if (!placedGroups.has(group)) groups.add(group);
+    } else if (p.parentId) {
+      if (!placedSkus.has(p.sku) && !placedParents.has(p.parentId)) parents.add(p.parentId);
     } else if (!placedSkus.has(p.sku)) {
       skus.push(p.sku);
     }
   }
 
-  return { skus, mealTypes: [...groups] };
+  return { skus, mealTypes: [...groups], parents: [...parents] };
 }

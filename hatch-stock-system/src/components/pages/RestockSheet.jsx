@@ -143,7 +143,11 @@ export default function RestockSheet() {
                     <span className={`block text-sm truncate ${row.isGroup ? 'text-teal-300' : 'text-zinc-200'} ${done ? 'line-through' : ''}`}>
                       {row.label}
                     </span>
-                    {row.isGroup && <span className="block text-[11px] text-zinc-500">fresh meals — any flavour</span>}
+                    {row.isGroup && (
+                      <span className="block text-[11px] text-zinc-500">
+                        {row.targetType === 'parent' ? 'product family — any flavour' : 'fresh meals — any flavour'}
+                      </span>
+                    )}
                     {!row.primary && (
                       <span className="block text-[11px] text-zinc-500">counted with {row.primarySlotCode}</span>
                     )}
