@@ -3,6 +3,7 @@ import { analyticsService } from '../../../services/analytics.service';
 import HeadlineStats from './HeadlineStats';
 import SalesTiming from './SalesTiming';
 import ProductPerformance from './ProductPerformance';
+import ProductFamilies from './ProductFamilies';
 import MarginAnalysis from './MarginAnalysis';
 import SuggestionsPanel from './SuggestionsPanel';
 
@@ -255,6 +256,8 @@ export default function AnalyticsDashboard({ locationOptions = [], routes = [] }
           <HeadlineStats headline={data.headline} period={data.period} />
           <SalesTiming timing={data.timing} />
           <ProductPerformance products={data.products} stockKnown={stockKnown} />
+          {/* Only render when the backend is new enough to send families. */}
+          {data.families && <ProductFamilies families={data.families} stockKnown={stockKnown} />}
           <MarginAnalysis margin={data.margin} />
           <SuggestionsPanel suggestions={data.suggestions} insufficientData={data.insufficientData} />
         </div>

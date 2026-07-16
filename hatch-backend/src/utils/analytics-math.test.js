@@ -7,6 +7,7 @@ import {
   percentile,
   shapeTiming,
   computeSuggestions,
+  aggregateFamilies,
   SUGGESTION_THRESHOLDS,
 } from './analytics-math.js';
 
@@ -125,5 +126,53 @@ describe('computeSuggestions', () => {
   it('uses the documented default thresholds and returns [] without a period', () => {
     expect(SUGGESTION_THRESHOLDS.priceIncreaseMinVelocity).toBe(2);
     expect(computeSuggestions([{ sku: 'X', units: 100, revenue: 1, cost: 0, stockOnHand: 0 }], { periodDays: 0 })).toEqual([]);
+  });
+});
+
+describe('aggregateFamilies', () => {
+  const parents = [
+    { id: 'f1', name: 'Barebells', products: [{ sku: 'BB-CHOC', name: 'Barebells Chocolate' }, { sku: 'BB-CARA', name: 'Barebells Caramel' }, { sku: 'BB-NEW', name: 'Barebells Cookies' }] },
+    { id: 'f2', name: 'Estate Dairy', products: [{ sku: 'ED-MOCHA', name: 'Estate Dairy Mocha' }] },
+  ];
+  const stats = [
+    { sku: 'BB-CHOC', name: 'Barebells Chocolate', units: 30, revenue: 75, transactions: 30, paidRevenue: 75, paidCost: 45, marginPct: 40, stockOnHand: 5 },
+    { sku: 'BB-CARA', name: 'Barebells Caramel', units: 10, revenue: 25, transactions: 10, paidRevenue: 25, paidCost: 20, marginPct: 20, stockOnHand: 8 },
+    { sku: 'ED-MOCHA', name: 'Estate Dairy Mocha', units: 12, revenue: 36, transactions: 12, paidRevenue: 36, paidCost: 18, marginPct: 50, stockOnHand: 2 },
+    { sku: 'UNRELATED', name: 'Coke', units: 99, revenue: 99, transactions: 99, paidRevenue: 99, paidCost: 50, marginPct: 49.5, stockOnHand: 1 },
+  ];
+
+  it('sums members, recomputes margin on the summed paid basis, sorts by units', () => {
+    const fams = aggregateFamilies(parents, stats);
+    expect(fams.map((f) => f.name)).toEqual(['Barebells', 'Estate Dairy']);
+    const bb = fams[0];
+    expect(bb.units).toBe(40);
+    expect(bb.revenue).toBe(100);
+    expect(bb.stockOnHand).toBe(13);
+    // (100 - 65) / 100 — NOT the average of 40% and 20%
+    expect(bb.marginPct).toBeCloseTo(35);
+  });
+
+  it('keeps zero-sales flavours visible and computes units share', () => {
+    const bb = aggregateFamilies(parents, stats)[0];
+    expect(bb.members.map((m) => m.sku)).toEqual(['BB-CHOC', 'BB-CARA', 'BB-NEW']);
+    expect(bb.members[0].unitsSharePct).toBeCloseTo(75);
+    expect(bb.members[2].units).toBe(0);
+    expect(bb.members[2].name).toBe('Barebells Cookies'); // falls back to the catalog name
+  });
+
+  it('ignores products outside any family and handles empty inputs', () => {
+    const fams = aggregateFamilies(parents, stats);
+    expect(fams.flatMap((f) => f.members.map((m) => m.sku))).not.toContain('UNRELATED');
+    expect(aggregateFamilies([], stats)).toEqual([]);
+    expect(aggregateFamilies(null, null)).toEqual([]);
+  });
+
+  it('nulls stock fields when the scope stock is unresolved', () => {
+    const fams = aggregateFamilies(parents, stats, { stockResolved: false });
+    expect(fams[0].stockOnHand).toBeNull();
+    expect(fams[0].members[0].stockOnHand).toBeNull();
+    // zero-units family: share is null, not NaN
+    const empty = aggregateFamilies([{ id: 'f3', name: 'Ghost', products: [{ sku: 'G1', name: 'Ghost One' }] }], []);
+    expect(empty[0].members[0].unitsSharePct).toBeNull();
   });
 });

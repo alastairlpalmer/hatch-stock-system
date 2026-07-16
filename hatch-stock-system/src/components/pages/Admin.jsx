@@ -3,6 +3,7 @@ import { useStock } from '../../context/StockContext';
 import AdminVendlive from './AdminVendlive';
 import AdminSalesImport from './AdminSalesImport';
 import AdminFreshMeals from './AdminFreshMeals';
+import AdminProductGroups from './AdminProductGroups';
 import AdminMachineLayout from './AdminMachineLayout';
 import SuppliersConfig from './orders/SuppliersConfig';
 import BarcodeScanner from '../scanner/BarcodeScanner';
@@ -23,6 +24,7 @@ export default function Admin() {
           { id: 'routes', label: 'Restock Routes' },
           { id: 'suppliers', label: 'Suppliers' },
           { id: 'freshmeals', label: 'Fresh Meals' },
+          { id: 'groups', label: 'Product Groups' },
           { id: 'layout', label: 'Machine Layout' },
           { id: 'vendlive', label: 'VendLive' },
           { id: 'salesimport', label: 'Sales Import' },
@@ -48,6 +50,7 @@ export default function Admin() {
           admin muscle memory still works. */}
       {adminTab === 'suppliers' && <SuppliersConfig />}
       {adminTab === 'freshmeals' && <AdminFreshMeals />}
+      {adminTab === 'groups' && <AdminProductGroups />}
       {adminTab === 'layout' && <AdminMachineLayout />}
       {adminTab === 'vendlive' && <AdminVendlive />}
       {adminTab === 'salesimport' && <AdminSalesImport />}

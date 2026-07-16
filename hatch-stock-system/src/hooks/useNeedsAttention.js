@@ -3,6 +3,7 @@ import { useStock } from '../context/StockContext';
 import { vendliveService } from '../services/vendlive.service';
 import { inventoryService } from '../services/inventory.service';
 import { attentionService } from '../services/attention.service';
+import { productParentsService } from '../services/productParents.service';
 import usePickLists from './usePickLists';
 import { daysUntilExpiry } from '../utils/expiryDays';
 
@@ -39,6 +40,9 @@ export default function useNeedsAttention() {
   // Admin dismissals (server-shared). Fail-soft like the other fetches: if
   // the endpoint is unreachable nothing is hidden.
   const [dismissals, setDismissals] = useState([]);
+  // Product groups (fail-soft like the rest): used to spot new flavours that
+  // name-match a group but were never assigned to it.
+  const [productParents, setProductParents] = useState([]);
   const { lists: pickLists, loading: pickListsLoading } = usePickLists({ limit: 20 });
 
   useEffect(() => {
@@ -53,6 +57,9 @@ export default function useNeedsAttention() {
       .finally(() => { if (!cancelled) setExpiryDone(true); });
     attentionService.getDismissals()
       .then((res) => { if (!cancelled) setDismissals(Array.isArray(res) ? res : []); })
+      .catch(() => {});
+    productParentsService.getAll()
+      .then((res) => { if (!cancelled) setProductParents(Array.isArray(res) ? res : []); })
       .catch(() => {});
     return () => { cancelled = true; };
   }, []);
@@ -239,9 +246,32 @@ export default function useNeedsAttention() {
       }
     }
 
+    // 12. Products that look like they belong to a product group but aren't
+    // assigned — the usual cause is a new flavour auto-created by VendLive
+    // sync, which arrives with no group and silently misses family-level
+    // reporting/ordering. Matched on "<group name> " as a name prefix.
+    if (productParents.length > 0) {
+      const assigned = new Set(
+        productParents.flatMap((pp) => (pp.products || []).map((m) => m.sku))
+      );
+      const groupNames = productParents.map((pp) => pp.name.toLowerCase());
+      const orphans = (data.products || []).filter((p) =>
+        !p.isFreshMeal && !assigned.has(p.sku) &&
+        groupNames.some((n) => (p.name || '').toLowerCase().startsWith(`${n} `)));
+      if (orphans.length > 0) {
+        out.push({
+          id: 'product-group-orphans',
+          severity: 'amber',
+          title: `${orphans.length} product${orphans.length === 1 ? '' : 's'} name-match a product group but aren't in it`,
+          detail: orphans.slice(0, 3).map((p) => p.name).join(' · '),
+          to: '/support/settings',
+        });
+      }
+    }
+
     // red first, catalogue order within severity (push order already encodes rank).
     return [...out.filter((i) => i.severity === 'red'), ...out.filter((i) => i.severity === 'amber')];
-  }, [data, health, expiryRows, pickLists]);
+  }, [data, health, expiryRows, pickLists, productParents]);
 
   // A dismissal hides an item only while its SIGNATURE (rendered title, which
   // carries the counts) still matches and it is under 7 days old — a changed
