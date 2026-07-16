@@ -109,6 +109,7 @@ export default function ProductPerformance({ products, stockKnown }) {
         ) : slowMovers.length === 0 ? (
           <p className="px-6 pb-6 text-sm text-zinc-500">No products with stock on hand in this scope.</p>
         ) : (
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-zinc-800">
@@ -129,6 +130,7 @@ export default function ProductPerformance({ products, stockKnown }) {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
     </div>

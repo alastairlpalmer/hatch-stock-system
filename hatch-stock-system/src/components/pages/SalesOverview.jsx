@@ -429,7 +429,36 @@ export default function SalesOverview() {
 
       {activeSubTab === 'products' && (
         <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg overflow-hidden">
-          <div className="overflow-x-auto">
+          {/* Mobile: stacked product cards (matches the transactions tab treatment) */}
+          <div className="md:hidden divide-y divide-zinc-800/50">
+            {productRows.slice()
+              .sort((a, b) => b.revenue - a.revenue)
+              .map(stats => {
+                const profit = stats.revenue - stats.cost;
+                const margin = stats.revenue > 0 ? (profit / stats.revenue * 100) : 0;
+                return (
+                  <div key={stats.sku} className="px-4 py-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-sm text-zinc-200 truncate">{stats.name}</p>
+                        <p className="text-xs text-zinc-500">{stats.category}</p>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <p className="text-emerald-400 font-medium text-sm">£{stats.revenue.toFixed(2)}</p>
+                        <p className="text-xs text-zinc-500">{stats.units} units</p>
+                      </div>
+                    </div>
+                    <p className="mt-1 text-xs text-zinc-500">
+                      Profit <span className="text-emerald-400">£{profit.toFixed(2)}</span>
+                      {' · '}Cost <span className="text-red-400">£{stats.cost.toFixed(2)}</span>
+                      {' · '}Margin {margin.toFixed(1)}%
+                    </p>
+                  </div>
+                );
+              })}
+          </div>
+          {/* Desktop table */}
+          <div className="hidden md:block overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-zinc-800">

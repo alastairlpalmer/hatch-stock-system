@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { format } from 'date-fns';
 import { ClipboardList, Plus, ChevronRight } from 'lucide-react';
 import buyingListsService from '../../../services/buyingLists.service';
+import { useToast } from '../../ui/Toast';
 
 const STATUS_STYLES = {
   draft: 'bg-amber-500/20 text-amber-400',
@@ -34,6 +35,7 @@ export default function BuyingLists() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [creating, setCreating] = useState(false);
+  const toast = useToast();
 
   // Hand-built list: starts with no lines; products are added in the detail
   // view. The other button routes through the suggestion planner.
@@ -48,7 +50,7 @@ export default function BuyingLists() {
       navigate(`/orders/buying-lists/${list.id}`);
     } catch (err) {
       console.error('Failed to create buying list:', err);
-      setError('Failed to create a blank list — check the connection and try again.');
+      toast.error('Could not create a blank list — check the connection and try again.');
       setCreating(false);
     }
   };
@@ -112,12 +114,21 @@ export default function BuyingLists() {
           <p className="text-zinc-500 text-sm mt-1">
             Plan a weekly buy from Purchase Orders and save it as a buying list.
           </p>
-          <button
-            onClick={() => navigate('/orders/purchase?generate=1')}
-            className="mt-4 px-4 py-2 bg-emerald-500 text-zinc-900 rounded text-sm font-medium hover:bg-emerald-400 transition-colors"
-          >
-            Plan weekly buy
-          </button>
+          <div className="mt-4 flex items-center justify-center gap-2">
+            <button
+              onClick={startBlankList}
+              disabled={creating}
+              className="px-4 py-2 bg-zinc-700 text-zinc-200 rounded text-sm font-medium hover:bg-zinc-600 transition-colors disabled:opacity-50"
+            >
+              {creating ? 'Creating…' : 'Start blank'}
+            </button>
+            <button
+              onClick={() => navigate('/orders/purchase?generate=1')}
+              className="px-4 py-2 bg-emerald-500 text-zinc-900 rounded text-sm font-medium hover:bg-emerald-400 transition-colors"
+            >
+              Plan weekly buy
+            </button>
+          </div>
         </div>
       ) : (
         <div className="space-y-3">

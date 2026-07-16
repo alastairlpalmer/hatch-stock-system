@@ -217,6 +217,7 @@ export default function ClientReports({ locationOptions = [], routes = [] }) {
         ) : reports.length === 0 ? (
           <p className="px-6 pb-6 text-sm text-zinc-500">No reports generated yet.</p>
         ) : (
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-zinc-800">
@@ -252,6 +253,7 @@ export default function ClientReports({ locationOptions = [], routes = [] }) {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
     </div>
