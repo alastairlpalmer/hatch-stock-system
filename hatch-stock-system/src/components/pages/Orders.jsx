@@ -347,11 +347,17 @@ export default function Orders() {
     setShowForm(false);
   };
 
-  // A consolidated line is either a concrete SKU or a fresh-meal group keyed by
-  // meal type. The key is stable across re-fetches so user edits survive.
-  const lineKey = (s) => (s.sku ? s.sku : `frive:${s.mealType}`);
+  // A consolidated line is a concrete SKU, a fresh-meal group keyed by meal
+  // type, or a product family keyed by parent id. The key is stable across
+  // re-fetches so user edits survive.
+  const lineKey = (s) => (
+    s.sku ? s.sku
+      : s.type === 'parentGroup' ? `parent:${s.parentId}`
+      : `frive:${s.mealType}`
+  );
   const isFreshMealGroup = (s) =>
-    s.type === 'freshMealGroup' || (!s.sku && !!s.mealType) || s.isFreshMeal === true;
+    s.type === 'freshMealGroup' || (!s.sku && !s.parentId && !!s.mealType) || s.isFreshMeal === true;
+  const isParentGroup = (s) => s.type === 'parentGroup';
 
   // Fetch consolidated suggestions, merging over any user-edited lines and
   // discarding stale responses (sequence counter).
@@ -380,7 +386,14 @@ export default function Orders() {
         };
         if (editedKeysRef.current.has(key) && prevByKey.has(key)) {
           const prev = prevByKey.get(key);
-          return { ...base, orderQty: prev.orderQty, unitPrice: prev.unitPrice, selected: prev.selected };
+          return {
+            ...base,
+            orderQty: prev.orderQty,
+            unitPrice: prev.unitPrice,
+            selected: prev.selected,
+            // A family's per-flavour box edits are part of the user's plan too.
+            ...(s.type === 'parentGroup' && prev.members ? { members: prev.members } : {}),
+          };
         }
         return base;
       });
@@ -533,7 +546,22 @@ export default function Orders() {
     ));
   };
 
+  // Edit one flavour's box count inside a family line: units follow the box
+  // size and the parent line's total is always the sum of its flavours.
+  const updateMemberBoxes = (key, sku, value) => {
+    editedKeysRef.current.add(key);
+    setSuggestedItems(items => items.map(i => {
+      if (i.key !== key) return i;
+      const boxes = Math.max(0, parseInt(value) || 0);
+      const members = (i.members || []).map(m =>
+        m.sku === sku ? { ...m, boxes, units: boxes * (m.unitsPerBox || 1) } : m
+      );
+      return { ...i, members, orderQty: members.reduce((a, m) => a + (m.units || 0), 0), edited: true };
+    }));
+  };
+
   const boxesFor = (item) => {
+    if (isParentGroup(item)) return (item.members || []).reduce((a, m) => a + (m.boxes || 0), 0);
     const upb = item.unitsPerBox || 1;
     return upb > 1 ? Math.ceil((item.orderQty || 0) / upb) : item.orderQty || 0;
   };
@@ -562,6 +590,24 @@ export default function Orders() {
       priority: item.priority,
       perLocation: item.perLocation || [],
     };
+    // Product families expand to REAL per-flavour SKU lines (the agreed
+    // design: flavours are stable, so the supplier order names them — no
+    // placeholder). parentId/parentName ride along for grouped display.
+    if (isParentGroup(item)) {
+      return (item.members || [])
+        .filter(m => (m.units || 0) > 0)
+        .map(m => ({
+          ...baseFields,
+          sku: m.sku,
+          name: m.name,
+          parentId: item.parentId,
+          parentName: item.name,
+          unitsPerBox: m.unitsPerBox || 1,
+          unitCost: m.unitCost ?? item.unitPrice,
+          quantity: m.units,
+          boxes: m.boxes,
+        }));
+    }
     if (!isFreshMealGroup(item)) {
       return [{
         ...baseFields,
@@ -586,6 +632,11 @@ export default function Orders() {
   // against a meal-type placeholder product (resolved via `placeholderSkus`,
   // ensured server-side just before creation).
   const expandToOrderLines = (item, placeholderSkus = {}) => {
+    if (isParentGroup(item)) {
+      return (item.members || [])
+        .filter(m => (m.units || 0) > 0)
+        .map(m => ({ sku: m.sku, quantity: m.units, unitPrice: m.unitCost ?? item.unitPrice }));
+    }
     if (!isFreshMealGroup(item)) {
       return [{ sku: item.sku, quantity: item.orderQty, unitPrice: item.unitPrice }];
     }
@@ -903,7 +954,7 @@ export default function Orders() {
             </div>
             <div className="text-xs text-zinc-500 mt-0.5">
               {item.supplierName || 'No preferred supplier'}
-              {isFreshMealGroup(item) && item.members && (
+              {(isFreshMealGroup(item) || isParentGroup(item)) && item.members && (
                 <span> · {item.members.length} flavour{item.members.length > 1 ? 's' : ''}</span>
               )}
             </div>
@@ -916,16 +967,30 @@ export default function Orders() {
             </span>
           </td>
           <td className="px-2 py-2">
-            <input
-              type="number"
-              min="0"
-              value={item.orderQty}
-              onChange={(e) => updateSuggestedItem(item.key, 'orderQty', e.target.value)}
-              className="w-16 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-center text-sm focus:outline-none focus:border-emerald-500"
-            />
+            {isParentGroup(item) ? (
+              // Family totals are derived — the per-flavour boxes in the
+              // details row are the editable numbers.
+              <span
+                className="block w-16 text-center text-sm text-zinc-300"
+                title="Total units across flavours — expand the row to edit per-flavour boxes"
+              >
+                {item.orderQty}
+              </span>
+            ) : (
+              <input
+                type="number"
+                min="0"
+                value={item.orderQty}
+                onChange={(e) => updateSuggestedItem(item.key, 'orderQty', e.target.value)}
+                className="w-16 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-center text-sm focus:outline-none focus:border-emerald-500"
+              />
+            )}
           </td>
           <td className="px-2 py-2 text-sm text-zinc-400 text-center whitespace-nowrap">
-            {boxesFor(item)}{(item.unitsPerBox || 1) > 1 && <span className="text-zinc-600"> × {item.unitsPerBox}</span>}
+            {boxesFor(item)}
+            {!isParentGroup(item) && (item.unitsPerBox || 1) > 1 && (
+              <span className="text-zinc-600"> × {item.unitsPerBox}</span>
+            )}
           </td>
           <td className="px-2 py-2">
             <span className={`text-xs px-1.5 py-0.5 rounded whitespace-nowrap ${
@@ -963,6 +1028,36 @@ export default function Orders() {
                     />
                   </span>
                 </div>
+                {/* Family flavour split — the suggested boxes come from each
+                    flavour's 28-day sell rate; edit them here and the parent
+                    total follows. */}
+                {isParentGroup(item) && Array.isArray(item.members) && item.members.length > 0 && (
+                  <div className="divide-y divide-zinc-700/60 border-b border-zinc-700/60">
+                    {item.members.map(m => (
+                      <div key={m.sku} className="flex items-center justify-between gap-2 px-3 py-1.5 text-xs">
+                        <span className="text-zinc-300 truncate" title={m.sku}>{m.name}</span>
+                        <span className="flex items-center gap-3 shrink-0 text-zinc-500">
+                          {m.sharePct != null && (
+                            <span title="Share of family sales over the last 28 days">
+                              {Math.round(m.sharePct)}% of sales
+                            </span>
+                          )}
+                          {m.warehouseStock != null && <span>wh {m.warehouseStock}</span>}
+                          <span className="flex items-center gap-1">
+                            <input
+                              type="number"
+                              min="0"
+                              value={m.boxes}
+                              onChange={(e) => updateMemberBoxes(item.key, m.sku, e.target.value)}
+                              className="w-14 bg-zinc-800 border border-zinc-700 rounded px-1.5 py-0.5 text-center text-xs focus:outline-none focus:border-emerald-500"
+                            />
+                            <span className="text-zinc-600">boxes × {m.unitsPerBox || 1}</span>
+                          </span>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 {Array.isArray(item.perLocation) && item.perLocation.length > 0 && (
                   <div className="divide-y divide-zinc-700/60">
                     {item.perLocation.map(pl => (
@@ -1185,8 +1280,8 @@ export default function Orders() {
           {/* Planogram scoping: no-diagram locations + assigned-but-unplaced warning */}
           {!suggestionsLoading && suggestionPlanogram && (() => {
             const noDiagram = (suggestionPlanogram.perLocation || []).filter(l => !l.applied);
-            const excluded = suggestionPlanogram.notOnPlanogram || { skus: [], mealTypes: [] };
-            const excludedCount = (excluded.skus?.length || 0) + (excluded.mealTypes?.length || 0);
+            const excluded = suggestionPlanogram.notOnPlanogram || { skus: [], mealTypes: [], parents: [] };
+            const excludedCount = (excluded.skus?.length || 0) + (excluded.mealTypes?.length || 0) + (excluded.parents?.length || 0);
             if (noDiagram.length === 0 && excludedCount === 0) return null;
             return (
               <div className="space-y-2">
@@ -1218,6 +1313,12 @@ export default function Orders() {
                           <div key={`mt-${m.mealType}`} className="flex justify-between gap-2">
                             <span className="text-teal-300">{m.mealType} (fresh meal group)</span>
                             <span className="text-zinc-600 truncate">{(m.locations || []).join(', ')}</span>
+                          </div>
+                        ))}
+                        {(excluded.parents || []).map(p => (
+                          <div key={`pp-${p.parentId}`} className="flex justify-between gap-2">
+                            <span className="text-emerald-300">{p.name} (product family)</span>
+                            <span className="text-zinc-600 truncate">{(p.locations || []).join(', ')}</span>
                           </div>
                         ))}
                         {(excluded.skus || []).map(s => (
