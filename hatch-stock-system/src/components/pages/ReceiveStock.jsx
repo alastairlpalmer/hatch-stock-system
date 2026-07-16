@@ -7,6 +7,7 @@ import { productsService } from '../../services/products.service';
 import { ordersService } from '../../services/orders.service';
 import { unlockAudio } from '../../utils/feedback';
 import { daysUntilExpiry } from '../../utils/expiryDays';
+import { useToast } from '../ui/Toast';
 
 // A "lot" is one receiving line for a SKU — its own qty + expiry + damage.
 // Multiple lots per SKU let one delivery carry several expiry dates.
@@ -36,7 +37,7 @@ const emptyFlavourLot = (quantity = 0) => ({
 });
 
 export default function ReceiveStock() {
-  const { data, receiveOrder } = useStock();
+  const { data, receiveOrder, updateProduct } = useStock();
   const [activeSubTab, setActiveSubTab] = useState('receive');
   const [selectedOrder, setSelectedOrder] = useState(null);
   // { sku: [lot, lot, ...] } — index 0 is the main row, extras are split lots
@@ -68,6 +69,57 @@ export default function ReceiveStock() {
   // SKUs actually scanned this session — lines never scanned get their
   // pre-scan quantities back on close instead of staying zeroed.
   const scannedSkusRef = useRef(new Set());
+  const toast = useToast();
+
+  // "Add barcode" capture: products ordered without a barcode in the catalogue
+  // can be given one right from their receive line — camera opens, one scan is
+  // captured, and after a confirm it saves to the product so counting scans
+  // work immediately. { sku, name, code?, saving? } — no `code` yet = camera up.
+  const [barcodeCapture, setBarcodeCapture] = useState(null);
+  const captureApiRef = useRef(null);
+
+  const startBarcodeCapture = (sku, name) => {
+    // Same iOS constraint as the counting scanner: unlock audio inside the tap.
+    unlockAudio();
+    setBarcodeCapture({ sku, name });
+  };
+
+  // One accepted scan: reject codes already assigned to another product
+  // (barcode is unique in the DB), otherwise hold it for the confirm step.
+  const handleCaptureScan = async (code) => {
+    const flash = captureApiRef.current?.flash;
+    try {
+      const existing = await productsService.lookupBarcode(code);
+      if (existing?.matchedBy === 'barcode') {
+        if (existing.product?.sku === barcodeCapture?.sku) {
+          flash?.({ kind: 'warn', message: 'Already saved on this product', detail: code });
+        } else {
+          flash?.({
+            kind: 'error',
+            message: `Already assigned to ${existing.product?.name || existing.product?.sku}`,
+            detail: code,
+          });
+        }
+        return;
+      }
+      setBarcodeCapture(prev => (prev ? { ...prev, code } : prev));
+    } catch (err) {
+      flash?.({ kind: 'error', message: 'Lookup failed', detail: err.message || 'Network error' });
+    }
+  };
+
+  const saveCapturedBarcode = async () => {
+    if (!barcodeCapture?.code || barcodeCapture.saving) return;
+    setBarcodeCapture(prev => ({ ...prev, saving: true }));
+    try {
+      await updateProduct(barcodeCapture.sku, { barcode: barcodeCapture.code });
+      toast.success(`Barcode saved — ${barcodeCapture.name} is now scannable`);
+      setBarcodeCapture(null);
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Could not save the barcode — try again');
+      setBarcodeCapture(prev => (prev ? { ...prev, saving: false } : prev));
+    }
+  };
 
   // Receipt History — loaded from the API when the tab is opened
   const [receipts, setReceipts] = useState([]);
@@ -706,6 +758,17 @@ export default function ReceiveStock() {
                                   ))}
                                   <option value="__new__">+ New flavour (not in catalogue yet)</option>
                                 </select>
+                                {/* Selected flavour has no barcode on file — capture one */}
+                                {lot.actualSku && !lot.isNew
+                                  && !data.products.find(p => p.sku === lot.actualSku)?.barcode && (
+                                  <button
+                                    onClick={() => startBarcodeCapture(lot.actualSku, lot.actualName || lot.actualSku)}
+                                    className="mt-1 text-xs text-sky-400 hover:text-sky-300 min-h-[32px] px-2 rounded border border-sky-500/30 bg-sky-500/10"
+                                    title="No barcode on file — scan one to make this flavour scannable"
+                                  >
+                                    + Add barcode
+                                  </button>
+                                )}
                               </div>
                               <div className="md:col-span-2">
                                 <div className="text-[10px] uppercase tracking-wide text-zinc-500 md:hidden">Qty</div>
@@ -794,6 +857,17 @@ export default function ReceiveStock() {
                         <div className="col-span-2 md:col-span-3">
                           <span className="text-zinc-200">{product?.name || item.sku}</span>
                           <div className="text-zinc-600 text-xs">{item.sku}</div>
+                          {/* Catalogue has no barcode for this product — counting
+                              scans can't match it until one is captured. */}
+                          {!product?.barcode && remaining > 0 && (
+                            <button
+                              onClick={() => startBarcodeCapture(item.sku, product?.name || item.sku)}
+                              className="mt-1 text-xs text-sky-400 hover:text-sky-300 min-h-[32px] px-2 rounded border border-sky-500/30 bg-sky-500/10"
+                              title="No barcode on file — scan one to make this product scannable"
+                            >
+                              + Add barcode
+                            </button>
+                          )}
                         </div>
                         <div className="md:col-span-1 md:text-center">
                           <div className="text-[10px] uppercase tracking-wide text-zinc-500 md:hidden">Ordered</div>
@@ -1185,6 +1259,54 @@ export default function ReceiveStock() {
         onClose={closeScanner}
         onReady={(api) => { scannerApiRef.current = api; }}
       />
+
+      {/* Add-barcode capture: camera until a code is held, then a confirm sheet */}
+      <BarcodeScanner
+        open={!!barcodeCapture && !barcodeCapture.code}
+        title={`Add barcode — ${barcodeCapture?.name || ''}`}
+        onScan={handleCaptureScan}
+        onClose={() => setBarcodeCapture(null)}
+        onReady={(api) => { captureApiRef.current = api; }}
+      />
+      {barcodeCapture?.code && (
+        <div className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-md rounded-2xl border border-zinc-700 bg-zinc-900 p-5 space-y-4">
+            <div>
+              <h3 className="text-sm font-semibold text-zinc-100">Save this barcode?</h3>
+              <p className="text-sm text-zinc-400 mt-1">
+                <span className="font-mono text-zinc-200">{barcodeCapture.code}</span>
+                {' → '}{barcodeCapture.name}
+              </p>
+              <p className="text-xs text-zinc-500 mt-1">
+                Once saved, scanning this code counts the product automatically.
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={saveCapturedBarcode}
+                disabled={barcodeCapture.saving}
+                className="flex-1 min-h-[44px] rounded-lg bg-emerald-500 text-zinc-900 text-sm font-semibold hover:bg-emerald-400 disabled:opacity-50"
+              >
+                {barcodeCapture.saving ? 'Saving…' : 'Save barcode'}
+              </button>
+              <button
+                onClick={() => setBarcodeCapture(prev => ({ sku: prev.sku, name: prev.name }))}
+                disabled={barcodeCapture.saving}
+                className="min-h-[44px] px-4 rounded-lg border border-zinc-700 bg-zinc-800 text-sm text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
+              >
+                Rescan
+              </button>
+              <button
+                onClick={() => setBarcodeCapture(null)}
+                disabled={barcodeCapture.saving}
+                className="min-h-[44px] px-4 rounded-lg border border-zinc-700 bg-zinc-800 text-sm text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
