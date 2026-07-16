@@ -4,7 +4,10 @@ import { Warehouse } from 'lucide-react';
 import { cn } from '../../utils/helpers';
 import { useAuth } from '../../context/AuthContext';
 import HatchLogo from '../ui/HatchLogo';
-import SyncIndicator from '../ui/SyncIndicator';
+
+// Desktop-only chrome — mobile navigation is the BottomNav bar. The old
+// mobile-drawer mode (slide-in panel + hamburger) was unreachable dead code
+// and has been removed.
 
 const navItems = [
   { path: '/', label: 'Dashboard', icon: DashboardIcon, end: true },
@@ -16,15 +19,7 @@ const navItems = [
   { path: '/support', label: 'Support', icon: SupportIcon },
 ];
 
-export default function Sidebar({
-  collapsed,
-  onToggleCollapse,
-  isMobile,
-  mobileMenuOpen,
-  onCloseMobile,
-  onNavigate,
-  syncStatus,
-}) {
+export default function Sidebar({ collapsed, onToggleCollapse }) {
   const navigate = useNavigate();
   const { user, logout } = useAuth();
   const authEnabled = import.meta.env.VITE_AUTH_ENABLED === 'true';
@@ -38,27 +33,12 @@ export default function Sidebar({
     <aside
       className={cn(
         'bg-zinc-900 border-r border-zinc-800 flex flex-col flex-shrink-0',
-        isMobile
-          ? cn(
-              'fixed inset-y-0 left-0 z-50 w-72 transform transition-transform duration-300 ease-in-out',
-              mobileMenuOpen ? 'translate-x-0' : '-translate-x-full'
-            )
-          : cn(
-              'relative transition-all duration-300',
-              collapsed ? 'w-20' : 'w-64'
-            )
+        'relative transition-all duration-300',
+        collapsed ? 'w-20' : 'w-64'
       )}
     >
       <div className="p-4 border-b border-zinc-800 flex items-center justify-between">
-        <HatchLogo collapsed={!isMobile && collapsed} />
-        {isMobile && (
-          <button
-            onClick={onCloseMobile}
-            className="p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800"
-          >
-            <CloseIcon className="w-6 h-6" />
-          </button>
-        )}
+        <HatchLogo collapsed={collapsed} />
       </div>
 
       <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
@@ -69,21 +49,18 @@ export default function Sidebar({
               key={item.path}
               to={item.path}
               end={item.end}
-              onClick={onNavigate}
               className={({ isActive }) =>
                 cn(
-                  'group w-full flex items-center gap-3 px-3 py-3 md:py-2.5 rounded-lg text-sm transition-all',
+                  'group w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all',
                   isActive
                     ? 'bg-hatch-green/15 text-hatch-cream border border-hatch-green/40'
                     : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 active:bg-zinc-800'
                 )
               }
-              title={!isMobile && collapsed ? item.label : undefined}
+              title={collapsed ? item.label : undefined}
             >
               <Icon className="w-5 h-5 flex-shrink-0" />
-              {(isMobile || !collapsed) && (
-                <span className="truncate">{item.label}</span>
-              )}
+              {!collapsed && <span className="truncate">{item.label}</span>}
             </NavLink>
           );
         })}
@@ -91,7 +68,7 @@ export default function Sidebar({
 
       {authEnabled && (
         <div className="p-3 border-t border-zinc-800 space-y-1">
-          {user && (isMobile || !collapsed) && (
+          {user && !collapsed && (
             <div className="px-3 py-2">
               <p className="text-sm text-zinc-200 truncate">{user.name || user.email}</p>
               <p className="text-xs text-zinc-500 truncate">
@@ -102,38 +79,25 @@ export default function Sidebar({
           <button
             onClick={handleLogout}
             className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 transition-all"
-            title={!isMobile && collapsed ? 'Logout' : undefined}
+            title={collapsed ? 'Logout' : undefined}
           >
             <LogoutIcon className="w-5 h-5 flex-shrink-0" />
-            {(isMobile || !collapsed) && <span className="truncate">Logout</span>}
+            {!collapsed && <span className="truncate">Logout</span>}
           </button>
         </div>
       )}
 
-      {!isMobile && (
-        <div className="p-3 border-t border-zinc-800">
-          <button
-            onClick={onToggleCollapse}
-            className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50 transition-colors"
-          >
-            <CollapseIcon
-              className={cn('w-5 h-5 transition-transform', collapsed && 'rotate-180')}
-            />
-            {!collapsed && <span className="text-sm">Collapse</span>}
-          </button>
-        </div>
-      )}
-
-      {isMobile && (
-        <div className="p-4 border-t border-zinc-800">
-          <div className="flex items-center justify-between text-sm">
-            <SyncIndicator status={syncStatus} />
-            <span className="text-zinc-500 text-xs">
-              {new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
-            </span>
-          </div>
-        </div>
-      )}
+      <div className="p-3 border-t border-zinc-800">
+        <button
+          onClick={onToggleCollapse}
+          className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50 transition-colors"
+        >
+          <CollapseIcon
+            className={cn('w-5 h-5 transition-transform', collapsed && 'rotate-180')}
+          />
+          {!collapsed && <span className="text-sm">Collapse</span>}
+        </button>
+      </div>
     </aside>
   );
 }
@@ -198,14 +162,6 @@ function LogoutIcon({ className }) {
   return (
     <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-    </svg>
-  );
-}
-
-function CloseIcon({ className }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
     </svg>
   );
 }

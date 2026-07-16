@@ -131,16 +131,11 @@ function AppLayout() {
     // h-[100dvh] tracks iOS Safari's collapsing toolbar so the bottom nav
     // always hugs the visible bottom; h-screen stays as the fallback.
     <div className="h-screen h-[100dvh] bg-zinc-950 text-zinc-100 flex overflow-hidden">
-      {/* Mobile navigation is the bottom bar; the sidebar (and its old drawer
-          mode) is desktop-only chrome. */}
+      {/* Mobile navigation is the bottom bar; the sidebar is desktop-only chrome. */}
       {!isMobile && (
         <Sidebar
           collapsed={sidebarCollapsed}
           onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
-          isMobile={false}
-          mobileMenuOpen={false}
-          onCloseMobile={() => {}}
-          syncStatus={syncStatus}
         />
       )}
 

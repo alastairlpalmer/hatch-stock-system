@@ -6,6 +6,7 @@ import BarcodeScanner from '../scanner/BarcodeScanner';
 import { productsService } from '../../services/products.service';
 import { ordersService } from '../../services/orders.service';
 import { unlockAudio } from '../../utils/feedback';
+import { daysUntilExpiry } from '../../utils/expiryDays';
 
 // A "lot" is one receiving line for a SKU — its own qty + expiry + damage.
 // Multiple lots per SKU let one delivery carry several expiry dates.
@@ -408,12 +409,11 @@ export default function ReceiveStock() {
   const getSupplierName = (id) => data.suppliers.find(s => s.id === id)?.name || id;
   const getProductName = (sku) => data.products.find(p => p.sku === sku)?.name || sku;
 
-  // Calculate expiry status: <=7 days red, 8-30 days amber, >30 days green
+  // Calculate expiry status: <=7 days red, 8-30 days amber, >30 days green.
+  // Calendar-day math shared with the backend.
   const getExpiryStatus = (expiryDate) => {
-    if (!expiryDate) return null;
-    const now = new Date();
-    const expiry = new Date(expiryDate);
-    const daysUntil = Math.ceil((expiry - now) / (1000 * 60 * 60 * 24));
+    const daysUntil = daysUntilExpiry(expiryDate);
+    if (daysUntil === null) return null;
 
     if (daysUntil < 0) return { status: 'expired', label: 'Expired', color: 'text-red-400 bg-red-500/20' };
     if (daysUntil <= 7) return { status: 'critical', label: `${daysUntil}d left`, color: 'text-red-400 bg-red-500/20' };
@@ -1046,7 +1046,39 @@ export default function ReceiveStock() {
 
                     {expanded && (
                       <div className="border-t border-zinc-800 p-4 pt-3">
-                        <div className="overflow-x-auto">
+                        {/* Mobile: stacked line cards (matches the receive form's reflow treatment) */}
+                        <div className="md:hidden divide-y divide-zinc-800/50">
+                          {(receipt.items || []).map((item, idx) => {
+                            const expiryStatus = getExpiryStatus(item.expiryDate);
+                            return (
+                              <div key={idx} className="py-2.5">
+                                <div className="flex items-center justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <span className="text-sm text-zinc-300">{getProductName(item.sku)}</span>
+                                    <div className="text-zinc-600 text-xs">{item.sku}</div>
+                                  </div>
+                                  <span className="shrink-0 text-sm font-semibold text-zinc-300">×{item.quantity}</span>
+                                </div>
+                                <div className="mt-1 flex items-center gap-2 flex-wrap">
+                                  {item.expiryDate ? (
+                                    <span className={`text-xs px-2 py-0.5 rounded ${expiryStatus?.color || ''}`}>
+                                      {new Date(item.expiryDate).toLocaleDateString('en-GB')}
+                                    </span>
+                                  ) : (
+                                    <span className="text-zinc-600 text-xs">no expiry</span>
+                                  )}
+                                  {item.hasDamage ? (
+                                    <span className="text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded">Damaged</span>
+                                  ) : (
+                                    <span className="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded">OK</span>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        {/* Desktop table */}
+                        <div className="hidden md:block overflow-x-auto">
                           <table className="w-full text-sm">
                             <thead>
                               <tr className="text-zinc-500 text-xs">

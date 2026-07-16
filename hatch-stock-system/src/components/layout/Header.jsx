@@ -19,23 +19,13 @@ function getLabel(pathname) {
   return match ? match[1] : 'Dashboard';
 }
 
-export default function Header({ syncStatus, isMobile, onMenuClick }) {
+export default function Header({ syncStatus, isMobile }) {
   const { pathname } = useLocation();
   const label = getLabel(pathname);
 
   return (
     <header className="h-14 md:h-16 border-b border-zinc-800 bg-zinc-900/50 backdrop-blur-sm flex items-center justify-between px-4 md:px-6 flex-shrink-0 sticky top-0 z-30">
       <div className="flex items-center gap-3">
-        {isMobile && onMenuClick && (
-          <button
-            onClick={onMenuClick}
-            className="p-2 -ml-2 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 active:bg-zinc-700"
-          >
-            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
-            </svg>
-          </button>
-        )}
         <div>
           <h2 className="text-base md:text-lg font-bold text-zinc-100">
             {label}
