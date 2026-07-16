@@ -176,6 +176,36 @@ export default function ReceiveStock() {
     }));
   };
 
+  // "Scan first, sort by date after": on standard lines, split-lot quantity
+  // edits MOVE units between the main lot (lot 0) and the split lot, so the
+  // counted line total stays put. Scan/type the whole delivery into the main
+  // row, then split — typing 12 into a new lot pulls 12 out of the main lot.
+  // Lot 0 clamps at 0; pushing past the pool grows the total and trips the
+  // existing over-receive guard.
+  const updateSplitLotQty = (sku, lotIdx, newQty) => {
+    setReceivedItems(prev => {
+      const lots = (prev[sku] || []).map(l => ({ ...l }));
+      if (!lots[lotIdx]) return prev;
+      const delta = newQty - (lots[lotIdx].quantity || 0);
+      lots[lotIdx].quantity = newQty;
+      if (lots[0]) lots[0].quantity = Math.max(0, (lots[0].quantity || 0) - delta);
+      return { ...prev, [sku]: lots };
+    });
+  };
+
+  // Removing a split lot returns its units to the main lot — sorted units go
+  // back to the pool instead of silently vanishing from the count.
+  const removeSplitLot = (sku, lotIdx) => {
+    setReceivedItems(prev => {
+      const lots = (prev[sku] || []).map(l => ({ ...l }));
+      const removed = lots[lotIdx];
+      if (!removed) return prev;
+      const rest = lots.filter((_, i) => i !== lotIdx);
+      if (rest[0]) rest[0].quantity = (rest[0].quantity || 0) + (removed.quantity || 0);
+      return { ...prev, [sku]: rest };
+    });
+  };
+
   // Add a flavour allocation row against a placeholder order line.
   const addFlavourLot = (sku) => {
     const orderItem = selectedOrder?.items.find(i => i.sku === sku);
@@ -821,9 +851,9 @@ export default function ReceiveStock() {
                             <div className="col-span-2 md:col-span-3 flex items-center gap-2 md:pl-4">
                               <span className="text-xs text-zinc-500">Lot {lotIdx + 1}</span>
                               <button
-                                onClick={() => removeLot(item.sku, lotIdx)}
+                                onClick={() => removeSplitLot(item.sku, lotIdx)}
                                 className="text-xs text-zinc-400 hover:text-red-400 min-h-[40px] px-3 rounded border border-zinc-700 bg-zinc-800/60"
-                                title="Remove this lot"
+                                title="Remove this lot (units return to the main row)"
                               >
                                 Remove
                               </button>
@@ -833,7 +863,7 @@ export default function ReceiveStock() {
                               <div className="text-[10px] uppercase tracking-wide text-zinc-500 md:hidden">Qty</div>
                               <QtyInput
                                 value={lot.quantity}
-                                onChange={n => updateLot(item.sku, lotIdx, 'quantity', n)}
+                                onChange={n => updateSplitLotQty(item.sku, lotIdx, n)}
                                 invalid={over}
                                 aria-label={`Lot ${lotIdx + 1} quantity`}
                               />
@@ -864,10 +894,15 @@ export default function ReceiveStock() {
                           <button
                             onClick={() => addLot(item.sku)}
                             className="text-xs text-emerald-400 hover:text-emerald-300 min-h-[40px] px-3 rounded border border-emerald-500/30 bg-emerald-500/10"
-                            title="Add another expiry lot for this product"
+                            title="Add another expiry date for this product — split quantities move out of the main row"
                           >
-                            + Split lot
+                            + Split by date
                           </button>
+                          {lots.length > 1 && (
+                            <span className="text-[11px] text-zinc-500">
+                              Split quantities move out of the main row — the counted total stays put.
+                            </span>
+                          )}
                           {over && (
                             <div className="text-xs text-red-400 bg-red-500/10 px-2 py-1 rounded">
                               Receiving {receivingNow} exceeds the {remaining} remaining on this line. Reduce lot quantities.
