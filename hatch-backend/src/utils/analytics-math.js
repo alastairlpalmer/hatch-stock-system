@@ -55,6 +55,64 @@ export function marginPct(revenue, cost) {
 }
 
 /**
+ * Roll per-product stats up into product-family rows (parent products, e.g.
+ * "Barebells"). Family totals sum member flavours; margin recomputes on the
+ * summed paid basis (never averages member percentages). Members carry
+ * unitsSharePct — their share of the family's units — which is the flavour
+ * sell-rate the ordering split (phase 3) will consume. Flavours with no sales
+ * in the period still appear as zero rows so the full range is visible.
+ *
+ * parents: [{ id, name, products: [{ sku, name }] }] (from product_parents)
+ * products: per-product stats rows from productStats() keyed by sku
+ * stockResolved: false when the scope's stock is unknowable → stock fields null
+ */
+export function aggregateFamilies(parents, products, { stockResolved = true } = {}) {
+  const bySku = new Map((products || []).map((p) => [p.sku, p]));
+
+  const families = (parents || []).map((parent) => {
+    const members = (parent.products || []).map((m) => {
+      const s = bySku.get(m.sku);
+      return {
+        sku: m.sku,
+        name: s?.name || m.name,
+        units: s?.units ?? 0,
+        revenue: s?.revenue ?? 0,
+        transactions: s?.transactions ?? 0,
+        paidRevenue: s?.paidRevenue ?? 0,
+        paidCost: s?.paidCost ?? 0,
+        marginPct: s?.marginPct ?? null,
+        stockOnHand: stockResolved ? s?.stockOnHand ?? 0 : null,
+      };
+    });
+
+    const units = members.reduce((a, m) => a + m.units, 0);
+    const revenue = members.reduce((a, m) => a + m.revenue, 0);
+    const transactions = members.reduce((a, m) => a + m.transactions, 0);
+    const paidRevenue = members.reduce((a, m) => a + m.paidRevenue, 0);
+    const paidCost = members.reduce((a, m) => a + m.paidCost, 0);
+
+    members.forEach((m) => {
+      m.unitsSharePct = units > 0 ? (m.units / units) * 100 : null;
+    });
+    members.sort((a, b) => b.units - a.units || a.name.localeCompare(b.name));
+
+    return {
+      id: parent.id,
+      name: parent.name,
+      flavourCount: members.length,
+      units,
+      revenue,
+      transactions,
+      marginPct: marginPct(paidRevenue, paidCost),
+      stockOnHand: stockResolved ? members.reduce((a, m) => a + m.stockOnHand, 0) : null,
+      members,
+    };
+  });
+
+  return families.sort((a, b) => b.units - a.units || a.name.localeCompare(b.name));
+}
+
+/**
  * Linear-interpolated percentile (p in [0,1]) of a numeric array.
  * Ignores non-finite values. Returns null for an empty input.
  */

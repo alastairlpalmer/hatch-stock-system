@@ -8,6 +8,7 @@ import {
   marginPct,
   shapeTiming,
   computeSuggestions,
+  aggregateFamilies,
 } from '../utils/analytics-math.js';
 
 /**
@@ -264,11 +265,19 @@ export async function getDashboard(query = {}) {
   const range = { startDate: query.startDate || null, endDate: query.endDate || null };
   const days = range.startDate && range.endDate ? periodDays(range.startDate, range.endDate) : null;
 
-  const [head, time, products, noSales] = await Promise.all([
+  const [head, time, products, noSales, parents] = await Promise.all([
     headline(range, scope.names),
     timing(range, scope.names),
     productStats(range, scope),
     namesWithNoSales(range, scope.names),
+    // Product families (parent products). Fail-soft: if 026_product_parents
+    // isn't applied yet the query throws — the dashboard must not 500 for it.
+    prisma.productParent
+      .findMany({
+        orderBy: { name: 'asc' },
+        include: { products: { select: { sku: true, name: true } } },
+      })
+      .catch(() => []),
   ]);
 
   // Portfolio margin is computed on the same paid-only basis as per-product
@@ -316,6 +325,7 @@ export async function getDashboard(query = {}) {
 
   const stockResolved = scope.isAll || (scope.locationIds && scope.locationIds.length > 0);
   const suggestions = days ? computeSuggestions(products, { portfolioMarginPct, periodDays: days }) : [];
+  const families = aggregateFamilies(parents, products, { stockResolved });
 
   return {
     period: { startDate: range.startDate, endDate: range.endDate, days },
@@ -330,6 +340,7 @@ export async function getDashboard(query = {}) {
     headline: head,
     timing: time,
     products: { topByUnits, topByRevenue, slowMovers, categories },
+    families,
     margin: { portfolioMarginPct, byLowestMargin, byHighestVolume },
     suggestions,
     insufficientData: {
