@@ -3,9 +3,11 @@ import { useStock } from '../../context/StockContext';
 import vendliveService from '../../services/vendlive.service';
 import { inventoryService } from '../../services/inventory.service';
 import PlanogramView from '../planogram/PlanogramView';
+import { useToast } from '../ui/Toast';
 
 export default function LocationStock() {
   const { data, updateLocationStock, updateLocationConfig, updateLocationAssignedItems, updateMealTypeConfig, updateProductMeal, updateProductParentConfig } = useStock();
+  const toast = useToast();
   const [selectedLocation, setSelectedLocation] = useState('');
   // 'list' = existing table; 'visual' = SVG fridge planogram
   const [view, setView] = useState('list');
@@ -196,21 +198,31 @@ export default function LocationStock() {
     computeStatus(qty, config.minStock || 0, config.maxStock || 0);
 
   // Update group capacity (min/max) for a meal-type bucket at this location.
+  // Failures surface as a toast — these fire per keystroke, and an unhandled
+  // rejection (e.g. offline) previously just did nothing silently.
   const handleUpdateMealConfig = async (mealType, field, value) => {
     const current = (data.locationMealConfig[selectedLocation] || {})[mealType] || {};
-    await updateMealTypeConfig(selectedLocation, mealType, {
-      ...current,
-      [field]: parseInt(value) || 0,
-    });
+    try {
+      await updateMealTypeConfig(selectedLocation, mealType, {
+        ...current,
+        [field]: parseInt(value) || 0,
+      });
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Could not save the group min/max — check the connection');
+    }
   };
 
   // Same, for a product family (Barebells etc.) — keyed by parentId.
   const handleUpdateParentConfig = async (parentId, field, value) => {
     const current = (data.locationParentConfig?.[selectedLocation] || {})[parentId] || {};
-    await updateProductParentConfig(selectedLocation, parentId, {
-      ...current,
-      [field]: parseInt(value) || 0,
-    });
+    try {
+      await updateProductParentConfig(selectedLocation, parentId, {
+        ...current,
+        [field]: parseInt(value) || 0,
+      });
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Could not save the family min/max — check the connection');
+    }
   };
 
   const products = getProductsForLocation();

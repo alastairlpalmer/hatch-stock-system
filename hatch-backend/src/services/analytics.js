@@ -272,6 +272,8 @@ export async function getDashboard(query = {}) {
     namesWithNoSales(range, scope.names),
     // Product families (parent products). Fail-soft: if 026_product_parents
     // isn't applied yet the query throws — the dashboard must not 500 for it.
+    // But LOG the failure: a silent [] here would make any future schema break
+    // read as "no families configured", forever.
     prisma.productParent
       .findMany({
         orderBy: { name: 'asc' },
@@ -280,7 +282,10 @@ export async function getDashboard(query = {}) {
         // agree, even for rows flagged before the invariant was enforced.
         include: { products: { where: { isFreshMeal: false }, select: { sku: true, name: true } } },
       })
-      .catch(() => []),
+      .catch((err) => {
+        console.warn('[analytics] product families unavailable, dashboard omits them:', err.message);
+        return [];
+      }),
   ]);
 
   // Portfolio margin is computed on the same paid-only basis as per-product

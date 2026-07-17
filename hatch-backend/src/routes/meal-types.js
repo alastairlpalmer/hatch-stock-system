@@ -20,8 +20,10 @@ router.get('/', asyncHandler(async (req, res) => {
   res.json(mealTypes);
 }));
 
+// trim() before min(1) — a whitespace-only bucket name must not slip through
+// as an empty string (same guard as product-parents).
 const createSchema = z.object({
-  name: z.string().min(1).max(40),
+  name: z.string().trim().min(1).max(40),
   sortOrder: z.coerce.number().int().optional(),
 });
 
@@ -41,7 +43,7 @@ router.post('/', asyncHandler(async (req, res) => {
 }));
 
 const updateSchema = z.object({
-  name: z.string().min(1).max(40).optional(),
+  name: z.string().trim().min(1).max(40).optional(),
   sortOrder: z.coerce.number().int().optional(),
 });
 
