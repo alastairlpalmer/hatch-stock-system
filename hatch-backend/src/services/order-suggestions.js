@@ -174,6 +174,60 @@ export function computeOrderQty({ netNeed, unitsPerBox = 1, projectedStock = 0, 
 }
 
 /**
+ * Effective min/max for a product family at one location. Pure; exported for
+ * tests (the ×member-count capacity bug and the partial-config understatement
+ * both lived in the previous inline version of this logic).
+ *
+ * Max precedence: planogram capacity → location_parent_config → summed per-SKU
+ * config. Planogram capacity counts the family's parent-slot capacity ONCE
+ * plus each individually-slotted member's own slot capacity; any unresolvable
+ * slot poisons the total to unknown (matches buildPlanogramScope semantics).
+ * Config sums are only trusted when EVERY member has a value — a partial sum
+ * would silently understate the family target (one configured flavour capping
+ * a four-flavour family).
+ *
+ * @param {Object} p
+ * @param {Object|null} p.scope buildPlanogramScope output or null
+ * @param {string} p.parentId
+ * @param {Array}  p.members in-scope member products [{ sku }]
+ * @param {Object} p.parentCfg LocationParentConfig row ({} when none)
+ * @param {Object} p.configMap { sku: LocationConfig row }
+ * @returns {{ groupMax: number|null, groupMin: number|null }}
+ */
+export function computeFamilyCaps({ scope, parentId, members, parentCfg = {}, configMap = {} }) {
+  let scopeCapacity = null;
+  if (scope) {
+    let total = 0;
+    let known = true;
+    let any = false;
+    if (scope.parentSet?.has(parentId)) {
+      any = true;
+      const parentCap = scope.capacityByTarget.get(`parent:${parentId}`);
+      if (parentCap == null) known = false;
+      else total += parentCap;
+    }
+    for (const p of members) {
+      if (!scope.skuSet.has(p.sku)) continue;
+      any = true;
+      const c = scope.capacityByTarget.get(`sku:${p.sku}`);
+      if (c == null) { known = false; break; }
+      total += c;
+    }
+    if (any && known) scopeCapacity = total;
+  }
+  const summedCfg = (field) => {
+    const vals = members.map((p) => configMap[p.sku]?.[field]).filter((v) => v != null);
+    return vals.length > 0 && vals.length === members.length
+      ? vals.reduce((a, v) => a + v, 0)
+      : null;
+  };
+  return {
+    groupMax: scopeCapacity ?? parentCfg.maxStock ?? summedCfg('maxStock'),
+    groupMin: parentCfg.minStock ?? summedCfg('minStock'),
+  };
+}
+
+/**
  * Split a parent-family net need into per-flavour boxes ("6 boxes of
  * Barebells" → "3 choc, 2 caramel, 1 cookies"). Pure; exported for tests.
  *
@@ -185,16 +239,23 @@ export function computeOrderQty({ netNeed, unitsPerBox = 1, projectedStock = 0, 
  * count, then hand out one box at a time to the largest fractional remainder
  * (ties: higher velocity, then sku) until the need is covered.
  *
- * minShareForBox: a flavour selling at least this share of the family is
- * guaranteed one box (when the need is at least that box), even if rounding
- * gave it zero — the per-flavour floor from the design review, so a popular
- * flavour can't be starved by two dominant siblings. May overshoot the need
- * by design; the surplus is visible in the suggested lines the operator edits.
+ * minShareForBox: a flavour with REAL sales (velocity > 0) at or above this
+ * share of the family is guaranteed one box (when the need is at least that
+ * box and it fits the cap), even if rounding gave it zero — the per-flavour
+ * floor from the design review, so a popular flavour can't be starved by two
+ * dominant siblings. The velocity requirement matters: cold-start families
+ * have equal shares, and flooring every flavour of a no-history family used
+ * to multiply the order by the member count.
+ *
+ * maxUnits: hard allocation ceiling (machine-capacity headroom). The
+ * largest-remainder loop rounds UP to cover the need, but never places a box
+ * that would exceed maxUnits — the family analogue of computeOrderQty's
+ * round-down-at-capacity rule. Default Infinity (no cap).
  *
  * members: [{ sku, name, unitsPerBox, velocityLong, ... }] (extra fields kept)
  * Returns members decorated with { sharePct, units, boxes }, velocity-desc.
  */
-export function splitParentNeed({ netNeed, members = [], minShareForBox = 0.2 }) {
+export function splitParentNeed({ netNeed, members = [], minShareForBox = 0.2, maxUnits = Infinity }) {
   const boxOf = (m) => (m.unitsPerBox > 0 ? m.unitsPerBox : 1);
   const totalVel = members.reduce((a, m) => a + (m.velocityLong || 0), 0);
   const shareOf = (m) =>
@@ -210,24 +271,35 @@ export function splitParentNeed({ netNeed, members = [], minShareForBox = 0.2 })
   }));
 
   if (netNeed > 0 && out.length > 0) {
+    const allocated = () => out.reduce((a, m) => a + m.boxes * boxOf(m), 0);
     for (const m of out) {
       const idealBoxes = (netNeed * m._share) / boxOf(m);
       m.boxes = Math.floor(idealBoxes);
       m._rem = idealBoxes - m.boxes;
     }
-    const allocated = () => out.reduce((a, m) => a + m.boxes * boxOf(m), 0);
+    // Initial floored shares sum to ≤ netNeed, so with netNeed ≤ maxUnits
+    // (finalizeLines caps it) the starting allocation is always within the cap.
     const byRemainder = (a, b) =>
       b._rem - a._rem
       || (b.velocityLong || 0) - (a.velocityLong || 0)
       || String(a.sku).localeCompare(String(b.sku));
     while (allocated() < netNeed) {
-      const next = [...out].sort(byRemainder)[0];
+      // Hand the next box to the largest remainder that still FITS the cap;
+      // when nothing fits, the need is as covered as capacity allows.
+      const next = [...out].sort(byRemainder).find((m) => allocated() + boxOf(m) <= maxUnits);
+      if (!next) break;
       next.boxes += 1;
       next._rem -= 1; // deprioritise but keep eligible if still short
     }
-    // Per-flavour floor: a meaningful seller never rounds to nothing.
+    // Per-flavour floor: a proven seller never rounds to nothing.
     for (const m of out) {
-      if (m.boxes === 0 && m._share >= minShareForBox && netNeed >= boxOf(m)) {
+      if (
+        m.boxes === 0
+        && (m.velocityLong || 0) > 0
+        && m._share >= minShareForBox
+        && netNeed >= boxOf(m)
+        && allocated() + boxOf(m) <= maxUnits
+      ) {
         m.boxes = 1;
       }
     }
@@ -426,27 +498,13 @@ async function buildLocationGrossLines(location, now, meta, planogram = null) {
     const blended = blendVelocity(vShort, vLong);
     const cfg = parentConfigMap[parentId] || {};
 
-    // Family fill cap: summed slot capacity of the in-scope flavours when every
-    // one resolves; any unknown slot makes the diagram cap unknowable and the
-    // chain falls through to configs.
-    let scopeCapacity = null;
-    if (scope) {
-      let total = 0;
-      let known = true;
-      for (const p of members) {
-        const c = scope.capacityByTarget.get(`sku:${p.sku}`)
-          ?? scope.capacityByTarget.get(`parent:${parentId}`);
-        if (c == null) { known = false; break; }
-        total += c;
-      }
-      if (known) scopeCapacity = total;
-    }
-    const summedCfg = (field) => {
-      const vals = members.map((p) => configMap[p.sku]?.[field]).filter((v) => v != null);
-      return vals.length ? vals.reduce((a, v) => a + v, 0) : null;
-    };
-    const groupMax = scopeCapacity ?? cfg.maxStock ?? summedCfg('maxStock');
-    const groupMin = cfg.minStock ?? summedCfg('minStock');
+    const { groupMax, groupMin } = computeFamilyCaps({
+      scope,
+      parentId,
+      members,
+      parentCfg: cfg,
+      configMap,
+    });
 
     const sug = computeSuggestion({
       machineStock,
@@ -639,14 +697,15 @@ async function finalizeLines(mergedLines, supplierNameOf) {
     let boxes;
     let members;
     if (line.type === 'parentGroup') {
-      // Family lines: cap the need at machine capacity like computeOrderQty
-      // does, then split into per-flavour boxes by sell rate. The parent line's
-      // orderQty/boxes are the SUMS of the flavour lines the PO will carry.
-      const cappedNeed = maxStockKnown
-        ? Math.min(netNeed, Math.max(0, maxStock - line.projectedStock))
-        : netNeed;
+      // Family lines: the machine-capacity headroom bounds BOTH the need and
+      // the box allocation (the split rounds up to cover the need, but never
+      // past the cap — the family analogue of computeOrderQty's behaviour).
+      // The parent line's orderQty/boxes are the SUMS of the flavour lines
+      // the PO will carry.
+      const headroom = maxStockKnown ? Math.max(0, maxStock - line.projectedStock) : Infinity;
       members = splitParentNeed({
-        netNeed: cappedNeed,
+        netNeed: Math.min(netNeed, headroom),
+        maxUnits: headroom,
         members: Object.values(_memberVel).map((m) => ({
           ...m,
           velocityLong: round(m.velocityLong),

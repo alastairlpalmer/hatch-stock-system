@@ -13,21 +13,6 @@ function formatDate(iso, fmt = 'EEEE d MMMM yyyy') {
   return Number.isNaN(d.getTime()) ? iso : format(d, fmt);
 }
 
-function groupBySupplier(items) {
-  const groups = new Map();
-  (items || []).forEach(item => {
-    const key = item.supplierId || item.supplierName || '__none__';
-    if (!groups.has(key)) {
-      groups.set(key, {
-        supplierName: item.supplierName || 'No preferred supplier',
-        items: [],
-      });
-    }
-    groups.get(key).items.push(item);
-  });
-  return [...groups.values()];
-}
-
 function boxesFor(item) {
   const upb = item.unitsPerBox || 1;
   return upb > 1 ? Math.ceil((item.quantity || 0) / upb) : null;
@@ -77,10 +62,15 @@ export default function SharedBuyingList() {
     return () => { cancelled = true; };
   }, [token]);
 
-  const groups = list ? groupBySupplier(list.items) : [];
-  const totalUnits = (list?.items || []).reduce((a, i) => a + (i.quantity || 0), 0);
-  const totalBoxes = (list?.items || []).reduce((a, i) => a + (boxesFor(i) || 0), 0);
-  const totalLines = (list?.items || []).length;
+  // The public endpoint returns items ALREADY grouped per supplier
+  // ({ suppliers: [{ supplierName, items, subtotal }] }) — there is no flat
+  // `items` key. Reading list.items here is what made every shared list render
+  // as empty.
+  const groups = list?.suppliers || [];
+  const allItems = groups.flatMap(g => g.items || []);
+  const totalUnits = allItems.reduce((a, i) => a + (i.quantity || 0), 0);
+  const totalBoxes = allItems.reduce((a, i) => a + (boxesFor(i) || 0), 0);
+  const totalLines = allItems.length;
 
   return (
     <div className="share-page min-h-screen bg-zinc-950 text-zinc-100">

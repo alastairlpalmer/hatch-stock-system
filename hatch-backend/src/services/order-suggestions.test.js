@@ -7,6 +7,7 @@ import {
   effectiveMaxStock,
   mergeNotOnPlanogram,
   splitParentNeed,
+  computeFamilyCaps,
 } from './order-suggestions.js';
 import { buildPlanogramScope } from './planogram-layout.js';
 
@@ -328,5 +329,104 @@ describe('splitParentNeed', () => {
     const out = splitParentNeed({ netNeed: 5, members: [{ sku: 'X', velocityLong: 1 }] });
     expect(out[0].units).toBe(5);
     expect(out[0].boxes).toBe(5);
+  });
+});
+
+describe('computeFamilyCaps — family capacity and config precedence', () => {
+  const members = [{ sku: 'A' }, { sku: 'B' }, { sku: 'C' }, { sku: 'D' }];
+  const scopeWith = (caps, { parents = [], skus = [] } = {}) => ({
+    parentSet: new Set(parents),
+    skuSet: new Set(skus),
+    capacityByTarget: new Map(Object.entries(caps)),
+  });
+
+  it('counts parent-slot capacity ONCE, not once per member (the 4× over-order bug)', () => {
+    const scope = scopeWith({ 'parent:p1': 40 }, { parents: ['p1'] });
+    const { groupMax } = computeFamilyCaps({ scope, parentId: 'p1', members, parentCfg: {}, configMap: {} });
+    expect(groupMax).toBe(40); // was 160 with 4 members
+  });
+
+  it('adds individually-slotted members on top of the parent slots', () => {
+    const scope = scopeWith({ 'parent:p1': 40, 'sku:A': 8 }, { parents: ['p1'], skus: ['A'] });
+    const { groupMax } = computeFamilyCaps({ scope, parentId: 'p1', members, parentCfg: {}, configMap: {} });
+    expect(groupMax).toBe(48);
+  });
+
+  it('poisons to the config fallback when any slot capacity is unknown', () => {
+    const scope = scopeWith({ 'parent:p1': null }, { parents: ['p1'] });
+    const { groupMax } = computeFamilyCaps({ scope, parentId: 'p1', members, parentCfg: { maxStock: 30 }, configMap: {} });
+    expect(groupMax).toBe(30);
+  });
+
+  it('sku-slots-only families sum just the slotted members', () => {
+    const scope = scopeWith({ 'sku:A': 8, 'sku:B': 8 }, { skus: ['A', 'B'] });
+    const { groupMax } = computeFamilyCaps({ scope, parentId: 'p1', members: [{ sku: 'A' }, { sku: 'B' }], parentCfg: {}, configMap: {} });
+    expect(groupMax).toBe(16);
+  });
+
+  it('rejects PARTIAL per-SKU config sums (one flavour must not cap the family)', () => {
+    const configMap = { A: { maxStock: 10 } }; // only 1 of 4 configured
+    const out = computeFamilyCaps({ scope: null, parentId: 'p1', members, parentCfg: {}, configMap });
+    expect(out.groupMax).toBeNull(); // was 10 — chronic family under-order
+  });
+
+  it('accepts COMPLETE per-SKU config sums and prefers parent config over them', () => {
+    const configMap = { A: { maxStock: 5, minStock: 1 }, B: { maxStock: 5, minStock: 1 } };
+    const two = [{ sku: 'A' }, { sku: 'B' }];
+    expect(computeFamilyCaps({ scope: null, parentId: 'p1', members: two, parentCfg: {}, configMap }))
+      .toEqual({ groupMax: 10, groupMin: 2 });
+    expect(computeFamilyCaps({ scope: null, parentId: 'p1', members: two, parentCfg: { maxStock: 24, minStock: 6 }, configMap }))
+      .toEqual({ groupMax: 24, groupMin: 6 });
+  });
+});
+
+describe('splitParentNeed — cold-start floor and capacity cap regressions', () => {
+  it('cold start (no history) covers the need without flooring every flavour', () => {
+    const cold = ['A', 'B', 'C', 'D'].map((sku) => ({ sku, unitsPerBox: 12, velocityLong: 0 }));
+    const out = splitParentNeed({ netNeed: 24, members: cold });
+    // was 48 (one box each via the share-only floor); equal shares now just
+    // largest-remainder to cover the need
+    expect(out.reduce((a, m) => a + m.units, 0)).toBe(24);
+  });
+
+  it('never floors a zero-velocity flavour even at a qualifying share', () => {
+    const m = [
+      { sku: 'A', unitsPerBox: 12, velocityLong: 6 },
+      { sku: 'B', unitsPerBox: 12, velocityLong: 0 }, // dead twin
+    ];
+    const out = splitParentNeed({ netNeed: 12, members: m });
+    expect(out.find((x) => x.sku === 'B').boxes).toBe(0);
+  });
+
+  it('maxUnits stops allocation at machine-capacity headroom (round-down parity)', () => {
+    const m = [
+      { sku: 'A', unitsPerBox: 12, velocityLong: 2 },
+      { sku: 'B', unitsPerBox: 12, velocityLong: 2 },
+    ];
+    const out = splitParentNeed({ netNeed: 13, members: m, maxUnits: 13 });
+    // covering 13 would need two boxes (24 > 13) — allocate the one that fits
+    expect(out.reduce((a, x) => a + x.units, 0)).toBe(12);
+  });
+
+  it('prefers a smaller box that still fits the cap over breaking it', () => {
+    const m = [
+      { sku: 'BIG', unitsPerBox: 12, velocityLong: 4 },
+      { sku: 'SMALL', unitsPerBox: 6, velocityLong: 2 },
+    ];
+    const out = splitParentNeed({ netNeed: 17, members: m, maxUnits: 18 });
+    const total = out.reduce((a, x) => a + x.units, 0);
+    expect(total).toBeGreaterThanOrEqual(17);
+    expect(total).toBeLessThanOrEqual(18); // 12 + 6, never 24
+  });
+
+  it('floor respects the cap too', () => {
+    const m = [
+      { sku: 'A', unitsPerBox: 12, velocityLong: 8 },
+      { sku: 'B', unitsPerBox: 12, velocityLong: 2 }, // 20% real seller
+    ];
+    const out = splitParentNeed({ netNeed: 12, members: m, maxUnits: 12 });
+    // A takes the only box that fits; flooring B would exceed the cap
+    expect(out.find((x) => x.sku === 'B').boxes).toBe(0);
+    expect(out.reduce((a, x) => a + x.units, 0)).toBe(12);
   });
 });

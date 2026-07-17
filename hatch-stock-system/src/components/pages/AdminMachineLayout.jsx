@@ -123,8 +123,14 @@ export default function AdminMachineLayout() {
   };
 
   const setSlot = (shelf, position, target) => mutate((d) => {
-    if (target) d.slots[slotKey(shelf, position)] = target;
-    else delete d.slots[slotKey(shelf, position)];
+    // The per-slot capacity override belongs to the physical facing — keep it
+    // when the product in the slot changes. Dropping it here (and in
+    // draftFromPayload) is what silently nulled every capacity override on
+    // save from this screen.
+    if (target) {
+      const existing = d.slots[slotKey(shelf, position)];
+      d.slots[slotKey(shelf, position)] = { ...target, capacity: target.capacity ?? existing?.capacity };
+    } else delete d.slots[slotKey(shelf, position)];
     return d;
   });
 
@@ -345,6 +351,7 @@ function draftFromPayload(p) {
       sku: a.sku || undefined,
       mealType: a.mealType || undefined,
       parentId: a.parentId || undefined,
+      capacity: a.capacity ?? undefined,
     };
   }
   return { shelves: p.layout.shelves || [], slots };
