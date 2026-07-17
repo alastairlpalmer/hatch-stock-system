@@ -117,25 +117,26 @@ export default function Inventory() {
     const searched = rows.filter(r => matchesStockSearch(r.sku));
     const visible = isStockSearching ? searched : searched.filter(r => r.total > 0);
     const parentNameOf = new Map((data.productParents || []).map(pp => [pp.id, pp.name]));
+    // Group keys are namespaced (fam:/cat:) so a family named like a real
+    // category (e.g. family "Drinks") never merges with that category's
+    // products under one mislabelled header.
     const groups = {};
-    const familyNames = new Set();
     visible.forEach(row => {
       const product = data.products.find(p => p.sku === row.sku);
       const familyName = product && !product.isFreshMeal && product.parentId
         ? parentNameOf.get(product.parentId)
         : null;
-      if (familyName) familyNames.add(familyName);
-      const category = familyName || product?.category || 'Uncategorised';
-      if (!groups[category]) groups[category] = [];
-      groups[category].push({ ...row, product });
+      const key = familyName ? `fam:${familyName}` : `cat:${product?.category || 'Uncategorised'}`;
+      if (!groups[key]) groups[key] = { name: familyName || product?.category || 'Uncategorised', isFamily: !!familyName, items: [] };
+      groups[key].items.push({ ...row, product });
     });
     return {
-      groups: Object.entries(groups)
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([category, items]) => ({
-          category,
-          isFamily: familyNames.has(category),
-          items: items.sort((x, y) =>
+      groups: Object.values(groups)
+        .sort((a, b) => a.name.localeCompare(b.name) || (a.isFamily === b.isFamily ? 0 : a.isFamily ? -1 : 1))
+        .map(g => ({
+          category: g.name,
+          isFamily: g.isFamily,
+          items: g.items.sort((x, y) =>
             (x.product?.name || x.sku).localeCompare(y.product?.name || y.sku)
           ),
         })),

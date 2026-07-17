@@ -400,8 +400,9 @@ describe('computeLocationNeeds — product families', () => {
       stockOf: () => 0,
     });
     expect(notOnPlanogram.parents).toEqual(['p1']);
-    // covered by a member sku slot -> not flagged
-    const covered = computeLocationNeeds({
+    // ONE member slotted out of two is NOT coverage — the other flavour would
+    // silently go unpicked; the family stays flagged.
+    const partial = computeLocationNeeds({
       ...base,
       scope: { ...scope, skuSet: new Set(['BB-CHOC']), capacityByTarget: new Map([['sku:BB-CHOC', 8]]) },
       configs: [],
@@ -409,6 +410,43 @@ describe('computeLocationNeeds — product families', () => {
       parentConfigs: [{ parentId: 'p1', maxStock: 10 }],
       stockOf: () => 0,
     });
+    expect(partial.notOnPlanogram.parents).toEqual(['p1']);
+    // EVERY member with an effective own slot = de-facto placement, no flag.
+    const covered = computeLocationNeeds({
+      ...base,
+      scope: {
+        ...scope,
+        skuSet: new Set(['BB-CHOC', 'BB-CARA']),
+        capacityByTarget: new Map([['sku:BB-CHOC', 8], ['sku:BB-CARA', 8]]),
+      },
+      configs: [],
+      mealConfigs: [],
+      parentConfigs: [{ parentId: 'p1', maxStock: 10 }],
+      stockOf: () => 0,
+    });
     expect(covered.notOnPlanogram.parents).toEqual([]);
+  });
+
+  it('an own slot with NO resolvable capacity falls back into the family split', () => {
+    // BB-CHOC has a facing but no per-slot capacity, no shelf default, no
+    // config row — its slot produces no fill target. It must NOT be excluded
+    // from the family split (that was silent starvation of the facing).
+    const scope = {
+      skuSet: new Set(['BB-CHOC']),
+      mealTypeSet: new Set(),
+      parentSet: new Set(['p1']),
+      capacityByTarget: new Map([['parent:p1', 12]]), // sku:BB-CHOC unresolvable
+    };
+    const { needs } = computeLocationNeeds({
+      ...base,
+      scope,
+      configs: [],
+      mealConfigs: [],
+      parentConfigs: [],
+      stockOf: () => 0,
+    });
+    const skus = needs.map((n) => n.sku);
+    expect(skus).toContain('BB-CHOC'); // back in the split
+    expect(needs.reduce((a, n) => a + n.qty, 0)).toBe(12);
   });
 });

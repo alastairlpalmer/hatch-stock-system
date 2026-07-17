@@ -206,10 +206,16 @@ export function computeLocationNeeds({
   }
 
   // Planogram path — slotted targets only, diagram capacity first.
+  // skuHandled tracks flavours whose own slot actually produced a fill target:
+  // an own slot with NO resolvable capacity used to both skip the per-SKU fill
+  // AND exclude the flavour from its family split — a silent starvation of
+  // that facing. Such flavours now fall back into the family split.
+  const skuHandled = new Set();
   for (const sku of scope.skuSet) {
     if (freshSkus.has(sku)) continue; // flavour SKUs fill via their group slot
     const target = scope.capacityByTarget.get(`sku:${sku}`) ?? configMax.get(sku) ?? null;
     if (target == null) continue; // no capacity anywhere — nothing to fill to
+    skuHandled.add(sku);
     addNeed(sku, Math.max(0, target - (stockOf(sku) || 0)));
   }
   for (const mealType of scope.mealTypeSet) {
@@ -221,17 +227,19 @@ export function computeLocationNeeds({
   for (const parentId of parentSet) {
     const target = scope.capacityByTarget.get(`parent:${parentId}`) ?? parentMaxCfg.get(parentId) ?? null;
     if (target == null) continue;
-    splitFamily(parentId, target, (sku) => scope.skuSet.has(sku));
+    splitFamily(parentId, target, (sku) => skuHandled.has(sku));
   }
 
   const notOnPlanogram = {
     skus: [...configMax.keys()].filter((sku) => !scope.skuSet.has(sku)),
     mealTypes: [...mealMax.keys()].filter((mt) => !scope.mealTypeSet.has(mt)),
-    // A family is covered by a parent slot OR by every-member sku slots being
-    // its de-facto placement; flag only fully-unplaced configured families.
+    // A configured family is covered by a parent slot, or by EVERY member
+    // having its own effective sku slot (de-facto per-flavour placement).
+    // A partially slotted family without a parent slot leaves the unslotted
+    // flavours unpicked — that must warn, not pass silently.
     parents: [...parentMaxCfg.keys()].filter((id) =>
       !parentSet.has(id)
-      && !(membersByParent[id] || []).some((m) => scope.skuSet.has(m.sku))),
+      && !(membersByParent[id] || []).every((m) => skuHandled.has(m.sku))),
   };
   return { needs, notOnPlanogram };
 }

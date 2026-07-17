@@ -358,24 +358,35 @@ publicRestockSheetRouter.get('/:token', asyncHandler(async (req, res) => {
     for (const p of extra) nameBySku.set(p.sku, p.name);
   }
 
+  const skuMax = new Map(configRows.filter((r) => r.maxStock != null).map((r) => [r.sku, r.maxStock]));
+  const groupMax = new Map(mealConfigRows.filter((r) => r.maxStock != null).map((r) => [r.mealType, r.maxStock]));
+  const parentMax = new Map(parentConfigRows.filter((r) => r.maxStock != null).map((r) => [r.parentId, r.maxStock]));
+
+  const scope = buildPlanogramScope(assignments, layout.shelves);
+
+  // Family flavours with their own EFFECTIVE sku slot (a fill target exists)
+  // are counted at that slot, not against the family row — the same exclusion
+  // pick-list generation applies, so the 3PL sheet's family "add" matches what
+  // the van actually carries.
+  const ownSlotHandled = new Set(
+    [...scope.skuSet].filter(
+      (sku) => (scope.capacityByTarget.get(`sku:${sku}`) ?? skuMax.get(sku)) != null,
+    ),
+  );
+
   const groupQty = new Map();
   const parentQty = new Map();
   for (const r of stockRows) {
     if (r.product?.isFreshMeal) {
       const group = r.product.mealType || 'Unclassified';
       groupQty.set(group, (groupQty.get(group) || 0) + r.quantity);
-    } else if (r.product?.parentId) {
+    } else if (r.product?.parentId && !ownSlotHandled.has(r.sku)) {
       parentQty.set(r.product.parentId, (parentQty.get(r.product.parentId) || 0) + r.quantity);
     }
   }
 
-  const skuMax = new Map(configRows.filter((r) => r.maxStock != null).map((r) => [r.sku, r.maxStock]));
-  const groupMax = new Map(mealConfigRows.filter((r) => r.maxStock != null).map((r) => [r.mealType, r.maxStock]));
-  const parentMax = new Map(parentConfigRows.filter((r) => r.maxStock != null).map((r) => [r.parentId, r.maxStock]));
-
   // Diagram slot capacity overrides the config max where resolvable — keeps
   // the 3PL sheet's "add" targets consistent with pick-list generation.
-  const scope = buildPlanogramScope(assignments, layout.shelves);
   for (const [key, cap] of scope.capacityByTarget) {
     if (cap == null) continue;
     if (key.startsWith('sku:')) skuMax.set(key.slice(4), cap);

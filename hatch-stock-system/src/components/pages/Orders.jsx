@@ -386,14 +386,25 @@ export default function Orders() {
         };
         if (editedKeysRef.current.has(key) && prevByKey.has(key)) {
           const prev = prevByKey.get(key);
-          return {
-            ...base,
-            orderQty: prev.orderQty,
-            unitPrice: prev.unitPrice,
-            selected: prev.selected,
-            // A family's per-flavour box edits are part of the user's plan too.
-            ...(s.type === 'parentGroup' && prev.members ? { members: prev.members } : {}),
-          };
+          if (s.type === 'parentGroup' && prev.members) {
+            // Keep the user's per-flavour box/price EDITS, but take the member
+            // SET from the fresh response — a flavour removed from the family
+            // server-side must not survive into the PO, and a new flavour must
+            // appear. The parent total follows the merged members.
+            const prevBySku = new Map(prev.members.map(m => [m.sku, m]));
+            const members = (base.members || []).map(fm => {
+              const pm = prevBySku.get(fm.sku);
+              return pm ? { ...fm, boxes: pm.boxes, units: pm.units, unitCost: pm.unitCost } : fm;
+            });
+            return {
+              ...base,
+              members,
+              orderQty: members.reduce((a, m) => a + (m.units || 0), 0),
+              unitPrice: prev.unitPrice,
+              selected: prev.selected,
+            };
+          }
+          return { ...base, orderQty: prev.orderQty, unitPrice: prev.unitPrice, selected: prev.selected };
         }
         return base;
       });
@@ -560,15 +571,38 @@ export default function Orders() {
     }));
   };
 
+  // Edit one flavour's unit cost — this is the price the PO line will carry
+  // (a family-level price input was a dead control: members always have their
+  // own cost, so a parent-level value never reached the PO).
+  const updateMemberCost = (key, sku, value) => {
+    editedKeysRef.current.add(key);
+    setSuggestedItems(items => items.map(i => {
+      if (i.key !== key) return i;
+      const unitCost = Math.max(0, parseFloat(value) || 0);
+      const members = (i.members || []).map(m => (m.sku === sku ? { ...m, unitCost } : m));
+      return { ...i, members, edited: true };
+    }));
+  };
+
   const boxesFor = (item) => {
     if (isParentGroup(item)) return (item.members || []).reduce((a, m) => a + (m.boxes || 0), 0);
     const upb = item.unitsPerBox || 1;
     return upb > 1 ? Math.ceil((item.orderQty || 0) / upb) : item.orderQty || 0;
   };
 
+  // Money value of one suggestion line. Families price per MEMBER (units ×
+  // that flavour's cost) — the parent-level unitPrice is an unweighted average
+  // and drifts from the real PO total whenever member costs differ.
+  const lineValue = (item) => {
+    if (isParentGroup(item)) {
+      return (item.members || []).reduce((a, m) => a + (m.units || 0) * (m.unitCost || 0), 0);
+    }
+    return (item.orderQty || 0) * (item.unitPrice || 0);
+  };
+
   const calculateSuggestedTotal = () => suggestedItems
     .filter(i => i.selected)
-    .reduce((acc, i) => acc + (i.orderQty * i.unitPrice), 0);
+    .reduce((acc, i) => acc + lineValue(i), 0);
 
   // Map a suggestion line to buying-list item lines. Fresh-meal groups stay
   // as ONE meal-type line (like the Location Stock page) — the Frive menu
@@ -1016,17 +1050,23 @@ export default function Orders() {
                   {item.daysOfCover != null && (
                     <span>Cover <span className="text-teal-400">{item.daysOfCover}td</span></span>
                   )}
-                  <span className="flex items-center gap-1.5">
-                    Unit £
-                    <input
-                      type="number"
-                      step="0.01"
-                      min="0"
-                      value={item.unitPrice}
-                      onChange={(e) => updateSuggestedItem(item.key, 'unitPrice', parseFloat(e.target.value) || 0)}
-                      className="w-16 bg-zinc-800 border border-zinc-700 rounded px-2 py-0.5 text-center text-xs focus:outline-none focus:border-emerald-500"
-                    />
-                  </span>
+                  {isParentGroup(item) ? (
+                    // Families price per flavour — edit each member's Unit £
+                    // below; a family-level price would never reach the PO.
+                    <span>Line £ <span className="text-zinc-200">{lineValue(item).toFixed(2)}</span></span>
+                  ) : (
+                    <span className="flex items-center gap-1.5">
+                      Unit £
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={item.unitPrice}
+                        onChange={(e) => updateSuggestedItem(item.key, 'unitPrice', parseFloat(e.target.value) || 0)}
+                        className="w-16 bg-zinc-800 border border-zinc-700 rounded px-2 py-0.5 text-center text-xs focus:outline-none focus:border-emerald-500"
+                      />
+                    </span>
+                  )}
                 </div>
                 {/* Family flavour split — the suggested boxes come from each
                     flavour's 28-day sell rate; edit them here and the parent
@@ -1043,6 +1083,17 @@ export default function Orders() {
                             </span>
                           )}
                           {m.warehouseStock != null && <span>wh {m.warehouseStock}</span>}
+                          <span className="flex items-center gap-1" title="This flavour's unit cost — the price its PO line will carry">
+                            £
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0"
+                              value={m.unitCost ?? 0}
+                              onChange={(e) => updateMemberCost(item.key, m.sku, e.target.value)}
+                              className="w-14 bg-zinc-800 border border-zinc-700 rounded px-1.5 py-0.5 text-center text-xs focus:outline-none focus:border-emerald-500"
+                            />
+                          </span>
                           <span className="flex items-center gap-1">
                             <input
                               type="number"
@@ -1406,7 +1457,7 @@ export default function Orders() {
                 <tbody>
                   {supplierGroups().map(group => {
                     const selectedInGroup = group.items.filter(i => i.selected && i.orderQty > 0);
-                    const subtotal = selectedInGroup.reduce((a, i) => a + i.orderQty * i.unitPrice, 0);
+                    const subtotal = selectedInGroup.reduce((a, i) => a + lineValue(i), 0);
                     // Ordering config from shared supplier state: order-day
                     // chips + minimum-order shortfall as quantities change.
                     const supplier = group.supplierId
