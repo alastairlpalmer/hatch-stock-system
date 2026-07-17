@@ -71,7 +71,8 @@ router.get('/starvation', asyncHandler(async (req, res) => {
       const familyStock = withStats.reduce((a, m) => a + m.stock, 0);
       if (familyStock <= 0) continue; // genuinely empty — ordinary low-stock alerts cover it
       const top = withStats.reduce((a, m) => (m.vLong > (a?.vLong || 0) ? m : a), null);
-      if (top && top.vLong > 0 && top.stock === 0) {
+      // <= 0: sync drift can leave a sold-out flavour slightly negative.
+      if (top && top.vLong > 0 && top.stock <= 0) {
         items.push({
           locationId: location.id,
           locationName: location.name,
@@ -88,7 +89,9 @@ router.get('/starvation', asyncHandler(async (req, res) => {
   res.json({ items });
 }));
 
-const nameSchema = z.object({ name: z.string().min(1).max(60) });
+// trim() runs BEFORE min(1): a whitespace-only name is rejected rather than
+// stored as an empty string that renders as a blank, unclickable group.
+const nameSchema = z.object({ name: z.string().trim().min(1).max(60) });
 
 router.post('/', asyncHandler(async (req, res) => {
   const { name } = nameSchema.parse(req.body);
@@ -141,6 +144,19 @@ router.delete('/:id', asyncHandler(async (req, res) => {
         err.status = 409;
         throw err;
       }
+      // Planogram slots reference parents with NO FK (history must survive) —
+      // block the delete rather than leave zombie "any flavour" slots that
+      // pick nothing forever.
+      const slots = await tx.slotAssignment.count({
+        where: { parentId: existing.id, validTo: null },
+      });
+      if (slots > 0) {
+        const err = new Error(
+          `Cannot delete: ${slots} planogram slot(s) still target "${existing.name}". Reassign them first.`,
+        );
+        err.status = 409;
+        throw err;
+      }
       await tx.locationParentConfig.deleteMany({ where: { parentId: existing.id } });
       await tx.productParent.delete({ where: { id: existing.id } });
     });
@@ -172,11 +188,19 @@ router.post('/:id/members', asyncHandler(async (req, res) => {
   }
 
   try {
+    // Only unassigned flavours (or re-assignments to the SAME group) — a SKU
+    // in another family must be removed there first, matching the UI flow,
+    // instead of being silently stolen.
     const result = await prisma.product.updateMany({
-      where: { sku: { in: skus }, isFreshMeal: false },
+      where: {
+        sku: { in: skus },
+        isFreshMeal: false,
+        OR: [{ parentId: null }, { parentId: parent.id }],
+      },
       data: { parentId: parent.id },
     });
-    res.json({ success: true, assigned: result.count });
+    const skippedInOtherGroup = skus.length - result.count;
+    res.json({ success: true, assigned: result.count, skippedInOtherGroup });
   } catch (err) {
     // FK violation: the group was deleted between the lookup above and the
     // update (concurrent admin) — report it rather than 500.
@@ -224,12 +248,20 @@ router.put('/location/:locationId/config/:parentId', asyncHandler(async (req, re
   const { minStock, maxStock } = parentConfigSchema.parse(req.body);
   const { locationId, parentId } = req.params;
 
-  const config = await prisma.locationParentConfig.upsert({
-    where: { locationId_parentId: { locationId, parentId } },
-    create: { locationId, parentId, minStock, maxStock },
-    update: { minStock, maxStock },
-  });
-  res.json(config);
+  try {
+    const config = await prisma.locationParentConfig.upsert({
+      where: { locationId_parentId: { locationId, parentId } },
+      create: { locationId, parentId, minStock, maxStock },
+      update: { minStock, maxStock },
+    });
+    res.json(config);
+  } catch (err) {
+    // FK violation — unknown location or group id must read as a 404, not a 500.
+    if (err.code === 'P2003') {
+      return res.status(404).json({ error: 'Location or product group not found' });
+    }
+    throw err;
+  }
 }));
 
 export default router;

@@ -450,3 +450,29 @@ describe('computeLocationNeeds — product families', () => {
     expect(needs.reduce((a, n) => a + n.qty, 0)).toBe(12);
   });
 });
+
+describe('computeLocationNeeds — not-on-planogram report for family flavours', () => {
+  it('does not list a configured flavour that is served via its family slot', () => {
+    const { needs, notOnPlanogram } = computeLocationNeeds({
+      freshSkus: new Set(),
+      membersByMealType: {},
+      membersByParent: { p1: [{ sku: 'BB-CHOC', name: 'Choc' }, { sku: 'BB-CARA', name: 'Caramel' }] },
+      availableOf: { 'BB-CHOC': 100, 'BB-CARA': 100 },
+      earliestExpiryOf: () => null,
+      scope: {
+        skuSet: new Set(),
+        mealTypeSet: new Set(),
+        parentSet: new Set(['p1']),
+        capacityByTarget: new Map([['parent:p1', 12]]),
+      },
+      // BB-CHOC has a per-SKU config but NO own slot — it is picked through
+      // the family split, so warning "not on the planogram" is misleading.
+      configs: [{ sku: 'BB-CHOC', maxStock: 5 }],
+      mealConfigs: [],
+      parentConfigs: [],
+      stockOf: () => 0,
+    });
+    expect(needs.map((n) => n.sku)).toContain('BB-CHOC');
+    expect(notOnPlanogram.skus).toEqual([]);
+  });
+});

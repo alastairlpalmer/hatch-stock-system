@@ -191,9 +191,14 @@ export function computeLocationNeeds({
   const splitGroup = (mealType, groupMax) => splitAcross(membersByMealType[mealType] || [], groupMax);
   // Members already filled per-SKU elsewhere (own slot / own config) stay out
   // of the family split — their stock and need are accounted at their own
-  // target, never twice.
-  const splitFamily = (parentId, groupMax, memberExcluded) =>
-    splitAcross((membersByParent[parentId] || []).filter((m) => !memberExcluded(m.sku)), groupMax);
+  // target, never twice. familyCovered records who WAS served via a family
+  // split, so the not-on-planogram report doesn't mislabel them as excluded.
+  const familyCovered = new Set();
+  const splitFamily = (parentId, groupMax, memberExcluded) => {
+    const included = (membersByParent[parentId] || []).filter((m) => !memberExcluded(m.sku));
+    included.forEach((m) => familyCovered.add(m.sku));
+    splitAcross(included, groupMax);
+  };
 
   if (!scope) {
     // Legacy path — fill every configured target to its config max.
@@ -231,7 +236,9 @@ export function computeLocationNeeds({
   }
 
   const notOnPlanogram = {
-    skus: [...configMax.keys()].filter((sku) => !scope.skuSet.has(sku)),
+    // A configured flavour served through its FAMILY slot is not excluded —
+    // listing it here trained operators to distrust the warning.
+    skus: [...configMax.keys()].filter((sku) => !scope.skuSet.has(sku) && !familyCovered.has(sku)),
     mealTypes: [...mealMax.keys()].filter((mt) => !scope.mealTypeSet.has(mt)),
     // A configured family is covered by a parent slot, or by EVERY member
     // having its own effective sku slot (de-facto per-flavour placement).
