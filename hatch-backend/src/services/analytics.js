@@ -275,7 +275,10 @@ export async function getDashboard(query = {}) {
     prisma.productParent
       .findMany({
         orderBy: { name: 'asc' },
-        include: { products: { select: { sku: true, name: true } } },
+        // Belt-and-braces: a fresh-meal-flagged product is out of its family
+        // everywhere else (ordering, picking, starvation) — the dashboard must
+        // agree, even for rows flagged before the invariant was enforced.
+        include: { products: { where: { isFreshMeal: false }, select: { sku: true, name: true } } },
       })
       .catch(() => []),
   ]);

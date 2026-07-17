@@ -128,17 +128,26 @@ router.delete('/:id', asyncHandler(async (req, res) => {
   const existing = await prisma.productParent.findUnique({ where: { id: req.params.id } });
   if (!existing) return res.status(404).json({ error: 'Product group not found' });
 
-  const members = await prisma.product.count({ where: { parentId: existing.id } });
-  if (members > 0) {
-    return res.status(409).json({
-      error: `Cannot delete: ${members} product(s) are still in "${existing.name}". Remove them first.`,
+  // The member check must live INSIDE the transaction: checked outside, a
+  // concurrent assignment could land between check and delete, and the FK's
+  // ON DELETE SET NULL would silently orphan the just-assigned flavours.
+  try {
+    await prisma.$transaction(async (tx) => {
+      const members = await tx.product.count({ where: { parentId: existing.id } });
+      if (members > 0) {
+        const err = new Error(
+          `Cannot delete: ${members} product(s) are still in "${existing.name}". Remove them first.`,
+        );
+        err.status = 409;
+        throw err;
+      }
+      await tx.locationParentConfig.deleteMany({ where: { parentId: existing.id } });
+      await tx.productParent.delete({ where: { id: existing.id } });
     });
+  } catch (err) {
+    if (err.status === 409) return res.status(409).json({ error: err.message });
+    throw err;
   }
-
-  await prisma.$transaction([
-    prisma.locationParentConfig.deleteMany({ where: { parentId: existing.id } }),
-    prisma.productParent.delete({ where: { id: existing.id } }),
-  ]);
   res.json({ success: true });
 }));
 
@@ -162,11 +171,20 @@ router.post('/:id/members', asyncHandler(async (req, res) => {
     });
   }
 
-  const result = await prisma.product.updateMany({
-    where: { sku: { in: skus }, isFreshMeal: false },
-    data: { parentId: parent.id },
-  });
-  res.json({ success: true, assigned: result.count });
+  try {
+    const result = await prisma.product.updateMany({
+      where: { sku: { in: skus }, isFreshMeal: false },
+      data: { parentId: parent.id },
+    });
+    res.json({ success: true, assigned: result.count });
+  } catch (err) {
+    // FK violation: the group was deleted between the lookup above and the
+    // update (concurrent admin) — report it rather than 500.
+    if (err.code === 'P2003') {
+      return res.status(409).json({ error: 'Product group was deleted — refresh and try again' });
+    }
+    throw err;
+  }
 }));
 
 // Remove one flavour from a group.

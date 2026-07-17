@@ -207,6 +207,10 @@ router.put('/:sku', asyncHandler(async (req, res) => {
       ...(barcode !== undefined && { barcode: barcode || null }),
       ...(preferredSupplierId !== undefined && { preferredSupplierId: preferredSupplierId || null }),
       ...(isFreshMeal !== undefined && { isFreshMeal: !!isFreshMeal }),
+      // A product is never in both grouping systems: flipping it to a fresh
+      // meal removes it from its product family (mirror of the family-
+      // assignment route rejecting fresh meals).
+      ...(isFreshMeal ? { parentId: null } : {}),
       ...(mealType !== undefined && { mealType: mealType || null }),
       ...(mealTypeConfirmed !== undefined && { mealTypeConfirmed: !!mealTypeConfirmed }),
     },
@@ -224,6 +228,8 @@ router.put('/:sku/meal', asyncHandler(async (req, res) => {
     where: { sku: req.params.sku },
     data: {
       ...(isFreshMeal !== undefined && { isFreshMeal: !!isFreshMeal }),
+      // Never in both grouping systems — see PUT /:sku above.
+      ...(isFreshMeal ? { parentId: null } : {}),
       ...(mealType !== undefined && { mealType: mealType || null }),
       ...(mealTypeConfirmed !== undefined && { mealTypeConfirmed: !!mealTypeConfirmed }),
     },
