@@ -1,25 +1,37 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   AlertTriangle,
   ArrowLeft,
   Ban,
+  Camera,
   Check,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  ClipboardCheck,
   Loader2,
+  PackagePlus,
+  PartyPopper,
   Pencil,
   Printer,
   RefreshCw,
+  RotateCcw,
   Trash2,
+  Truck,
 } from 'lucide-react';
 import { useStock } from '../../../context/StockContext';
-import { useRestockRun } from '../../../context/RestockRunContext';
 import { pickListsService } from '../../../services/pickLists.service';
 import { StatusChip } from './PickLists';
 import QtyInput from '../../ui/QtyInput';
+
+// Same key the stock-check page uses — one shared "who is doing the run" name
+// across the whole Monday workflow, typed once per device.
+const NAME_STORAGE_KEY = 'hatch_checker_name';
+// The list the driver is mid-run on, so the Pick List index can offer
+// "continue run" after a reload or a bounce through Stock Check.
+const ACTIVE_LIST_KEY = 'hatch_active_picklist';
 
 // ---------- date helpers ----------
 
@@ -42,6 +54,13 @@ function formatTargetDate(iso) {
   const d = parseDay(iso);
   if (!d) return '—';
   return d.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'short' });
+}
+
+function formatTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
 }
 
 // ---------- batch line ----------
@@ -103,7 +122,7 @@ function BatchLine({ batches, targetDate, muted }) {
   );
 }
 
-// ---------- item row ----------
+// ---------- item row (packing aid) ----------
 
 function ItemRow({ item, targetDate, readOnly, onToggle, onQtyChange }) {
   const [editing, setEditing] = useState(false);
@@ -208,6 +227,22 @@ function ItemRow({ item, targetDate, readOnly, onToggle, onQtyChange }) {
   );
 }
 
+// ---------- run status chip ----------
+
+function RunChip({ done, label, time }) {
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium ${
+        done ? 'bg-emerald-500/15 text-emerald-400' : 'bg-zinc-800 text-zinc-500'
+      }`}
+    >
+      {done && <Check size={12} strokeWidth={3} />}
+      {label}
+      {done && time && <span className="text-emerald-500/80">{time}</span>}
+    </span>
+  );
+}
+
 // ---------- print sheet (portalled to <body> so the app shell can be hidden) ----------
 
 const PRINT_STYLES = `
@@ -308,13 +343,21 @@ function PrintSheet({ list, warehouseName, items }) {
 
 // ---------- main page ----------
 
+/**
+ * One pick list, end to end: pack the bags at the warehouse (tick-off list
+ * with FEFO pull lines), then run the route — per machine, a bagging list and
+ * a "Confirm loaded" button. Confirming is the single stock-moving action: it
+ * takes the stop's quantities out of warehouse batches AND adds them to the
+ * machine's stock. Stops never confirmed simply never left the warehouse.
+ * Legacy `packed` lists (warehouse drained at pack time) keep the old van
+ * reconciliation and return-leftovers flow.
+ */
 export default function PickListDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { data } = useStock();
-  const { markStepComplete } = useRestockRun();
 
-  const [list, setList] = useState(null);
+  const [run, setRun] = useState(null);
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
@@ -323,71 +366,109 @@ export default function PickListDetail() {
   const [shortfallsOpen, setShortfallsOpen] = useState(false);
   const [notOnPlanogramOpen, setNotOnPlanogramOpen] = useState(false);
   const [expiryWarningsOpen, setExpiryWarningsOpen] = useState(false);
+  const [packOpen, setPackOpen] = useState(true);
 
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  // Same key the restock/stock-check pages use — one shared "who is doing
-  // the run" name across the whole Monday workflow, typed once per device.
-  const [takenBy, setTakenBy] = useState(() => {
-    try { return localStorage.getItem('hatch_checker_name') || ''; } catch { return ''; }
-  });
-  const [completing, setCompleting] = useState(false);
-  const [completeError, setCompleteError] = useState(null);
-  // Lines where completion had to pull from different lots than the plan shown
-  // to the packer (stock moved since generation).
-  const [deviations, setDeviations] = useState(null);
   const [conflict, setConflict] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
-  const [justCompleted, setJustCompleted] = useState(false);
+  const [regenerateError, setRegenerateError] = useState(null);
 
   const [pendingAction, setPendingAction] = useState(null); // 'delete' | 'cancel' | null
   const [actionBusy, setActionBusy] = useState(false);
   const [actionError, setActionError] = useState(null);
 
+  // Confirm-loaded panel (one machine open at a time)
+  const [openLocId, setOpenLocId] = useState(null);
+  const [confirmRows, setConfirmRows] = useState([]);
+  const [confirmPhoto, setConfirmPhoto] = useState(null);
+  const [confirmName, setConfirmName] = useState(() => {
+    try { return localStorage.getItem(NAME_STORAGE_KEY) || ''; } catch { return ''; }
+  });
+  const [confirmBusy, setConfirmBusy] = useState(false);
+  const [confirmError, setConfirmError] = useState(null);
+  // Lines where the confirm had to pull from different lots than the plan
+  // shown to the packer (stock moved since generation).
+  const [deviations, setDeviations] = useState(null);
+
+  const [finishBusy, setFinishBusy] = useState(false);
+  const [finishError, setFinishError] = useState(null);
+
+  // Legacy van reconciliation (packed lists only)
+  const [skuTableOpen, setSkuTableOpen] = useState(false);
+  const [returnItems, setReturnItems] = useState(null); // null = editor closed
+  const [returnBusy, setReturnBusy] = useState(false);
+  const [returnError, setReturnError] = useState(null);
+  const [returnSuccess, setReturnSuccess] = useState(null);
+
   const persistTimer = useRef(null);
   const retryTimer = useRef(null);
   const pendingItemsRef = useRef(null); // unsaved items payload awaiting persist
   const persistNowRef = useRef(null);   // latest persistNow, callable from unmount
-  const itemsRef = useRef(items);
-  useEffect(() => { itemsRef.current = items; }, [items]);
+  const idRef = useRef(id);
+  useEffect(() => { idRef.current = id; }, [id]);
 
-  // Fetch (and re-fetch when navigating to a regenerated list).
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setLoadError(null);
-    setList(null);
-    setItems([]);
-    setConfirmOpen(false);
-    setConflict(false);
-    setJustCompleted(false);
-    setPendingAction(null);
-    setCompleteError(null);
-    (async () => {
-      try {
-        const result = await pickListsService.getById(id);
-        if (cancelled) return;
-        setList(result);
+  // ----- fetch -----
+
+  const fetchRun = useCallback(async (listId, { silent = false } = {}) => {
+    if (!silent) {
+      setLoading(true);
+      setLoadError(null);
+    }
+    try {
+      const result = await pickListsService.getRun(listId);
+      if (idRef.current !== listId) return; // stale response after navigation
+      setRun(result);
+      // Don't clobber unsaved local tick-offs with a background refresh.
+      if (!silent || !pendingItemsRef.current) {
         setItems(
-          [...(result.items || [])].sort((a, b) =>
+          [...(result.pickList?.items || [])].sort((a, b) =>
             (a.name || a.sku || '').localeCompare(b.name || b.sku || '')
           )
         );
-      } catch (err) {
-        if (!cancelled) {
-          setLoadError(
-            err.response?.status === 404 ? 'Pick list not found.' : 'Could not load this pick list.'
-          );
-        }
-      } finally {
-        if (!cancelled) setLoading(false);
       }
-    })();
-    return () => { cancelled = true; };
-  }, [id]);
+    } catch (err) {
+      if (idRef.current !== listId) return;
+      if (!silent) {
+        setLoadError(
+          err.response?.status === 404 ? 'Pick list not found.' : 'Could not load this pick list.'
+        );
+      }
+    } finally {
+      if (idRef.current === listId && !silent) setLoading(false);
+    }
+  }, []);
+
+  // Fetch (and re-fetch when navigating to a regenerated list).
+  useEffect(() => {
+    setRun(null);
+    setItems([]);
+    setConflict(false);
+    setPendingAction(null);
+    setOpenLocId(null);
+    setDeviations(null);
+    setReturnItems(null);
+    setReturnError(null);
+    setReturnSuccess(null);
+    fetchRun(id);
+  }, [id, fetchRun]);
+
+  // The driver bounces to Stock Check and back — refetch whenever the page
+  // becomes visible again so chips reflect what just happened.
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState === 'visible' && idRef.current) {
+        fetchRun(idRef.current, { silent: true });
+      }
+    };
+    document.addEventListener('visibilitychange', refresh);
+    window.addEventListener('focus', refresh);
+    return () => {
+      document.removeEventListener('visibilitychange', refresh);
+      window.removeEventListener('focus', refresh);
+    };
+  }, [fetchRun]);
 
   // Flush any pending tick-off save on unmount or when the tab is hidden —
-  // previously the unmount cleanup just cancelled the debounce timer, so
-  // ticks made in the last 700ms before navigating away were silently lost.
+  // ticks made in the last 700ms before navigating away must not be lost.
   useEffect(() => {
     const flush = () => { persistNowRef.current?.(); };
     window.addEventListener('pagehide', flush);
@@ -400,7 +481,24 @@ export default function PickListDetail() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const isDraft = list?.status === 'draft';
+  const list = run?.pickList;
+  const status = list?.status;
+  const isDraft = status === 'draft';
+  const isInProgress = status === 'in_progress';
+  const isLegacyPacked = status === 'packed';
+  const isCompleted = status === 'completed';
+  const runActive = isDraft || isInProgress || isLegacyPacked;
+
+  // Remember the list the driver is working through, so the index page can
+  // offer "continue run" (replaces the old RestockRunContext).
+  useEffect(() => {
+    if (!status) return;
+    try {
+      if (isDraft || isInProgress) localStorage.setItem(ACTIVE_LIST_KEY, id);
+      else if (localStorage.getItem(ACTIVE_LIST_KEY) === id) localStorage.removeItem(ACTIVE_LIST_KEY);
+    } catch { /* private mode */ }
+  }, [id, status, isDraft, isInProgress]);
+
   const warehouseName = useMemo(
     () => (data.warehouses || []).find((w) => w.id === list?.warehouseId)?.name || '',
     [data.warehouses, list]
@@ -408,8 +506,16 @@ export default function PickListDetail() {
 
   const packedCount = items.filter((i) => i.packed).length;
   const totalCount = items.length;
-  const untickedItems = items.filter((i) => !i.packed);
-  const progressPct = totalCount > 0 ? Math.round((packedCount / totalCount) * 100) : 0;
+  const packProgressPct = totalCount > 0 ? Math.round((packedCount / totalCount) * 100) : 0;
+
+  const locations = run?.locations || [];
+  const isLoaded = (loc) => !!loc.confirmation || (isLegacyPacked && !!loc.restock);
+  const loadedCount = locations.filter(isLoaded).length;
+  const runProgressPct = locations.length > 0 ? Math.round((loadedCount / locations.length) * 100) : 0;
+
+  const reconciliation = run?.reconciliation;
+  const remainingRows = (reconciliation?.perSku || []).filter((r) => (r.remaining || 0) > 0);
+  const expiryWarnings = run?.expiryWarnings || [];
 
   // ----- optimistic tick-off with debounced persistence -----
   // Pending payload lives in a ref so it can be flushed from unmount/pagehide;
@@ -463,7 +569,7 @@ export default function PickListDetail() {
     applyItems((it) => (it.sku === sku ? { ...it, packedQty: qty } : it));
   };
 
-  // ----- complete flow -----
+  // ----- regenerate (after a 409 stock-changed conflict) -----
 
   const regenerateParams = () => {
     const params = { warehouseId: list.warehouseId, targetDate: list.targetDate };
@@ -477,46 +583,6 @@ export default function PickListDetail() {
     return params;
   };
 
-  const confirmComplete = async () => {
-    if (completing) return;
-    setCompleting(true);
-    setCompleteError(null);
-    // The explicit final save below supersedes any pending debounced payload.
-    clearTimeout(persistTimer.current);
-    clearTimeout(retryTimer.current);
-    pendingItemsRef.current = null;
-    try {
-      // Unticked items are excluded: packedQty 0 so complete() skips them.
-      const finalItems = itemsRef.current.map((it) =>
-        it.packed ? { ...it, packedQty: it.packedQty ?? it.totalQty } : { ...it, packedQty: 0 }
-      );
-      await pickListsService.update(id, { items: finalItems });
-      const result = await pickListsService.complete(id, { takenBy: takenBy.trim() });
-      setDeviations(Array.isArray(result?.deviations) ? result.deviations : null);
-      setItems(
-        [...((result?.items && result.items.length ? result.items : finalItems))].sort((a, b) =>
-          (a.name || a.sku || '').localeCompare(b.name || b.sku || '')
-        )
-      );
-      setList((prev) => ({ ...prev, ...(result && result.id ? result : {}), status: 'packed' }));
-      setConfirmOpen(false);
-      setJustCompleted(true);
-      setSaveState('idle');
-      markStepComplete('remove');
-    } catch (err) {
-      if (err.response?.status === 409) {
-        setConflict(true);
-        setConfirmOpen(false);
-      } else {
-        setCompleteError(
-          err.response?.data?.error || err.response?.data?.message || err.message || 'Failed to mark as packed.'
-        );
-      }
-    } finally {
-      setCompleting(false);
-    }
-  };
-
   const regenerate = async () => {
     if (regenerating) return;
     setRegenerating(true);
@@ -525,11 +591,147 @@ export default function PickListDetail() {
       navigate(`/restock/picklists/${created.id}`);
     } catch (err) {
       setConflict(false);
-      setCompleteError(
+      setRegenerateError(
         err.response?.data?.error || err.message || 'Failed to regenerate the pick list.'
       );
     } finally {
       setRegenerating(false);
+    }
+  };
+
+  // ----- confirm loaded -----
+
+  const openConfirmPanel = (loc) => {
+    setOpenLocId(loc.locationId);
+    setConfirmError(null);
+    setConfirmPhoto(null);
+    setConfirmRows(
+      (loc.planned || [])
+        .filter((p) => (p.qty || 0) > 0)
+        .map((p) => ({ sku: p.sku, name: p.name, planned: p.qty, quantity: p.qty }))
+    );
+  };
+
+  const updateConfirmQty = (sku, value) => {
+    const qty = Math.max(0, parseInt(value, 10) || 0);
+    setConfirmRows((prev) =>
+      prev.map((r) => (r.sku === sku ? { ...r, quantity: Math.min(qty, r.planned) } : r))
+    );
+  };
+
+  const handlePhotoUpload = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => setConfirmPhoto(ev.target?.result || null);
+    reader.readAsDataURL(file);
+  };
+
+  const confirmLoaded = async (loc) => {
+    if (confirmBusy) return;
+    setConfirmBusy(true);
+    setConfirmError(null);
+    try {
+      const anyAdjusted = confirmRows.some((r) => r.quantity !== r.planned);
+      const result = await pickListsService.confirmLocation(id, {
+        locationId: loc.locationId,
+        performedBy: confirmName.trim() || null,
+        photoUrl: confirmPhoto || null,
+        ...(anyAdjusted
+          ? { adjustedItems: confirmRows.map((r) => ({ sku: r.sku, quantity: r.quantity })) }
+          : {}),
+      });
+      setDeviations(Array.isArray(result?.deviations) ? result.deviations : null);
+      setOpenLocId(null);
+      fetchRun(id, { silent: true });
+    } catch (err) {
+      const statusCode = err.response?.status;
+      if (statusCode === 409 && err.response?.data?.shortfalls) {
+        // Warehouse can no longer cover this stop — regenerate flow.
+        setConflict(true);
+        setOpenLocId(null);
+      } else if (statusCode === 409) {
+        // Already confirmed (second device / double tap) — just refresh.
+        setOpenLocId(null);
+        fetchRun(id, { silent: true });
+      } else {
+        setConfirmError(
+          err.response?.data?.error || err.message || 'Failed to confirm this machine.'
+        );
+      }
+    } finally {
+      setConfirmBusy(false);
+    }
+  };
+
+  // ----- finish run (skip remaining stops) -----
+
+  const finishRun = async () => {
+    if (finishBusy) return;
+    setFinishBusy(true);
+    setFinishError(null);
+    try {
+      await pickListsService.update(id, { status: 'completed' });
+      fetchRun(id, { silent: true });
+    } catch (err) {
+      setFinishError(err.response?.data?.error || err.message || 'Failed to finish the run.');
+    } finally {
+      setFinishBusy(false);
+    }
+  };
+
+  // ----- legacy return leftovers (packed lists only) -----
+
+  const openReturnEditor = () => {
+    setReturnError(null);
+    setReturnSuccess(null);
+    setReturnItems(
+      remainingRows.map((r) => ({
+        sku: r.sku,
+        name: r.name || r.sku,
+        max: r.remaining,
+        quantity: String(r.remaining),
+      }))
+    );
+  };
+
+  const updateReturnQty = (sku, raw) => {
+    const cleaned = raw.replace(/[^0-9]/g, '').slice(0, 4);
+    setReturnItems((prev) => prev.map((i) => (i.sku === sku ? { ...i, quantity: cleaned } : i)));
+  };
+
+  const removeReturnRow = (sku) => {
+    setReturnItems((prev) => prev.filter((i) => i.sku !== sku));
+  };
+
+  const returnableItems = (returnItems || [])
+    .map((i) => ({ sku: i.sku, quantity: parseInt(i.quantity, 10) || 0 }))
+    .filter((i) => i.quantity > 0);
+
+  const confirmReturn = async () => {
+    if (returnBusy || returnableItems.length === 0) return;
+    setReturnBusy(true);
+    setReturnError(null);
+    try {
+      const performedBy = confirmName.trim() || undefined;
+      const result = await pickListsService.returnLeftovers(id, returnableItems, performedBy);
+      const units = returnableItems.reduce((s, i) => s + i.quantity, 0);
+      setReturnSuccess(`${units} unit${units === 1 ? '' : 's'} returned to the warehouse.`);
+      setReturnItems(null);
+      if (result?.reconciliation) {
+        setRun((prev) => (prev ? { ...prev, reconciliation: result.reconciliation } : prev));
+      }
+      fetchRun(id, { silent: true });
+    } catch (err) {
+      const statusCode = err.response?.status;
+      setReturnError(
+        err.response?.data?.error ||
+          (statusCode === 400
+            ? 'Return rejected — you cannot return more than is left in the van.'
+            : 'Failed to return leftovers — please try again.')
+      );
+    } finally {
+      setReturnBusy(false);
     }
   };
 
@@ -546,9 +748,9 @@ export default function PickListDetail() {
         navigate('/restock/picklists');
         return;
       }
-      const result = await pickListsService.update(id, { status: 'cancelled' });
-      setList((prev) => ({ ...prev, ...(result && result.id ? result : {}), status: 'cancelled' }));
+      await pickListsService.update(id, { status: 'cancelled' });
       setPendingAction(null);
+      fetchRun(id, { silent: true });
     } catch (err) {
       setActionError(
         err.response?.data?.error || err.message ||
@@ -614,21 +816,21 @@ export default function PickListDetail() {
             >
               <Printer size={15} /> Print
             </button>
+            {(isDraft || isInProgress) && (
+              <button
+                onClick={() => { setPendingAction('cancel'); setActionError(null); }}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded text-sm bg-zinc-800 text-zinc-400 border border-zinc-700 hover:text-zinc-200 hover:border-zinc-600"
+              >
+                <Ban size={15} /> Cancel
+              </button>
+            )}
             {isDraft && (
-              <>
-                <button
-                  onClick={() => { setPendingAction('cancel'); setActionError(null); }}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded text-sm bg-zinc-800 text-zinc-400 border border-zinc-700 hover:text-zinc-200 hover:border-zinc-600"
-                >
-                  <Ban size={15} /> Cancel
-                </button>
-                <button
-                  onClick={() => { setPendingAction('delete'); setActionError(null); }}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded text-sm bg-zinc-800 text-red-400 border border-zinc-700 hover:border-red-500/50"
-                >
-                  <Trash2 size={15} /> Delete
-                </button>
-              </>
+              <button
+                onClick={() => { setPendingAction('delete'); setActionError(null); }}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded text-sm bg-zinc-800 text-red-400 border border-zinc-700 hover:border-red-500/50"
+              >
+                <Trash2 size={15} /> Delete
+              </button>
             )}
           </div>
         </div>
@@ -639,7 +841,9 @@ export default function PickListDetail() {
             <p className="text-sm text-zinc-300 flex-1">
               {pendingAction === 'delete'
                 ? 'Delete this draft pick list? This cannot be undone.'
-                : 'Cancel this pick list? It will be kept for reference but can no longer be packed.'}
+                : isInProgress
+                  ? 'Cancel this run? Machines already confirmed keep their stock — unconfirmed stops never left the warehouse.'
+                  : 'Cancel this pick list? It will be kept for reference but can no longer be run.'}
             </p>
             {actionError && <p className="text-sm text-red-400">{actionError}</p>}
             <div className="flex items-center gap-2">
@@ -664,103 +868,33 @@ export default function PickListDetail() {
             </div>
           </div>
         )}
-
-        {/* Progress */}
-        <div>
-          <div className="flex items-center justify-between text-sm mb-1.5">
-            <span className="text-zinc-300 font-medium">
-              {packedCount}/{totalCount} packed
-            </span>
-            <span className="text-xs text-zinc-500">
-              {saveState === 'saving' && 'Saving…'}
-              {saveState === 'saved' && 'Saved'}
-              {saveState === 'error' && <span className="text-red-400">Save failed — changes may not persist</span>}
-            </span>
-          </div>
-          <div className="h-2 bg-zinc-800 rounded-full overflow-hidden">
-            <div
-              className="h-full bg-emerald-500 rounded-full transition-all duration-300"
-              style={{ width: `${progressPct}%` }}
-            />
-          </div>
-        </div>
       </div>
 
-      {/* Expiry warnings — stock on this list that expires before the next restock */}
-      {(list.expiryWarnings?.length || 0) > 0 && (() => {
-        const warnings = list.expiryWarnings;
-        const totalUnits = warnings.reduce((sum, w) => sum + (w.qty || 0), 0);
-        return (
-          <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg">
-            <button
-              onClick={() => setExpiryWarningsOpen((v) => !v)}
-              className="w-full flex items-center justify-between gap-2 p-4 text-left"
-            >
-              <span className="flex items-center gap-2 text-amber-400 text-sm font-medium">
-                <AlertTriangle size={16} className="shrink-0" />
-                {totalUnits} unit{totalUnits === 1 ? '' : 's'} will expire before the next
-                restock — sell first or pull
-              </span>
-              {expiryWarningsOpen ? (
-                <ChevronUp size={16} className="text-amber-400 shrink-0" />
-              ) : (
-                <ChevronDown size={16} className="text-amber-400 shrink-0" />
-              )}
-            </button>
-            {expiryWarningsOpen && (
-              <div className="px-4 pb-4 space-y-1">
-                {warnings.map((w, i) => (
-                  <div key={`${w.sku}-${i}`} className="flex items-center justify-between text-xs">
-                    <span className="text-zinc-300">{w.name || w.sku}</span>
-                    <span className="text-zinc-400 tabular-nums">
-                      <span className="text-amber-400 font-medium">{w.qty}</span> ×{' '}
-                      {w.expiryDate ? `exp ${formatDayMonth(w.expiryDate)}` : 'no expiry recorded'}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        );
-      })()}
-
-      {/* Success panel */}
-      {(justCompleted || (list.status === 'packed' && list.removalId)) && (
-        <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-4">
-          <div className="flex items-center gap-2 text-emerald-400 font-medium text-sm">
-            <CheckCircle2 size={18} />
-            Removal recorded — warehouse stock updated
-          </div>
-          <p className="text-zinc-400 text-xs mt-1">
-            {packedCount} of {totalCount} products packed for {formatTargetDate(list.targetDate)}.
+      {/* Run complete banner */}
+      {(isCompleted || run?.allDone) && (
+        <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-5 text-center">
+          <PartyPopper className="mx-auto h-8 w-8 text-emerald-400" />
+          <p className="mt-2 text-base font-semibold text-emerald-400">Run complete!</p>
+          <p className="mt-1 text-sm text-zinc-400">
+            {loadedCount} of {locations.length} machines loaded.
+            {loadedCount < locations.length &&
+              ' Stock for the skipped stops never left the warehouse.'}
           </p>
-          {deviations && deviations.length > 0 && (
-            <div className="mt-2 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded p-2">
-              Stock moved since this list was generated — some units were booked out from
-              different date-lots than the pull lines showed:{' '}
-              {deviations.map((d, i) => (
-                <span key={d.sku}>
-                  {i > 0 && ', '}
-                  {d.name || d.sku} ({d.offPlanQty} unit{d.offPlanQty === 1 ? '' : 's'})
-                </span>
-              ))}
-              . Double-check the expiry flags on what you actually pulled.
-            </div>
-          )}
-          <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2">
-            <button
-              onClick={() => navigate(`/restock/run?pickListId=${id}`)}
-              className="inline-flex items-center px-4 py-2.5 rounded-lg bg-emerald-500 text-zinc-900 text-sm font-semibold hover:bg-emerald-400"
-            >
-              Start the run →
-            </button>
-            <Link to="/restock/picklists" className="text-sm text-emerald-400 hover:text-emerald-300">
-              ← Back to pick lists
-            </Link>
-            <Link to="/restock" className="text-sm text-zinc-400 hover:text-zinc-200">
-              Go to workflow →
-            </Link>
-          </div>
+        </div>
+      )}
+
+      {/* Deviations from the last confirm — lots differed from the pull lines */}
+      {deviations && deviations.length > 0 && (
+        <div className="text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded p-3">
+          Stock moved since this list was generated — some units were booked out from
+          different date-lots than the pull lines showed:{' '}
+          {deviations.map((d, i) => (
+            <span key={d.sku}>
+              {i > 0 && ', '}
+              {d.name || d.sku} ({d.offPlanQty} unit{d.offPlanQty === 1 ? '' : 's'})
+            </span>
+          ))}
+          . Double-check the expiry flags on what you actually pulled.
         </div>
       )}
 
@@ -785,6 +919,48 @@ export default function PickListDetail() {
           </button>
         </div>
       )}
+      {regenerateError && (
+        <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 text-sm text-red-400">
+          {regenerateError}
+        </div>
+      )}
+
+      {/* Expiry warnings — stock on this list that expires before the next restock */}
+      {expiryWarnings.length > 0 && (() => {
+        const totalUnits = expiryWarnings.reduce((sum, w) => sum + (w.qty || 0), 0);
+        return (
+          <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg">
+            <button
+              onClick={() => setExpiryWarningsOpen((v) => !v)}
+              className="w-full flex items-center justify-between gap-2 p-4 text-left"
+            >
+              <span className="flex items-center gap-2 text-amber-400 text-sm font-medium">
+                <AlertTriangle size={16} className="shrink-0" />
+                {totalUnits} unit{totalUnits === 1 ? '' : 's'} will expire before the next
+                restock — sell first or pull
+              </span>
+              {expiryWarningsOpen ? (
+                <ChevronUp size={16} className="text-amber-400 shrink-0" />
+              ) : (
+                <ChevronDown size={16} className="text-amber-400 shrink-0" />
+              )}
+            </button>
+            {expiryWarningsOpen && (
+              <div className="px-4 pb-4 space-y-1">
+                {expiryWarnings.map((w, i) => (
+                  <div key={`${w.sku}-${i}`} className="flex items-center justify-between text-xs">
+                    <span className="text-zinc-300">{w.name || w.sku}</span>
+                    <span className="text-zinc-400 tabular-nums">
+                      <span className="text-amber-400 font-medium">{w.qty}</span> ×{' '}
+                      {w.expiryDate ? `exp ${formatDayMonth(w.expiryDate)}` : 'no expiry recorded'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Shortfall banner */}
       {(list.shortfalls?.length || 0) > 0 && (
@@ -865,108 +1041,499 @@ export default function PickListDetail() {
         </div>
       )}
 
-      {/* Item list */}
+      {/* ---- Pack at the warehouse ---- */}
       {totalCount === 0 ? (
         <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-8 text-center text-zinc-500 text-sm">
           Nothing to pack — every location on this run is already at target stock.
         </div>
       ) : (
         <div className="space-y-2">
-          {items.map((item) => (
-            <ItemRow
-              key={item.sku}
-              item={item}
-              targetDate={list.targetDate}
-              readOnly={!isDraft}
-              onToggle={toggleItem}
-              onQtyChange={changeQty}
+          <button
+            onClick={() => setPackOpen((v) => !v)}
+            className="w-full flex items-center justify-between gap-3 text-left"
+          >
+            <div>
+              <h3 className="text-sm font-semibold text-zinc-200">Pack at the warehouse</h3>
+              <p className="text-xs text-zinc-500 mt-0.5">
+                Tick off each product as it goes into the bags — nothing leaves warehouse stock
+                until you confirm it into a machine below.
+              </p>
+            </div>
+            <div className="flex items-center gap-3 shrink-0">
+              <span className="text-sm text-zinc-300 font-medium tabular-nums">
+                {packedCount}/{totalCount}
+              </span>
+              <span className="text-xs text-zinc-500">
+                {saveState === 'saving' && 'Saving…'}
+                {saveState === 'saved' && 'Saved'}
+                {saveState === 'error' && <span className="text-red-400">Save failed</span>}
+              </span>
+              {packOpen ? (
+                <ChevronUp size={16} className="text-zinc-500" />
+              ) : (
+                <ChevronDown size={16} className="text-zinc-500" />
+              )}
+            </div>
+          </button>
+          <div className="h-2 bg-zinc-800 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-emerald-500 rounded-full transition-all duration-300"
+              style={{ width: `${packProgressPct}%` }}
             />
-          ))}
+          </div>
+          {packOpen && (
+            <div className="space-y-2 pt-1">
+              {items.map((item) => (
+                <ItemRow
+                  key={item.sku}
+                  item={item}
+                  targetDate={list.targetDate}
+                  readOnly={!isDraft}
+                  onToggle={toggleItem}
+                  onQtyChange={changeQty}
+                />
+              ))}
+            </div>
+          )}
         </div>
       )}
 
-      {/* Sticky bottom bar (draft only) */}
-      {isDraft && totalCount > 0 && !conflict && (
-        <div className="sticky bottom-0 z-10 -mx-4 md:mx-0 print:hidden">
-          <div className="bg-zinc-950/95 backdrop-blur border-t md:border md:rounded-lg border-zinc-800 px-4 py-3 space-y-3">
-            {confirmOpen ? (
-              <div className="space-y-3">
-                <div className="text-sm text-zinc-200 font-medium">
-                  Mark this list as packed?
-                </div>
-                {untickedItems.length > 0 ? (
-                  <div className="bg-amber-500/10 border border-amber-500/30 rounded p-3 text-xs text-zinc-300">
-                    <span className="text-amber-400 font-medium">
-                      {untickedItems.length} unticked{' '}
-                      {untickedItems.length === 1 ? 'item' : 'items'} will be excluded
-                    </span>{' '}
-                    — their packed quantity is set to 0 and no warehouse stock is removed for them:
-                    <div className="mt-1 text-zinc-400">
-                      {untickedItems.map((i) => i.name || i.sku).join(' · ')}
+      {/* ---- Run — confirm each machine ---- */}
+      {locations.length > 0 && (
+        <div className="space-y-2">
+          <div className="flex items-baseline justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-zinc-200">Run — confirm each machine</h3>
+              <p className="text-xs text-zinc-500 mt-0.5">
+                {isLegacyPacked
+                  ? 'Confirming records what went into the machine (warehouse stock was already removed at packing).'
+                  : 'Confirming a machine removes its quantities from warehouse stock and adds them to the machine in one step.'}
+              </p>
+            </div>
+            <span className="shrink-0 text-sm font-medium text-zinc-300 tabular-nums">
+              {loadedCount} of {locations.length} loaded
+            </span>
+          </div>
+          <div className="h-2 bg-zinc-800 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-emerald-500 rounded-full transition-all duration-300"
+              style={{ width: `${runProgressPct}%` }}
+            />
+          </div>
+
+          <div className="space-y-2 pt-1">
+            {locations.map((loc) => {
+              const loaded = isLoaded(loc);
+              const open = openLocId === loc.locationId;
+              const confirmedAt = loc.confirmation?.createdAt || (isLegacyPacked ? loc.restock?.createdAt : null);
+              return (
+                <div
+                  key={loc.locationId}
+                  className={`rounded-xl border px-4 py-3 transition-colors ${
+                    loaded
+                      ? 'border-emerald-700/30 bg-emerald-700/5'
+                      : 'border-zinc-800 bg-zinc-900/60'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <p
+                        className={`flex items-center gap-1.5 truncate text-base font-medium ${
+                          loaded ? 'text-zinc-400' : 'text-zinc-100'
+                        }`}
+                      >
+                        {loaded && (
+                          <CheckCircle2 size={16} className="flex-shrink-0 text-emerald-400" />
+                        )}
+                        {loc.locationName}
+                      </p>
+                      <p className="text-xs text-zinc-500">
+                        {loc.plannedUnits} unit{loc.plannedUnits === 1 ? '' : 's'} planned
+                        {(loc.trimmedUnits || 0) > 0 && (
+                          <span className="ml-1.5 rounded bg-amber-500/15 px-1.5 py-0.5 text-amber-400">
+                            {loc.trimmedUnits} short — warehouse ran out
+                          </span>
+                        )}
+                      </p>
+                    </div>
+                    <div className="flex flex-shrink-0 flex-col items-end gap-1">
+                      <RunChip
+                        done={!!loc.stockCheck}
+                        label="Check"
+                        time={formatTime(loc.stockCheck?.createdAt)}
+                      />
+                      <RunChip done={loaded} label="Loaded" time={formatTime(confirmedAt)} />
                     </div>
                   </div>
-                ) : (
-                  <p className="text-xs text-zinc-400">
-                    All {totalCount} items are ticked. Warehouse stock will be removed for the full
-                    list.
-                  </p>
-                )}
-                <div>
-                  <label className="block text-xs text-zinc-500 mb-1">Packed by</label>
-                  <input
-                    type="text"
-                    value={takenBy}
-                    onChange={(e) => {
-                      setTakenBy(e.target.value);
-                      try { localStorage.setItem('hatch_checker_name', e.target.value); } catch { /* private mode */ }
-                    }}
-                    placeholder="Your name"
-                    className="w-full sm:w-64 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500"
-                  />
+
+                  {/* Per-machine bagging list */}
+                  {(loc.planned?.length || 0) > 0 && !loaded && (
+                    <div className="mt-2 text-xs text-zinc-400">
+                      {loc.planned
+                        .filter((p) => (p.qty || 0) > 0)
+                        .map((p, i) => (
+                          <span key={p.sku}>
+                            {i > 0 && <span className="text-zinc-600"> · </span>}
+                            {p.name || p.sku} ×{p.qty}
+                          </span>
+                        ))}
+                    </div>
+                  )}
+
+                  {!loaded && runActive && !open && (
+                    <div className="mt-3 grid grid-cols-2 gap-2">
+                      <button
+                        onClick={() =>
+                          navigate(
+                            `/restock/check?locationId=${loc.locationId}&return=${encodeURIComponent(`/restock/picklists/${id}`)}`
+                          )
+                        }
+                        className={`flex h-12 items-center justify-center gap-2 rounded-xl border text-sm font-medium ${
+                          loc.stockCheck
+                            ? 'border-zinc-800 bg-zinc-900 text-zinc-500 hover:text-zinc-300'
+                            : 'border-zinc-700 bg-zinc-800 text-zinc-200 hover:bg-zinc-700'
+                        }`}
+                      >
+                        <ClipboardCheck size={16} />
+                        Check
+                      </button>
+                      <button
+                        onClick={() => openConfirmPanel(loc)}
+                        className="flex h-12 items-center justify-center gap-2 rounded-xl bg-emerald-500 text-sm font-semibold text-zinc-900 hover:bg-emerald-400"
+                      >
+                        <PackagePlus size={16} />
+                        Confirm loaded
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Inline confirm panel */}
+                  {open && (
+                    <div className="mt-3 space-y-3 rounded-xl border border-zinc-800 bg-zinc-950/50 p-3">
+                      <p className="text-sm font-medium text-zinc-200">
+                        Confirm what went into {loc.locationName}
+                      </p>
+                      {confirmRows.length === 0 ? (
+                        <p className="text-xs text-zinc-500">
+                          Nothing was planned for this machine — confirming just marks the stop as
+                          visited.
+                        </p>
+                      ) : (
+                        <div className="space-y-2">
+                          {confirmRows.map((row) => (
+                            <div key={row.sku} className="flex items-center gap-2">
+                              <div className="min-w-0 flex-1">
+                                <p className="truncate text-sm text-zinc-200">{row.name || row.sku}</p>
+                                <p className="text-xs text-zinc-500">{row.planned} planned</p>
+                              </div>
+                              <QtyInput
+                                value={row.quantity}
+                                onChange={(n) => updateConfirmQty(row.sku, n)}
+                                className="w-32 flex-shrink-0"
+                                aria-label={`Quantity of ${row.name || row.sku} loaded`}
+                              />
+                            </div>
+                          ))}
+                          <p className="text-[11px] text-zinc-500">
+                            Loaded less than planned? Lower the number — the rest stays in warehouse
+                            stock.
+                          </p>
+                        </div>
+                      )}
+
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <div className="flex-1">
+                          <label className="block text-xs text-zinc-500 mb-1">Loaded by</label>
+                          <input
+                            type="text"
+                            value={confirmName}
+                            onChange={(e) => {
+                              setConfirmName(e.target.value);
+                              try { localStorage.setItem(NAME_STORAGE_KEY, e.target.value); } catch { /* private mode */ }
+                            }}
+                            placeholder="Your name"
+                            className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-zinc-500 mb-1">Photo (optional)</label>
+                          <label className="inline-flex h-[38px] cursor-pointer items-center gap-2 rounded border border-zinc-700 bg-zinc-800 px-3 text-sm text-zinc-300 hover:border-zinc-600">
+                            <Camera size={15} />
+                            {confirmPhoto ? 'Photo added ✓' : 'Add photo'}
+                            <input
+                              type="file"
+                              accept="image/*"
+                              capture="environment"
+                              onChange={handlePhotoUpload}
+                              className="hidden"
+                            />
+                          </label>
+                        </div>
+                      </div>
+
+                      {confirmError && <p className="text-xs text-red-400">{confirmError}</p>}
+
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => confirmLoaded(loc)}
+                          disabled={confirmBusy}
+                          className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-500 text-zinc-900 rounded text-sm font-medium hover:bg-emerald-400 disabled:opacity-50"
+                        >
+                          {confirmBusy && <Loader2 size={14} className="animate-spin" />}
+                          {confirmBusy
+                            ? 'Confirming…'
+                            : isLegacyPacked
+                              ? 'Confirm loaded'
+                              : 'Confirm — update stock'}
+                        </button>
+                        <button
+                          onClick={() => { setOpenLocId(null); setConfirmError(null); }}
+                          disabled={confirmBusy}
+                          className="px-3 py-2 rounded text-sm bg-zinc-800 text-zinc-300 border border-zinc-700"
+                        >
+                          Back
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
-                {completeError && (
-                  <div className="text-xs text-red-400">{completeError}</div>
+              );
+            })}
+          </div>
+
+          {/* Finish run — remaining stops never left the warehouse */}
+          {isInProgress && loadedCount < locations.length && (
+            <div className="pt-1">
+              {finishError && <p className="text-xs text-red-400 mb-2">{finishError}</p>}
+              <button
+                onClick={finishRun}
+                disabled={finishBusy}
+                className="w-full h-12 rounded-xl border border-zinc-700 bg-zinc-800 text-sm font-medium text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
+              >
+                {finishBusy ? 'Finishing…' : 'Finish run — skip the remaining machines'}
+              </button>
+              <p className="mt-1 text-center text-[11px] text-zinc-500">
+                Unconfirmed stops never left warehouse stock — put their bags back on the shelf.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ---- Run summary / reconciliation ---- */}
+      {reconciliation && (isInProgress || isCompleted || isLegacyPacked) && (
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60">
+          <div className="flex items-center gap-2 border-b border-zinc-800 px-4 py-3">
+            <Truck size={18} className="text-emerald-400" />
+            <h3 className="text-sm font-semibold text-zinc-200">
+              {isLegacyPacked ? 'Van reconciliation' : 'Run summary'}
+            </h3>
+          </div>
+
+          <div className="space-y-3 p-4">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm tabular-nums">
+              <span className="text-zinc-400">
+                Planned <span className="font-semibold text-zinc-100">{reconciliation.packedUnits}</span>
+              </span>
+              <span className="text-zinc-600">·</span>
+              <span className="text-zinc-400">
+                Loaded <span className="font-semibold text-zinc-100">{reconciliation.loadedUnits}</span>
+              </span>
+              {isLegacyPacked && (
+                <>
+                  <span className="text-zinc-600">·</span>
+                  <span className="text-zinc-400">
+                    Returned <span className="font-semibold text-zinc-100">{reconciliation.returnedUnits}</span>
+                  </span>
+                </>
+              )}
+              <span className="text-zinc-600">·</span>
+              <span className="text-zinc-400">
+                {isLegacyPacked ? 'In van' : 'Not loaded (still at warehouse)'}{' '}
+                <span
+                  className={`font-semibold ${
+                    reconciliation.remainingUnits > 0 ? 'text-amber-400' : 'text-emerald-400'
+                  }`}
+                >
+                  {reconciliation.remainingUnits}
+                </span>
+              </span>
+            </div>
+
+            {/* Per-SKU breakdown */}
+            {(reconciliation.perSku?.length || 0) > 0 && (
+              <div>
+                <button
+                  onClick={() => setSkuTableOpen((v) => !v)}
+                  className="flex h-11 w-full items-center justify-between rounded-lg px-1 text-sm text-zinc-400 hover:text-zinc-200"
+                >
+                  <span>Per-product breakdown</span>
+                  {skuTableOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                </button>
+                {/* Mobile: stacked per-product cards (the table scrolls sideways on a phone) */}
+                {skuTableOpen && (
+                  <div className="md:hidden divide-y divide-zinc-800/50">
+                    {reconciliation.perSku.map((row) => {
+                      const remaining = (row.remaining || 0) > 0;
+                      return (
+                        <div key={row.sku} className={`py-2.5 tabular-nums ${remaining ? 'text-zinc-100' : 'text-zinc-500'}`}>
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="min-w-0 truncate text-sm">{row.name || row.sku}</span>
+                            <span className={`shrink-0 text-sm font-semibold ${remaining ? 'text-amber-400' : ''}`}>
+                              {row.remaining} {isLegacyPacked ? 'in van' : 'not loaded'}
+                            </span>
+                          </div>
+                          <div className="mt-0.5 text-xs text-zinc-500">
+                            Planned {row.packed} · Loaded {row.loaded}
+                            {isLegacyPacked && <> · Returned {row.returned}</>}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 )}
-                <div className="flex items-center gap-2">
+                {skuTableOpen && (
+                  <div className="hidden md:block overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-zinc-800 text-xs text-zinc-500">
+                          <th className="py-2 pr-2 text-left font-medium">Product</th>
+                          <th className="px-2 py-2 text-right font-medium">Planned</th>
+                          <th className="px-2 py-2 text-right font-medium">Loaded</th>
+                          {isLegacyPacked && (
+                            <th className="px-2 py-2 text-right font-medium">Returned</th>
+                          )}
+                          <th className="py-2 pl-2 text-right font-medium">
+                            {isLegacyPacked ? 'In van' : 'Not loaded'}
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {reconciliation.perSku.map((row) => {
+                          const remaining = (row.remaining || 0) > 0;
+                          return (
+                            <tr
+                              key={row.sku}
+                              className={`border-b border-zinc-800/50 tabular-nums ${
+                                remaining ? 'text-zinc-100' : 'text-zinc-500'
+                              }`}
+                            >
+                              <td className="max-w-[10rem] truncate py-2 pr-2">
+                                {row.name || row.sku}
+                              </td>
+                              <td className="px-2 py-2 text-right">{row.packed}</td>
+                              <td className="px-2 py-2 text-right">{row.loaded}</td>
+                              {isLegacyPacked && (
+                                <td className="px-2 py-2 text-right">{row.returned}</td>
+                              )}
+                              <td
+                                className={`py-2 pl-2 text-right font-semibold ${
+                                  remaining ? 'text-amber-400' : ''
+                                }`}
+                              >
+                                {row.remaining}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {!isLegacyPacked && reconciliation.remainingUnits > 0 && (
+              <p className="text-[11px] text-zinc-500">
+                "Not loaded" units were never removed from warehouse stock — no return needed, just
+                put them back on the shelf.
+              </p>
+            )}
+
+            {returnSuccess && (
+              <div className="flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-400">
+                <CheckCircle2 size={16} className="flex-shrink-0" />
+                {returnSuccess}
+              </div>
+            )}
+
+            {returnError && (
+              <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400">
+                {returnError}
+              </div>
+            )}
+
+            {/* Return leftovers — LEGACY packed lists only (their warehouse
+                stock was drained at pack time, so leftovers must be booked back) */}
+            {isLegacyPacked && (returnItems ? (
+              <div className="space-y-2 rounded-xl border border-zinc-800 bg-zinc-950/50 p-3">
+                <p className="text-sm font-medium text-zinc-200">
+                  Return leftovers to warehouse
+                </p>
+                <p className="text-xs text-zinc-500">
+                  Adjust the quantities to match what&rsquo;s actually going back on the shelf.
+                </p>
+                {returnItems.length === 0 ? (
+                  <p className="py-3 text-center text-sm text-zinc-600">
+                    Nothing left to return.
+                  </p>
+                ) : (
+                  returnItems.map((item) => (
+                    <div key={item.sku} className="flex items-center gap-2">
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm text-zinc-200">{item.name}</p>
+                        <p className="text-xs text-zinc-500">{item.max} in van</p>
+                      </div>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        value={item.quantity}
+                        onChange={(e) => updateReturnQty(item.sku, e.target.value)}
+                        aria-label={`Quantity of ${item.name} to return`}
+                        className="h-12 w-[4.5rem] flex-shrink-0 rounded-xl border border-zinc-700 bg-zinc-800 text-center text-lg font-semibold text-zinc-100 focus:border-emerald-500 focus:outline-none"
+                      />
+                      <button
+                        onClick={() => removeReturnRow(item.sku)}
+                        aria-label={`Remove ${item.name} from the return`}
+                        className="flex h-12 w-11 flex-shrink-0 items-center justify-center rounded-xl text-zinc-500 hover:bg-zinc-800 hover:text-red-400"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))
+                )}
+                <div className="flex items-center gap-2 pt-1">
                   <button
-                    onClick={confirmComplete}
-                    disabled={completing || !takenBy.trim()}
-                    className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-500 text-zinc-900 rounded text-sm font-medium hover:bg-emerald-400 disabled:opacity-50 disabled:cursor-not-allowed"
+                    onClick={confirmReturn}
+                    disabled={returnBusy || returnableItems.length === 0}
+                    className="flex h-12 flex-1 items-center justify-center gap-2 rounded-xl bg-emerald-500 text-sm font-semibold text-zinc-900 hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    {completing && <Loader2 size={14} className="animate-spin" />}
-                    {completing ? 'Recording…' : 'Confirm — record removal'}
+                    {returnBusy && <Loader2 size={16} className="animate-spin" />}
+                    {returnBusy
+                      ? 'Returning…'
+                      : `Confirm return (${returnableItems.reduce((s, i) => s + i.quantity, 0)} units)`}
                   </button>
                   <button
-                    onClick={() => { setConfirmOpen(false); setCompleteError(null); }}
-                    disabled={completing}
-                    className="px-3 py-2 rounded text-sm bg-zinc-800 text-zinc-300 border border-zinc-700"
+                    onClick={() => { setReturnItems(null); setReturnError(null); }}
+                    disabled={returnBusy}
+                    className="h-12 rounded-xl border border-zinc-700 bg-zinc-800 px-4 text-sm font-medium text-zinc-300 hover:bg-zinc-700"
                   >
-                    Back
+                    Cancel
                   </button>
                 </div>
               </div>
             ) : (
-              <div className="flex items-center justify-between gap-4">
-                <div className="min-w-0">
-                  <div className="text-sm text-zinc-200 font-medium tabular-nums">
-                    {packedCount}/{totalCount} packed
-                  </div>
-                  <div className="h-1.5 w-28 sm:w-40 bg-zinc-800 rounded-full overflow-hidden mt-1">
-                    <div
-                      className="h-full bg-emerald-500 rounded-full transition-all duration-300"
-                      style={{ width: `${progressPct}%` }}
-                    />
-                  </div>
-                </div>
+              reconciliation.remainingUnits > 0 && (
                 <button
-                  onClick={() => setConfirmOpen(true)}
-                  disabled={packedCount === 0}
-                  className="shrink-0 px-5 py-2.5 bg-emerald-500 text-zinc-900 rounded-lg text-sm font-semibold hover:bg-emerald-400 disabled:opacity-40 disabled:cursor-not-allowed"
+                  onClick={openReturnEditor}
+                  className="flex h-12 w-full items-center justify-center gap-2 rounded-xl border border-zinc-700 bg-zinc-800 text-sm font-semibold text-zinc-200 hover:bg-zinc-700"
                 >
-                  Mark packed
+                  <RotateCcw size={16} />
+                  Return leftovers to warehouse
                 </button>
-              </div>
-            )}
+              )
+            ))}
           </div>
         </div>
       )}

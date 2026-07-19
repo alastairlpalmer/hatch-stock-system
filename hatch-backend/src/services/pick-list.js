@@ -563,6 +563,214 @@ export function findReturnViolations(perSku, requestItems) {
 }
 
 /**
+ * Reduce an item's stored FEFO batch plan by what earlier per-location
+ * confirmations already took, so successive stops keep pulling the lots the
+ * printed sheet shows instead of re-consuming the first plan line. Prior takes
+ * are matched by batchId; takes exceeding a line spill onto later lines with
+ * the same batchId (defensive — generation emits one line per batch). Pure;
+ * exported for tests.
+ *
+ * @param {Array<{ batchId, qty }>} itemBatches the item's stored plan
+ * @param {Array<{ batchId, take }>} priorConsumed takes journalled by earlier stops
+ * @returns {Array<{ batchId, qty }>} the plan still available to this stop
+ */
+export function remainingBatchPlan(itemBatches, priorConsumed) {
+  const takenByBatch = new Map();
+  for (const c of Array.isArray(priorConsumed) ? priorConsumed : []) {
+    if (!c?.batchId || !(c.take > 0)) continue;
+    takenByBatch.set(c.batchId, (takenByBatch.get(c.batchId) || 0) + c.take);
+  }
+
+  const plan = [];
+  for (const line of Array.isArray(itemBatches) ? itemBatches : []) {
+    if (!line?.batchId || !(line.qty > 0)) continue;
+    const taken = takenByBatch.get(line.batchId) || 0;
+    const used = Math.min(line.qty, taken);
+    if (used > 0) takenByBatch.set(line.batchId, taken - used);
+    if (line.qty - used > 0) plan.push({ ...line, qty: line.qty - used });
+  }
+  return plan;
+}
+
+/**
+ * Confirm one machine (location) on a pick list: the single "stock went into
+ * the machine" action. For a new-flow list (draft/in_progress) this atomically
+ * consumes the stop's quantities from warehouse batches (following the stored
+ * FEFO plan, reduced by earlier stops' takes), journals a StockRemoval, AND
+ * creates the RestockRecord that increments the machine's LocationStock. For a
+ * LEGACY `packed` list the warehouse was already drained at completion, so
+ * only the RestockRecord side runs.
+ *
+ * The confirmation row is created FIRST inside the transaction — its unique
+ * (pickListId, locationId) constraint is the double-confirm guard, tripping
+ * before any stock moves. A warehouse shortfall throws 409 with `shortfalls`
+ * and rolls the whole stop back.
+ *
+ * `adjustedItems` lets the driver load less than planned ([{ sku, quantity }],
+ * 0 ≤ quantity ≤ planned); unloaded units simply never leave warehouse stock.
+ * New-flow lists flip to `in_progress` on the first confirm and `completed`
+ * when every stop on the list has been confirmed.
+ */
+export async function confirmPickListLocation(id, {
+  locationId,
+  performedBy = null,
+  photoUrl = null,
+  adjustedItems = null,
+} = {}) {
+  const list = await prisma.pickList.findUnique({ where: { id } });
+  if (!list) throw httpError(404, 'Pick list not found');
+  if (list.status === 'cancelled' || list.status === 'completed') {
+    throw httpError(409, `Pick list is already ${list.status}`);
+  }
+  const legacy = list.status === 'packed';
+
+  const items = Array.isArray(list.items) ? list.items : [];
+  const allLocationIds = new Set();
+  let locationName = null;
+  let onList = false;
+  const planned = [];
+  for (const item of items) {
+    for (const p of Array.isArray(item.perLocation) ? item.perLocation : []) {
+      allLocationIds.add(p.locationId);
+      if (p.locationId !== locationId) continue;
+      onList = true;
+      locationName = locationName || p.locationName;
+      planned.push({ sku: item.sku, name: item.name, qty: p.qty || 0, batches: item.batches });
+    }
+  }
+  if (!onList) throw httpError(404, 'Location is not on this pick list');
+
+  if (Array.isArray(adjustedItems)) {
+    const plannedBySku = new Map(planned.map((p) => [p.sku, p]));
+    for (const adj of adjustedItems) {
+      const line = plannedBySku.get(adj.sku);
+      if (!line) throw httpError(400, `SKU ${adj.sku} is not planned for this location`);
+      if (adj.quantity < 0 || adj.quantity > line.qty) {
+        throw httpError(400, `Quantity for ${adj.sku} must be between 0 and the planned ${line.qty}`);
+      }
+      line.qty = adj.quantity;
+    }
+  }
+  // Zero-qty lines (fully trimmed stops, or adjusted to 0) don't move stock —
+  // but the visit still records a confirmation so the run shows the stop done.
+  const lines = planned.filter((p) => p.qty > 0);
+
+  return prisma.$transaction(async (tx) => {
+    const prior = await tx.pickListLocationConfirmation.findMany({ where: { pickListId: id } });
+
+    // Concurrency guard: create the confirmation row BEFORE any stock moves —
+    // the unique (pickListId, locationId) constraint fails a concurrent
+    // double-confirm here, with nothing to roll back yet.
+    let confirmation;
+    try {
+      confirmation = await tx.pickListLocationConfirmation.create({
+        data: { pickListId: id, locationId, performedBy },
+      });
+    } catch (err) {
+      if (err?.code === 'P2002') {
+        throw httpError(409, 'This machine has already been confirmed for this pick list');
+      }
+      throw err;
+    }
+
+    // Earlier stops' per-batch takes, per sku — reduces this stop's plan.
+    const priorConsumedBySku = new Map();
+    for (const c of prior) {
+      for (const it of Array.isArray(c.items) ? c.items : []) {
+        if (!priorConsumedBySku.has(it.sku)) priorConsumedBySku.set(it.sku, []);
+        priorConsumedBySku.get(it.sku).push(...(Array.isArray(it.consumed) ? it.consumed : []));
+      }
+    }
+
+    const journal = [];
+    const deviations = [];
+    let removal = null;
+    if (!legacy && lines.length > 0) {
+      const shortfalls = [];
+      for (const line of lines) {
+        const plan = remainingBatchPlan(line.batches, priorConsumedBySku.get(line.sku));
+        const { consumed, shortfall, offPlanQty } = await consumePlannedBatches(
+          tx, list.warehouseId, line.sku, line.qty, plan,
+        );
+        if (shortfall > 0) {
+          shortfalls.push({ sku: line.sku, name: line.name, requested: line.qty, available: line.qty - shortfall });
+        }
+        if (offPlanQty > 0) deviations.push({ sku: line.sku, name: line.name, offPlanQty });
+        journal.push({ sku: line.sku, name: line.name, quantity: line.qty, consumed });
+      }
+
+      if (shortfalls.length > 0) {
+        const err = httpError(
+          409,
+          'Warehouse stock has changed since this pick list was generated — regenerate it and try again',
+        );
+        err.shortfalls = shortfalls;
+        throw err; // rolls back the confirmation row and every consume above
+      }
+
+      removal = await tx.stockRemoval.create({
+        data: {
+          warehouseId: list.warehouseId,
+          routeId: list.routeId,
+          routeName: list.routeName,
+          takenBy: performedBy,
+          notes: `Pick list ${list.id} — ${locationName}`,
+          items: journal.map(({ sku, quantity }) => ({ sku, quantity })),
+        },
+      });
+      for (const line of lines) {
+        await recomputeWarehouseStock(tx, list.warehouseId, line.sku);
+      }
+    } else if (legacy) {
+      // Warehouse already drained at completion — journal the load only.
+      journal.push(...lines.map(({ sku, name, qty }) => ({ sku, name, quantity: qty })));
+    }
+
+    let restock = null;
+    if (lines.length > 0) {
+      restock = await tx.restockRecord.create({
+        data: {
+          locationId,
+          pickListId: id,
+          performedBy,
+          photoUrl,
+          // productName kept for the history views (same as the old manual
+          // restock wizard); reconciliation only reads sku/quantity.
+          items: lines.map(({ sku, name, qty }) => ({ sku, productName: name, quantity: qty })),
+        },
+      });
+      for (const line of lines) {
+        // Atomic increment — no read-modify-write race (same discipline as
+        // POST /inventory/restocks).
+        await tx.locationStock.upsert({
+          where: { locationId_sku: { locationId, sku: line.sku } },
+          create: { locationId, sku: line.sku, quantity: line.qty },
+          update: { quantity: { increment: line.qty } },
+        });
+      }
+    }
+
+    confirmation = await tx.pickListLocationConfirmation.update({
+      where: { id: confirmation.id },
+      data: {
+        items: journal,
+        removalId: removal?.id ?? null,
+        restockRecordId: restock?.id ?? null,
+      },
+    });
+
+    let pickList = list;
+    if (!legacy) {
+      const confirmedCount = prior.length + 1;
+      const status = confirmedCount >= allLocationIds.size ? 'completed' : 'in_progress';
+      pickList = await tx.pickList.update({ where: { id }, data: { status } });
+    }
+
+    return { pickList, confirmation, restock, removal, deviations: deviations.length ? deviations : null };
+  });
+}
+
+/**
  * Everything the route-run screen needs for one pick list in a single call:
  * the list itself, the per-location plan with the latest stock check and
  * linked restock for each stop, the van reconciliation, and whether every
@@ -601,7 +809,7 @@ export async function getPickListRun(id) {
     orderedIds = [...onList, ...rest];
   }
 
-  const [stockChecks, restocks] = await Promise.all([
+  const [stockChecks, restocks, confirmations] = await Promise.all([
     // Only checks performed since the list was created count as "this run".
     prisma.stockCheck.findMany({
       where: { locationId: { in: orderedIds }, createdAt: { gte: pickList.createdAt } },
@@ -611,7 +819,9 @@ export async function getPickListRun(id) {
       where: { pickListId: id },
       orderBy: { createdAt: 'desc' },
     }),
+    prisma.pickListLocationConfirmation.findMany({ where: { pickListId: id } }),
   ]);
+  const confirmationByLocation = new Map(confirmations.map((c) => [c.locationId, c]));
 
   // Newest-first, so the first row seen per location is the latest.
   const latestCheckByLocation = new Map();
@@ -635,6 +845,7 @@ export async function getPickListRun(id) {
 
     const check = latestCheckByLocation.get(locationId);
     const restock = latestRestockByLocation.get(locationId);
+    const confirmation = confirmationByLocation.get(locationId);
     return {
       locationId,
       locationName: locationNameById.get(locationId),
@@ -661,15 +872,28 @@ export async function getPickListRun(id) {
               .reduce((sum, i) => sum + (i.quantity || 0), 0),
           }
         : null,
+      confirmation: confirmation
+        ? {
+            id: confirmation.id,
+            createdAt: confirmation.createdAt,
+            performedBy: confirmation.performedBy,
+            units: (Array.isArray(confirmation.items) ? confirmation.items : [])
+              .reduce((sum, i) => sum + (i.quantity || 0), 0),
+          }
+        : null,
     };
   });
 
+  // Legacy packed lists predate per-location confirmations — their "done"
+  // signal stays the linked restock per stop.
+  const isLegacy = pickList.status === 'packed';
   return {
     pickList,
     locations,
     reconciliation: buildReconciliation(items, restocks, pickList.returnedItems),
     expiryWarnings: buildExpiryWarnings(items),
-    allDone: locations.length > 0 && locations.every((l) => l.restock !== null),
+    allDone: locations.length > 0
+      && locations.every((l) => (isLegacy ? l.restock !== null : l.confirmation !== null)),
   };
 }
 
@@ -764,6 +988,10 @@ export async function completePickList(id, { takenBy = null } = {}) {
   const list = await prisma.pickList.findUnique({ where: { id } });
   if (!list) throw httpError(404, 'Pick list not found');
   if (list.status !== 'draft') throw httpError(409, `Pick list is already ${list.status}`);
+  const confirmed = await prisma.pickListLocationConfirmation.count({ where: { pickListId: id } });
+  if (confirmed > 0) {
+    throw httpError(409, 'This pick list is being confirmed per machine — completing it would double-remove warehouse stock');
+  }
 
   return prisma.$transaction(async (tx) => {
     // Guarded status flip — two concurrent completions must not double-take.

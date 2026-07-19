@@ -11,6 +11,7 @@ import {
   expiresBeforeNextRestock,
   buildExpiryWarnings,
   computeLocationNeeds,
+  remainingBatchPlan,
 } from './pick-list.js';
 import { buildPlanogramScope } from './planogram-layout.js';
 
@@ -79,6 +80,48 @@ describe('buildReconciliation', () => {
     expect(empty.perSku).toEqual([]);
     expect(empty.packedUnits).toBe(0);
     expect(empty.remainingUnits).toBe(0);
+  });
+});
+
+describe('remainingBatchPlan', () => {
+  const plan = [
+    { batchId: 'b1', qty: 10, expiryDate: '2026-07-20' },
+    { batchId: 'b2', qty: 5, expiryDate: '2026-08-01' },
+  ];
+
+  it('returns the full plan when nothing was consumed before', () => {
+    expect(remainingBatchPlan(plan, [])).toEqual(plan);
+    expect(remainingBatchPlan(plan, undefined)).toEqual(plan);
+  });
+
+  it('reduces a line by a partial prior take, preserving line metadata', () => {
+    const result = remainingBatchPlan(plan, [{ batchId: 'b1', take: 4 }]);
+    expect(result).toEqual([
+      { batchId: 'b1', qty: 6, expiryDate: '2026-07-20' },
+      { batchId: 'b2', qty: 5, expiryDate: '2026-08-01' },
+    ]);
+  });
+
+  it('drops a line fully drained by prior takes', () => {
+    const result = remainingBatchPlan(plan, [
+      { batchId: 'b1', take: 7 },
+      { batchId: 'b1', take: 3 },
+    ]);
+    expect(result).toEqual([{ batchId: 'b2', qty: 5, expiryDate: '2026-08-01' }]);
+  });
+
+  it('ignores prior takes for batches not on the plan', () => {
+    const result = remainingBatchPlan(plan, [{ batchId: 'other', take: 99 }]);
+    expect(result).toEqual(plan);
+  });
+
+  it('handles empty or malformed plans and takes', () => {
+    expect(remainingBatchPlan([], [{ batchId: 'b1', take: 1 }])).toEqual([]);
+    expect(remainingBatchPlan(undefined, [])).toEqual([]);
+    expect(remainingBatchPlan(
+      [{ batchId: null, qty: 5 }, { batchId: 'b2', qty: 0 }],
+      [{ batchId: 'b2' }],
+    )).toEqual([]);
   });
 });
 

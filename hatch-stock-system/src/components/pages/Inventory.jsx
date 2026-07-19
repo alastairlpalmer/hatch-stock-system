@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useStock } from '../../context/StockContext';
 import inventoryService from '../../services/inventory.service';
 import vendliveService from '../../services/vendlive.service';
@@ -888,6 +889,13 @@ export default function Inventory() {
             >
               Transfer
             </button>
+            <Link
+              to="/warehouse/remove"
+              title="Manually remove stock from the warehouse (ad-hoc / barcode scan)"
+              className="flex-1 sm:flex-none px-3 py-2.5 bg-zinc-700 text-white rounded text-sm font-medium hover:bg-zinc-600 text-center"
+            >
+              Remove
+            </Link>
             <label className="flex-1 sm:flex-none px-3 py-2.5 bg-teal-600 text-white rounded text-sm font-medium hover:bg-teal-500 cursor-pointer text-center">
               CSV
               <input
