@@ -2,7 +2,7 @@ import React from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, BarChart3, MapPin, BookOpen, History as HistoryIcon,
-  TrendingDown, PackageMinus, Route as RouteIcon, UserCircle, Settings as SettingsIcon,
+  TrendingDown, PackageMinus, UserCircle, Settings as SettingsIcon,
   Users as UsersIcon, ChevronRight, LogOut,
 } from 'lucide-react';
 import { useAuth } from '../../../context/AuthContext';
@@ -26,8 +26,7 @@ export default function MorePage() {
     { to: '/support/docs', label: 'Restocking Docs', Icon: BookOpen },
     { to: '/support/history', label: 'History', Icon: HistoryIcon },
     { to: '/restock/shrinkage', label: 'Shrinkage', Icon: TrendingDown },
-    { to: '/restock/remove', label: 'Remove Stock', Icon: PackageMinus },
-    { to: '/restock/route', label: 'Select Route', Icon: RouteIcon },
+    { to: '/warehouse/remove', label: 'Remove Stock', Icon: PackageMinus },
     ...(AUTH_ENABLED ? [{ to: '/support/account', label: 'Account', Icon: UserCircle }] : []),
     ...(!AUTH_ENABLED || isAdmin ? [{ to: '/support/settings', label: 'Settings', Icon: SettingsIcon }] : []),
     ...(AUTH_ENABLED && isAdmin ? [{ to: '/support/users', label: 'Users', Icon: UsersIcon }] : []),

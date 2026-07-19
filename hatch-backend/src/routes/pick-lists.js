@@ -5,6 +5,7 @@ import { asyncHandler } from '../middleware/errorHandler.js';
 import {
   generatePickList,
   completePickList,
+  confirmPickListLocation,
   getPickListRun,
   returnPickListLeftovers,
 } from '../services/pick-list.js';
@@ -74,15 +75,18 @@ router.get('/:id', asyncHandler(async (req, res) => {
 }));
 
 // Update a pick list — ONLY packing tick-state / packedQty (merged onto the
-// stored items by sku) and status (draft|cancelled). Quantities and batch
-// allocations are regenerated, never hand-edited. A packed list is immutable.
+// stored items by sku) and status. Quantities and batch allocations are
+// regenerated, never hand-edited. Item edits are allowed only while the list
+// is a draft with no machine confirmed yet; status moves: draft|in_progress →
+// cancelled, in_progress → completed ("finish run" — unconfirmed stops never
+// left warehouse stock). A legacy packed list stays immutable.
 const updateSchema = z.object({
   items: z.array(z.object({
     sku: z.string().min(1),
     packed: z.boolean().optional(),
     packedQty: z.coerce.number().int().min(0).nullish(),
   })).optional(),
-  status: z.enum(['draft', 'cancelled']).optional(),
+  status: z.enum(['draft', 'cancelled', 'completed']).optional(),
 });
 
 router.put('/:id', asyncHandler(async (req, res) => {
@@ -93,9 +97,27 @@ router.put('/:id', asyncHandler(async (req, res) => {
   if (existing.status === 'packed') {
     return res.status(409).json({ error: 'Pick list has already been packed' });
   }
+  if (existing.status === 'completed' || existing.status === 'cancelled') {
+    return res.status(409).json({ error: `Pick list is already ${existing.status}` });
+  }
+  if (status === 'completed' && existing.status !== 'in_progress') {
+    return res.status(409).json({ error: 'Only an in-progress pick list can be finished' });
+  }
+  if (status === 'draft' && existing.status !== 'draft') {
+    return res.status(409).json({ error: 'Cannot move a started pick list back to draft' });
+  }
 
   let mergedItems;
   if (items !== undefined) {
+    if (existing.status !== 'draft') {
+      return res.status(409).json({ error: 'Items can only be edited on a draft pick list' });
+    }
+    const confirmedCount = await prisma.pickListLocationConfirmation.count({
+      where: { pickListId: existing.id },
+    });
+    if (confirmedCount > 0) {
+      return res.status(409).json({ error: 'Items are locked once a machine has been confirmed' });
+    }
     const patchBySku = new Map(items.map((i) => [i.sku, i]));
     mergedItems = (Array.isArray(existing.items) ? existing.items : []).map((item) => {
       const patch = patchBySku.get(item.sku);
@@ -119,12 +141,19 @@ router.put('/:id', asyncHandler(async (req, res) => {
   res.json(list);
 }));
 
-// Delete a pick list (drafts/cancelled only — a packed list is an audit record).
+// Delete a pick list (untouched drafts/cancelled only — once stock has moved
+// via a machine confirmation, or the list was packed, it is an audit record).
 router.delete('/:id', asyncHandler(async (req, res) => {
   const existing = await prisma.pickList.findUnique({ where: { id: req.params.id } });
   if (!existing) return res.status(404).json({ error: 'Pick list not found' });
-  if (existing.status === 'packed') {
-    return res.status(409).json({ error: 'Cannot delete a packed pick list' });
+  if (existing.status !== 'draft' && existing.status !== 'cancelled') {
+    return res.status(409).json({ error: `Cannot delete a ${existing.status} pick list` });
+  }
+  const confirmedCount = await prisma.pickListLocationConfirmation.count({
+    where: { pickListId: existing.id },
+  });
+  if (confirmedCount > 0) {
+    return res.status(409).json({ error: 'Cannot delete a pick list with confirmed machines' });
   }
 
   await prisma.pickList.delete({ where: { id: existing.id } });
@@ -141,6 +170,41 @@ router.post('/:id/complete', asyncHandler(async (req, res) => {
 
   try {
     const result = await completePickList(req.params.id, { takenBy: takenBy ?? null });
+    res.json(result);
+  } catch (err) {
+    if (err.shortfalls) {
+      return res.status(409).json({ error: err.message, shortfalls: err.shortfalls });
+    }
+    throw err;
+  }
+}));
+
+// Confirm one machine on the run: atomically consume the stop's quantities
+// from warehouse batches AND increment the machine's LocationStock (legacy
+// packed lists: record-only, warehouse was drained at completion). 409 with
+// { error, shortfalls } when live warehouse stock no longer covers the stop;
+// 409 when the machine was already confirmed.
+const confirmLocationSchema = z.object({
+  locationId: z.string().min(1),
+  performedBy: z.string().nullish(),
+  photoUrl: z.string().nullish(),
+  adjustedItems: z.array(z.object({
+    sku: z.string().min(1),
+    quantity: z.coerce.number().int().min(0),
+  })).nullish(),
+});
+
+router.post('/:id/confirm-location', asyncHandler(async (req, res) => {
+  const { locationId, performedBy, photoUrl, adjustedItems } =
+    confirmLocationSchema.parse(req.body);
+
+  try {
+    const result = await confirmPickListLocation(req.params.id, {
+      locationId,
+      performedBy: performedBy ?? null,
+      photoUrl: photoUrl ?? null,
+      adjustedItems: adjustedItems ?? null,
+    });
     res.json(result);
   } catch (err) {
     if (err.shortfalls) {
