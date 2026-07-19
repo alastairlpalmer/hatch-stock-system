@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseRestockTypes, isRestockMovement } from './vendlive-stock.js';
+import { parseRestockTypes, isRestockMovement, extractChannelSkus, hasPlanogramDrift } from './vendlive-stock.js';
 
 describe('parseRestockTypes', () => {
   it('splits, trims and lowercases the configured list', () => {
@@ -36,5 +36,68 @@ describe('isRestockMovement', () => {
 
   it('legacy default "In" still matches VendLive "In" movements', () => {
     expect(isRestockMovement('In', parseRestockTypes(undefined))).toBe(true);
+  });
+});
+
+describe('extractChannelSkus', () => {
+  it('uses externalId, falling back to the VendLive product id', () => {
+    const skus = extractChannelSkus([
+      { product: { externalId: 'SKU-1', id: 10 } },
+      { product: { id: 20 } },
+    ]);
+    expect([...skus].sort()).toEqual(['20', 'SKU-1']);
+  });
+
+  it('skips channels with no product and dedupes multi-channel SKUs', () => {
+    const skus = extractChannelSkus([
+      { product: { externalId: 'SKU-1' } },
+      { product: { externalId: 'SKU-1' } },
+      { product: null },
+      {},
+    ]);
+    expect([...skus]).toEqual(['SKU-1']);
+  });
+
+  it('handles null/empty channel lists', () => {
+    expect(extractChannelSkus(null).size).toBe(0);
+    expect(extractChannelSkus([]).size).toBe(0);
+  });
+});
+
+describe('hasPlanogramDrift', () => {
+  const stored = [
+    { sku: 'SKU-1', idealCapacity: 5 },
+    { sku: 'SKU-2', idealCapacity: 3 },
+  ];
+
+  it('no drift when the live set matches the stored snapshot', () => {
+    expect(hasPlanogramDrift(new Set(['SKU-1', 'SKU-2']), stored)).toBe(false);
+  });
+
+  it('drifts when a product was added to the planogram', () => {
+    expect(hasPlanogramDrift(new Set(['SKU-1', 'SKU-2', 'SKU-NEW']), stored)).toBe(true);
+  });
+
+  it('drifts when a product was removed from the planogram', () => {
+    expect(hasPlanogramDrift(new Set(['SKU-1']), stored)).toBe(true);
+  });
+
+  it('drifts on a same-size swap (one out, one in)', () => {
+    expect(hasPlanogramDrift(new Set(['SKU-1', 'SKU-3']), stored)).toBe(true);
+  });
+
+  it('never drifts on an empty probe (API hiccup guard)', () => {
+    expect(hasPlanogramDrift(new Set(), stored)).toBe(false);
+    expect(hasPlanogramDrift(null, stored)).toBe(false);
+  });
+
+  it('drifts when the machine has never been mirrored (null/garbage snapshot)', () => {
+    expect(hasPlanogramDrift(new Set(['SKU-1']), null)).toBe(true);
+    expect(hasPlanogramDrift(new Set(['SKU-1']), 'garbage')).toBe(true);
+  });
+
+  it('ignores malformed stored entries rather than counting them', () => {
+    const messy = [{ sku: 'SKU-1' }, null, { sku: '' }, { notSku: 'x' }];
+    expect(hasPlanogramDrift(new Set(['SKU-1']), messy)).toBe(false);
   });
 });

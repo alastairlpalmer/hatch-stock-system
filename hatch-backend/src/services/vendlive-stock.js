@@ -76,13 +76,16 @@ function earliestChannelExpiry(channels) {
  * Pulls channel data from VendLive, compares to Hatch LocationStock,
  * updates LocationStock to match VendLive, and calculates shrinkage.
  *
+ * options.prefetchedChannels: channel payload already fetched by the caller
+ * (the poll job's planogram-drift probe) — skips the VendLive call.
+ *
  * Returns: { productsUpdated, totalVariance, varianceCost, items: [...] }
  */
-export async function syncMachineStock(vendliveMachineId, locationId, config, syncType = 'manual_pull') {
+export async function syncMachineStock(vendliveMachineId, locationId, config, syncType = 'manual_pull', { prefetchedChannels } = {}) {
   console.log(`Stock sync: starting for machine ${vendliveMachineId} → location ${locationId}`);
 
-  // 1. Fetch all channels from VendLive
-  const channels = await vendliveApi.getChannels(config, { machineId: vendliveMachineId });
+  // 1. Fetch all channels from VendLive (unless the caller already has them)
+  const channels = prefetchedChannels ?? await vendliveApi.getChannels(config, { machineId: vendliveMachineId });
   const vendliveStock = aggregateChannelStock(channels);
 
   // 2. Load current Hatch location stock
@@ -521,18 +524,68 @@ export async function detectRestockEvents(vendliveMachineId, config) {
   };
 }
 
-// If no successful stock sync has landed in this window, the poll job runs a
-// full sync regardless of restock detection. Restock detection is the fast
-// path, but it depends on free-typed movement-type config matching what
+// If a machine has no successful stock sync in this window, the poll job runs
+// a full sync for it regardless of restock detection. Restock detection is the
+// fast path, but it depends on free-typed movement-type config matching what
 // VendLive actually sends — when that silently mismatches (as it did for six
 // days in July 2026), this fallback caps the damage at hours, not days.
 const STALE_SYNC_FALLBACK_MS = 6 * 60 * 60 * 1000;
 
 /**
- * Run the stock movement polling job.
- * Checks all mapped machines for new movements and triggers a sync on restock
- * detection; independently, falls back to a full sync of every mapped machine
- * when the last successful sync is older than STALE_SYNC_FALLBACK_MS.
+ * SKU set present on a machine's planogram, from a raw getChannels payload.
+ * Same SKU derivation as aggregateChannelStock (externalId, falling back to
+ * the VendLive product id). Channels with no product assigned are ignored.
+ * Pure; exported for testing.
+ */
+export function extractChannelSkus(channels) {
+  const skus = new Set();
+  for (const channel of channels || []) {
+    const product = channel?.product;
+    if (!product) continue;
+    skus.add(product.externalId || String(product.id));
+  }
+  return skus;
+}
+
+/**
+ * Whether the live planogram SKU set differs from the snapshot stored on the
+ * machine mapping (VendliveMachineMapping.planogramSkus — [{ sku, ... }] as
+ * written by the mirror, or null before the first sync).
+ *
+ * - Empty fresh set → false: an API hiccup returning 0 channels must not
+ *   trigger a sync (matches the mirror's own empty-planogram guard).
+ * - Null / non-array stored snapshot → true: a never-mirrored machine should
+ *   sync on its first probe.
+ * Pure; exported for testing.
+ */
+export function hasPlanogramDrift(freshSkus, storedPlanogramSkus) {
+  if (!freshSkus || freshSkus.size === 0) return false;
+  const stored = new Set(
+    (Array.isArray(storedPlanogramSkus) ? storedPlanogramSkus : [])
+      .map((e) => (e && typeof e.sku === 'string' && e.sku ? e.sku : null))
+      .filter(Boolean)
+  );
+  if (stored.size !== freshSkus.size) return true;
+  for (const sku of freshSkus) {
+    if (!stored.has(sku)) return true;
+  }
+  return false;
+}
+
+/**
+ * Run the stock movement polling job. Per mapped machine, in order:
+ *
+ * 1. Restock detection (stock movements) → sync on match. Fast path for the
+ *    normal Monday restock.
+ * 2. Planogram drift probe: fetch the machine's channels and compare the SKU
+ *    set against the mirrored snapshot. Catches products added to (or removed
+ *    from) the VendLive planogram BEFORE any stock is loaded — zero volume
+ *    means zero movements, so restock detection alone never sees them and new
+ *    products stayed invisible until the Friday baseline. The probe's channel
+ *    payload is reused by the sync, so drift costs no extra VendLive call.
+ * 3. Per-machine staleness fallback: sync when THIS machine's last successful
+ *    sync is older than STALE_SYNC_FALLBACK_MS. (The old global check let any
+ *    one machine's success suppress the fallback for every other machine.)
  */
 export async function runStockPollJob() {
   const config = await prisma.vendliveConfig.findUnique({ where: { id: 'default' } });
@@ -544,7 +597,9 @@ export async function runStockPollJob() {
     where: { locationId: { not: null } },
   });
 
-  let syncsTriggered = 0;
+  let restockSyncs = 0;
+  let driftSyncs = 0;
+  let fallbackSyncs = 0;
 
   for (const mapping of mappings) {
     try {
@@ -558,34 +613,80 @@ export async function runStockPollJob() {
           config,
           'restock_detected',
         );
-        syncsTriggered++;
+        restockSyncs++;
+        continue;
+      }
+
+      // 2. Planogram drift probe. A probe failure is non-fatal — the machine
+      // still gets the staleness fallback below.
+      let channels = [];
+      try {
+        channels = await vendliveApi.getChannels(config, { machineId: mapping.vendliveMachineId });
+      } catch (err) {
+        console.error(`Stock poll: planogram probe failed for machine ${mapping.vendliveMachineId}: ${err.message}`);
+      }
+
+      if (channels.length > 0) {
+        let freshSkus = extractChannelSkus(channels);
+
+        // With auto-create off, a sync can't create unknown products, so they
+        // would re-trigger drift every poll forever. Compare known SKUs only —
+        // those products become visible once created (catalog sync / manually).
+        if (!(config.autoCreateProducts ?? false) && freshSkus.size > 0) {
+          const known = await prisma.product.findMany({
+            where: { sku: { in: [...freshSkus] } },
+            select: { sku: true },
+          });
+          const knownSet = new Set(known.map((p) => p.sku));
+          const unknown = [...freshSkus].filter((s) => !knownSet.has(s));
+          if (unknown.length > 0) {
+            console.log(`Stock poll: machine ${mapping.vendliveMachineId} — ${unknown.length} planogram SKUs not in Hatch (auto-create disabled), ignored for drift: ${unknown.slice(0, 5).join(', ')}`);
+          }
+          freshSkus = knownSet;
+        }
+
+        if (hasPlanogramDrift(freshSkus, mapping.planogramSkus)) {
+          console.log(`Stock poll: planogram change detected at machine ${mapping.vendliveMachineId}, triggering sync`);
+          await syncMachineStock(
+            mapping.vendliveMachineId,
+            mapping.locationId,
+            config,
+            'planogram_change',
+            { prefetchedChannels: channels },
+          );
+          driftSyncs++;
+          continue;
+        }
+      }
+
+      // 3. Per-machine staleness fallback (detection broken, quiet week,
+      // restarted tracker...) so numbers can never silently drift for days.
+      const lastSuccess = await prisma.vendliveStockSync.findFirst({
+        where: { vendliveMachineId: mapping.vendliveMachineId, status: 'success' },
+        orderBy: { createdAt: 'desc' },
+        select: { createdAt: true },
+      });
+      if (!lastSuccess || Date.now() - lastSuccess.createdAt.getTime() > STALE_SYNC_FALLBACK_MS) {
+        console.warn(`Stock poll: machine ${mapping.vendliveMachineId} has no successful sync since ${lastSuccess?.createdAt?.toISOString() || 'ever'} — running staleness-fallback sync`);
+        await syncMachineStock(
+          mapping.vendliveMachineId,
+          mapping.locationId,
+          config,
+          'stale_fallback',
+          channels.length > 0 ? { prefetchedChannels: channels } : {},
+        );
+        fallbackSyncs++;
       }
     } catch (err) {
       console.error(`Stock poll error for machine ${mapping.vendliveMachineId}:`, err.message);
     }
   }
 
-  // Staleness fallback: if nothing synced recently (detection broken, quiet
-  // week, restarted tracker...), do a full pass so numbers can never silently
-  // drift for days. Idempotent and cheap at this fleet size.
-  let fallbackRan = false;
-  if (syncsTriggered === 0 && mappings.length > 0) {
-    try {
-      const lastSuccess = await prisma.vendliveStockSync.findFirst({
-        where: { status: 'success' },
-        orderBy: { createdAt: 'desc' },
-        select: { createdAt: true },
-      });
-      if (!lastSuccess || Date.now() - lastSuccess.createdAt.getTime() > STALE_SYNC_FALLBACK_MS) {
-        console.warn(`Stock poll: no successful sync since ${lastSuccess?.createdAt?.toISOString() || 'ever'} — running staleness-fallback full sync`);
-        const result = await syncAllMachines(config);
-        fallbackRan = true;
-        syncsTriggered += result?.machinesSynced || 0;
-      }
-    } catch (err) {
-      console.error('Stock poll: staleness-fallback sync failed:', err.message);
-    }
-  }
-
-  return { machinesChecked: mappings.length, syncsTriggered, fallbackRan };
+  return {
+    machinesChecked: mappings.length,
+    syncsTriggered: restockSyncs + driftSyncs + fallbackSyncs,
+    restockSyncs,
+    driftSyncs,
+    fallbackSyncs,
+  };
 }
