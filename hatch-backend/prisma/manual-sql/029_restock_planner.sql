@@ -1,4 +1,7 @@
--- 019: Restock planner calendar (Restock > Planner).
+-- 029: Restock planner calendar (Restock > Planner).
+-- (Originally shipped as 019 in the old top-level manual-sql/ directory,
+-- which collided with 019_visual_planogram.sql — renumbered when the two
+-- directories were consolidated. Already applied to production.)
 -- The frontend renders the weekly defaults itself (Monday = restock,
 -- Friday = de-stock); this table only stores overrides and ad-hoc entries
 -- keyed by (date, kind): assignees/notes decorate a default, status

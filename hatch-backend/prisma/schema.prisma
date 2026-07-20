@@ -792,7 +792,8 @@ model AttentionDismissal {
 // only store overrides and ad-hoc entries keyed by (date, kind):
 // assignees/notes decorate a default, status 'cancelled' hides it, a row on
 // any other day is an ad-hoc run. Deleting a row reverts the day to its
-// default. See manual-sql/019_restock_planner.sql.
+// default. See manual-sql/029_restock_planner.sql (renumbered from a
+// colliding 019 — applied to production between 018 and 020).
 model RestockPlanEntry {
   id        String   @id @default(uuid())
   date      DateTime @db.Date
