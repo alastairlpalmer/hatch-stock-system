@@ -422,9 +422,12 @@ router.get('/daily', asyncHandler(async (req, res) => {
 
   const where = analyticsWhere({ startDate: start, endDate: end, locationName: req.query.locationName });
 
+  // London local days, matching getDailyTransactions in services/analytics.js —
+  // UTC bucketing here made this chart disagree with the analytics dashboard
+  // at day boundaries during BST.
   const rows = await prisma.$queryRaw`
     SELECT
-      to_char(s."timestamp", 'YYYY-MM-DD')                     AS date,
+      to_char((s."timestamp" AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/London', 'YYYY-MM-DD') AS date,
       COALESCE(SUM(s.charged), 0)::float                     AS revenue,
       COALESCE(SUM(s.quantity), 0)::int                      AS units,
       COUNT(*)::int                                          AS transactions,
@@ -457,9 +460,10 @@ router.get('/daily-by-category', asyncHandler(async (req, res) => {
 
   const where = analyticsWhere({ startDate: start, endDate: end, locationName: req.query.locationName });
 
+  // London local days — must match /daily above so the two charts reconcile.
   const rows = await prisma.$queryRaw`
     SELECT
-      to_char(s."timestamp", 'YYYY-MM-DD')  AS date,
+      to_char((s."timestamp" AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/London', 'YYYY-MM-DD') AS date,
       ${EFFECTIVE_CATEGORY}                 AS category,
       COALESCE(SUM(s.charged), 0)::float    AS revenue,
       COALESCE(SUM(s.quantity), 0)::int     AS units

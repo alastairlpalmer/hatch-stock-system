@@ -5,6 +5,7 @@ import { salesService } from '../../services/sales.service';
 import AnalyticsDashboard from './analytics/AnalyticsDashboard';
 import ClientReports from './reports/ClientReports';
 import SalesCharts from './SalesCharts';
+import { londonDay } from '../../utils/helpers';
 
 // Small hoverable (i) marker with an explanatory tooltip
 function InfoTip({ text }) {
@@ -122,7 +123,9 @@ export default function SalesOverview() {
   }, {});
 
   const clientByDay = settledSales.reduce((acc, s) => {
-    const day = new Date(s.timestamp).toISOString().split('T')[0];
+    // London days, matching the server's bucketing (UTC split here disagreed
+    // with the analytics dashboard at day boundaries during BST)
+    const day = londonDay(s.timestamp);
     if (!acc[day]) acc[day] = { date: day, units: 0, revenue: 0, profit: 0, transactions: 0 };
     acc[day].units += s.quantity;
     acc[day].revenue += s.charged;
@@ -135,7 +138,7 @@ export default function SalesOverview() {
   // revenue} rows, mirroring the /sales/daily-by-category server shape.
   const clientDailyByCategory = Object.values(
     settledSales.reduce((acc, s) => {
-      const day = new Date(s.timestamp).toISOString().split('T')[0];
+      const day = londonDay(s.timestamp);
       const cat = s.category || 'Other';
       const key = `${day}|${cat}`;
       if (!acc[key]) acc[key] = { date: day, category: cat, revenue: 0, units: 0 };

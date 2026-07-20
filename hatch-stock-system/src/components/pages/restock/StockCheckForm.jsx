@@ -24,6 +24,9 @@ export default function StockCheckForm({ locationId, performedBy, onComplete, on
   const [reviewing, setReviewing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState(null);
+  // When the count began — the server rejects the submit if the machine was
+  // restocked after this instant (the counted figures would erase it).
+  const [startedAt] = useState(() => new Date().toISOString());
 
   const locationStock = data.locationStock[locationId] || {};
   const location = data.locations.find(l => l.id === locationId);
@@ -151,12 +154,13 @@ export default function StockCheckForm({ locationId, performedBy, onComplete, on
       });
       const check = await submitStockCheck({
         locationId,
+        startedAt,
         ...(performedBy ? { performedBy } : {}),
         items,
       });
       onComplete?.(check);
     } catch (err) {
-      setSubmitError(err.message || 'Failed to submit the stock check — please try again.');
+      setSubmitError(err?.response?.data?.error || err.message || 'Failed to submit the stock check — please try again.');
     } finally {
       setSubmitting(false);
     }

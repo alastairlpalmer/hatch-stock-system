@@ -658,6 +658,37 @@ export async function confirmPickListLocation(id, {
   return prisma.$transaction(async (tx) => {
     const prior = await tx.pickListLocationConfirmation.findMany({ where: { pickListId: id } });
 
+    // Cross-list guard: the unique constraint below only blocks a second
+    // confirm on the SAME list. A stale list plus its regenerated replacement
+    // could both confirm this machine for the same restock day — double-
+    // incrementing its stock (phantom stock that then suppresses ordering).
+    // Block when ANOTHER active list for the same target day already
+    // confirmed this machine.
+    const dayStart = new Date(list.targetDate);
+    dayStart.setUTCHours(0, 0, 0, 0);
+    const dayEnd = new Date(dayStart);
+    dayEnd.setUTCDate(dayEnd.getUTCDate() + 1);
+    const sameDayLists = await tx.pickList.findMany({
+      where: {
+        id: { not: id },
+        targetDate: { gte: dayStart, lt: dayEnd },
+        status: { notIn: ['cancelled'] },
+      },
+      select: { id: true },
+    });
+    if (sameDayLists.length > 0) {
+      const clash = await tx.pickListLocationConfirmation.findFirst({
+        where: { locationId, pickListId: { in: sameDayLists.map((l) => l.id) } },
+        select: { pickListId: true, createdAt: true },
+      });
+      if (clash) {
+        throw httpError(
+          409,
+          `${locationName || 'This machine'} was already restocked today from another pick list — confirming again would double its stock. If that list is stale, cancel it.`,
+        );
+      }
+    }
+
     // Concurrency guard: create the confirmation row BEFORE any stock moves —
     // the unique (pickListId, locationId) constraint fails a concurrent
     // double-confirm here, with nothing to roll back yet.

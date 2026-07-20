@@ -115,6 +115,11 @@ export default function BuyingListDetail() {
   useEffect(() => () => clearTimeout(saveTimerRef.current), []);
 
   const isDraft = list?.status === 'draft';
+  // Whole days since the list's quantities were computed (they are a frozen
+  // snapshot — never re-netted against the warehouse after creation).
+  const staleDays = list?.createdAt
+    ? Math.floor((Date.now() - new Date(list.createdAt).getTime()) / 86_400_000)
+    : 0;
 
   // Debounced persist of the editable fields. Server response does not clobber
   // local state (edits may already be ahead of the in-flight save).
@@ -402,6 +407,19 @@ export default function BuyingListDetail() {
         }`}>
           <p>{banner.message}</p>
           <button onClick={() => setBanner(null)} className="shrink-0 opacity-70 hover:opacity-100">×</button>
+        </div>
+      )}
+
+      {/* Staleness warning: quantities were netted against warehouse stock and
+          pending orders at creation time and are never re-netted — a delivery
+          or restock since then makes them over- or under-buy. */}
+      {isDraft && staleDays >= 2 && (
+        <div className="bg-amber-500/10 border border-amber-500/30 text-amber-400 rounded-lg px-4 py-3 text-sm">
+          These quantities were calculated {staleDays} days ago and haven't been
+          re-checked against the warehouse since. If stock has arrived or been
+          picked since then, re-plan from{' '}
+          <Link to="/orders/purchase?generate=1" className="underline hover:text-amber-300">Plan Buy</Link>{' '}
+          before creating POs.
         </div>
       )}
 

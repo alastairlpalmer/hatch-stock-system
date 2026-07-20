@@ -721,6 +721,9 @@ router.get('/removals', asyncHandler(async (req, res) => {
 const stockCheckSchema = z.object({
   locationId: z.string().min(1),
   performedBy: z.string().nullish(),
+  // When the phone opened the count form — lets the server reject a submit
+  // that would clobber a restock recorded while the count was in progress.
+  startedAt: z.coerce.date().optional(),
   items: z.array(
     z.object({
       sku: skuSchema,
@@ -733,7 +736,26 @@ const stockCheckSchema = z.object({
 });
 
 router.post('/stock-checks', asyncHandler(async (req, res) => {
-  const { locationId, items, performedBy } = stockCheckSchema.parse(req.body);
+  const { locationId, items, performedBy, startedAt } = stockCheckSchema.parse(req.body);
+
+  // A stock check absolute-sets quantities to the counted values. If a restock
+  // was confirmed AFTER the counter started (count at 9am, restock at 10am,
+  // submit at 11am), those counted values pre-date the restock and submitting
+  // would silently erase it — under-stating the machine and triggering
+  // spurious re-orders. Reject with 409 so the counter re-checks.
+  if (startedAt) {
+    const midCountRestock = await prisma.restockRecord.findFirst({
+      where: { locationId, createdAt: { gt: startedAt } },
+      orderBy: { createdAt: 'desc' },
+      select: { createdAt: true },
+    });
+    if (midCountRestock) {
+      return res.status(409).json({
+        error: 'This machine was restocked while the count was in progress — the counted figures are out of date. Re-check the affected shelves and submit again.',
+        restockedAt: midCountRestock.createdAt,
+      });
+    }
+  }
 
   const stockCheck = await prisma.$transaction(async (tx) => {
     const skus = items.map((i) => i.sku);
