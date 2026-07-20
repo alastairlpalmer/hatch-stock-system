@@ -1,38 +1,42 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Suspense, lazy } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useStock } from './context/StockContext';
 import { useAuth } from './context/AuthContext';
 
-// Page components
+// Eager pages: the two first-paint screens (desktop Dashboard, mobile home) —
+// everything else code-splits per route so warehouse phones don't download
+// the admin/analytics/planogram code just to open the app.
 import Dashboard from './components/pages/Dashboard';
-import SalesOverview from './components/pages/SalesOverview';
-import LocationStock from './components/pages/LocationStock';
-import Orders from './components/pages/Orders';
-import ReceiveStock from './components/pages/ReceiveStock';
-import Inventory from './components/pages/Inventory';
-import RemoveStock from './components/pages/RemoveStock';
-import History from './components/pages/History';
-import Shrinkage from './components/pages/Shrinkage';
-import Admin from './components/pages/Admin';
-import RestockingDocs from './components/pages/RestockingDocs';
-import Login from './components/pages/Login';
-import Users from './components/pages/Users';
-import BuyingLists from './components/pages/orders/BuyingLists';
-import BuyingListDetail from './components/pages/orders/BuyingListDetail';
-import SharedBuyingList from './components/pages/SharedBuyingList';
-import RestockSheet from './components/pages/RestockSheet';
-import PickLists from './components/pages/restock/PickLists';
-import PickListDetail from './components/pages/restock/PickListDetail';
-import StockCheck from './components/pages/restock/StockCheck';
-import Account from './components/pages/Account';
 import MobileHome from './components/pages/mobile/MobileHome';
-import MorePage from './components/pages/mobile/MorePage';
-import OrdersHub from './components/pages/orders/OrdersHub';
-import OrdersLanding from './components/pages/orders/OrdersLanding';
 
-// Parent layouts
+// Lazy page components — each becomes its own chunk, fetched on first visit.
+const SalesOverview = lazy(() => import('./components/pages/SalesOverview'));
+const LocationStock = lazy(() => import('./components/pages/LocationStock'));
+const Orders = lazy(() => import('./components/pages/Orders'));
+const ReceiveStock = lazy(() => import('./components/pages/ReceiveStock'));
+const Inventory = lazy(() => import('./components/pages/Inventory'));
+const RemoveStock = lazy(() => import('./components/pages/RemoveStock'));
+const History = lazy(() => import('./components/pages/History'));
+const Shrinkage = lazy(() => import('./components/pages/Shrinkage'));
+const Admin = lazy(() => import('./components/pages/Admin'));
+const RestockingDocs = lazy(() => import('./components/pages/RestockingDocs'));
+const Login = lazy(() => import('./components/pages/Login'));
+const Users = lazy(() => import('./components/pages/Users'));
+const BuyingLists = lazy(() => import('./components/pages/orders/BuyingLists'));
+const BuyingListDetail = lazy(() => import('./components/pages/orders/BuyingListDetail'));
+const SharedBuyingList = lazy(() => import('./components/pages/SharedBuyingList'));
+const RestockSheet = lazy(() => import('./components/pages/RestockSheet'));
+const PickLists = lazy(() => import('./components/pages/restock/PickLists'));
+const PickListDetail = lazy(() => import('./components/pages/restock/PickListDetail'));
+const StockCheck = lazy(() => import('./components/pages/restock/StockCheck'));
+const Account = lazy(() => import('./components/pages/Account'));
+const MorePage = lazy(() => import('./components/pages/mobile/MorePage'));
+const OrdersHub = lazy(() => import('./components/pages/orders/OrdersHub'));
+const OrdersLanding = lazy(() => import('./components/pages/orders/OrdersLanding'));
+const SuppliersConfig = lazy(() => import('./components/pages/orders/SuppliersConfig'));
+
+// Parent layouts — small, stay eager so tab chrome renders instantly.
 import OrdersLayout from './components/pages/orders/OrdersLayout';
-import SuppliersConfig from './components/pages/orders/SuppliersConfig';
 import RestockLayout from './components/pages/restock/RestockLayout';
 import RestockHome from './components/pages/restock/RestockHome';
 import SupportLayout from './components/pages/support/SupportLayout';
@@ -66,24 +70,37 @@ function AdminOnly({ children }) {
   return children;
 }
 
+// Chunk-load fallback for in-app route changes: keeps the shell (sidebar,
+// header, bottom nav) in place and just holds the content area briefly.
+function RouteFallback() {
+  return (
+    <div className="flex items-center justify-center py-24">
+      <div className="w-8 h-8 border-2 border-zinc-700 border-t-emerald-500 rounded-full animate-spin" aria-label="Loading" />
+    </div>
+  );
+}
+
 function App() {
   return (
     <ErrorBoundary>
-      <Routes>
-        <Route path="/login" element={<Login />} />
-        {/* Public share view — the unguessable token is the credential, so this
-            deliberately sits outside RequireAuth and the app chrome. */}
-        <Route path="/share/buying-list/:token" element={<SharedBuyingList />} />
-        <Route path="/share/restock-sheet/:token" element={<RestockSheet />} />
-        <Route
-          path="/*"
-          element={
-            <RequireAuth>
-              <AppLayout />
-            </RequireAuth>
-          }
-        />
-      </Routes>
+      {/* Outer Suspense covers the chrome-less routes (login, share views). */}
+      <Suspense fallback={<LoadingScreen />}>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          {/* Public share view — the unguessable token is the credential, so this
+              deliberately sits outside RequireAuth and the app chrome. */}
+          <Route path="/share/buying-list/:token" element={<SharedBuyingList />} />
+          <Route path="/share/restock-sheet/:token" element={<RestockSheet />} />
+          <Route
+            path="/*"
+            element={
+              <RequireAuth>
+                <AppLayout />
+              </RequireAuth>
+            }
+          />
+        </Routes>
+      </Suspense>
     </ErrorBoundary>
   );
 }
@@ -153,6 +170,7 @@ function AppLayout() {
                 </button>
               </div>
             )}
+            <Suspense fallback={<RouteFallback />}>
             <Routes>
               <Route path="/" element={<Dashboard />} />
               <Route path="/home" element={<MobileHome />} />
@@ -213,6 +231,7 @@ function AppLayout() {
 
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
+            </Suspense>
           </div>
         </main>
 
