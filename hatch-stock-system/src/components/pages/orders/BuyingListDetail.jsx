@@ -195,11 +195,22 @@ export default function BuyingListDetail() {
 
   // ===== Actions =====
 
+  // Copying the text or the link counts as sharing — stamp sharedAt so the
+  // create-orders share gate knows the list has been put in front of someone.
+  // Fire-and-forget: a failed stamp must not break the copy.
+  const stampShared = () => {
+    if (list?.sharedAt) return;
+    buyingListsService.markShared(list.id)
+      .then((res) => setList((prev) => (prev ? { ...prev, sharedAt: res?.sharedAt || new Date().toISOString() } : prev)))
+      .catch(() => {});
+  };
+
   const copyAsText = async () => {
     try {
       await navigator.clipboard.writeText(listAsText(list));
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
+      stampShared();
     } catch (err) {
       console.error('Copy failed:', err);
       setBanner({ type: 'error', message: 'Could not copy to clipboard.' });
@@ -211,6 +222,7 @@ export default function BuyingListDetail() {
       await navigator.clipboard.writeText(buyingListsService.shareUrl(list));
       setShareCopied(true);
       setTimeout(() => setShareCopied(false), 2500);
+      stampShared();
     } catch (err) {
       console.error('Copy failed:', err);
       setBanner({ type: 'error', message: 'Could not copy the share link.' });
@@ -238,9 +250,10 @@ export default function BuyingListDetail() {
     }
   };
 
-  const createOrders = async () => {
+  const createOrders = async ({ force = false } = {}) => {
     setActionBusy(true);
     setBanner(null);
+    let keepConfirm = false;
     try {
       // Flush any pending edits before the server snapshots the items.
       clearTimeout(saveTimerRef.current);
@@ -249,7 +262,7 @@ export default function BuyingListDetail() {
         items: list.items,
         notes: list.notes || '',
       });
-      const res = await buyingListsService.createOrders(list.id);
+      const res = await buyingListsService.createOrders(list.id, { force });
       // Server responses here don't carry supplierMeta — keep the loaded copy.
       if (res.buyingList) setList(prev => ({ ...res.buyingList, supplierMeta: prev?.supplierMeta }));
       else setList(prev => ({ ...prev, status: 'ordered', orderIds: (res.orders || []).map(o => o.id) }));
@@ -258,6 +271,12 @@ export default function BuyingListDetail() {
       // Pull the new POs into shared state so they show on the Orders page.
       try { await refresh(); } catch { /* non-fatal */ }
     } catch (err) {
+      if (err.response?.status === 409 && err.response?.data?.code === 'NOT_SHARED') {
+        // Weekly rule: share the list before ordering. Offer the override.
+        setConfirmAction('createOrdersUnshared');
+        keepConfirm = true;
+        return;
+      }
       console.error('Create orders failed:', err);
       setBanner({
         type: 'error',
@@ -265,7 +284,7 @@ export default function BuyingListDetail() {
       });
     } finally {
       setActionBusy(false);
-      setConfirmAction(null);
+      if (!keepConfirm) setConfirmAction(null);
     }
   };
 
@@ -487,11 +506,29 @@ export default function BuyingListDetail() {
         <div className="flex-1" />
 
         {isDraft && (
-          confirmAction === 'createOrders' ? (
+          confirmAction === 'createOrdersUnshared' ? (
+            <span className="flex items-center gap-2 text-sm">
+              <span className="text-amber-400">List hasn't been shared yet — create POs anyway?</span>
+              <button
+                onClick={() => createOrders({ force: true })}
+                disabled={actionBusy}
+                className="px-3 py-2 bg-amber-500 text-zinc-900 rounded text-sm font-medium hover:bg-amber-400 disabled:opacity-50"
+              >
+                {actionBusy ? 'Creating…' : 'Create anyway'}
+              </button>
+              <button
+                onClick={() => setConfirmAction(null)}
+                disabled={actionBusy}
+                className="px-3 py-2 bg-zinc-800 text-zinc-400 rounded text-sm hover:bg-zinc-700"
+              >
+                Share first
+              </button>
+            </span>
+          ) : confirmAction === 'createOrders' ? (
             <span className="flex items-center gap-2 text-sm">
               <span className="text-zinc-400">Create {groups.length} PO{groups.length === 1 ? '' : 's'}?</span>
               <button
-                onClick={createOrders}
+                onClick={() => createOrders()}
                 disabled={actionBusy}
                 className="px-3 py-2 bg-emerald-500 text-zinc-900 rounded text-sm font-medium hover:bg-emerald-400 disabled:opacity-50"
               >

@@ -47,10 +47,17 @@ export const buyingListsService = {
   /**
    * Create one pending PO per supplier from the list's current items.
    * Marks the list `ordered` and stores the created order ids.
-   * Returns { orders: [...], buyingList }.
+   * Returns { orders: [...], buyingList }. A never-shared list answers 409
+   * code NOT_SHARED unless force is true (the weekly rule is share-first).
    */
-  createOrders: async (id) => {
-    const response = await api.post(`/buying-lists/${id}/create-orders`);
+  createOrders: async (id, { force = false } = {}) => {
+    const response = await api.post(`/buying-lists/${id}/create-orders`, force ? { force } : {});
+    return response.data;
+  },
+
+  /** Stamp sharedAt — called when the share link or list text is copied. */
+  markShared: async (id) => {
+    const response = await api.post(`/buying-lists/${id}/shared`);
     return response.data;
   },
 
