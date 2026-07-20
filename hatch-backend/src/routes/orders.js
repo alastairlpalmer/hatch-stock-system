@@ -3,6 +3,7 @@ import { z } from 'zod';
 import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { batchInputFromReceivedItem, validateReceiptLines } from '../utils/receiving.js';
+import { exclusiveEndBound } from '../utils/date-range.js';
 import { FRESH_MEAL_PLACEHOLDER_CATEGORY } from '../utils/fresh-meal-placeholders.js';
 import { recomputeWarehouseStock } from '../utils/inventory-stock.js';
 import {
@@ -22,7 +23,9 @@ router.get('/', asyncHandler(async (req, res) => {
   if (startDate || endDate) {
     where.createdAt = {};
     if (startDate) where.createdAt.gte = new Date(startDate);
-    if (endDate) where.createdAt.lte = new Date(endDate);
+    // Day-inclusive: a date-only endDate parses to midnight at the START of
+    // the day, which silently excluded that day's orders.
+    if (endDate) where.createdAt.lt = exclusiveEndBound(endDate);
   }
 
   const orders = await prisma.order.findMany({

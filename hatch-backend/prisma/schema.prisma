@@ -424,6 +424,10 @@ model BuyingList {
   status     String    @default("draft") // draft, ordered, archived
   targetDate DateTime? @map("target_date") // the restock Monday this buy covers
   shareToken String    @unique @default(uuid()) @map("share_token")
+  // First time the list was shared (public view opened, or a share/copy
+  // action taken). create-orders warns while null — the weekly rule is
+  // "share the list before ordering". See manual-sql/030_buying_list_shared_at.sql.
+  sharedAt   DateTime? @map("shared_at")
   items      Json
   notes      String?
   orderIds   Json?     @map("order_ids") // POs created from this list

@@ -108,7 +108,8 @@ router.get('/movements/:machineId', asyncHandler(async (req, res) => {
   }
 
   const machineId = parseInt(req.params.machineId);
-  const days = parseInt(req.query.days) || 7;
+  if (isNaN(machineId)) return res.status(400).json({ error: 'Invalid machineId' });
+  const days = Math.min(parseInt(req.query.days) || 7, 365);
   const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
   const { results } = await vendliveApi.getStockMovements(config, { machineId, startDate });
@@ -142,6 +143,7 @@ router.get('/live/:machineId', asyncHandler(async (req, res) => {
   }
 
   const machineId = parseInt(req.params.machineId);
+  if (isNaN(machineId)) return res.status(400).json({ error: 'Invalid machineId' });
   const channels = await vendliveApi.getChannels(config, { machineId });
 
   // Aggregate stock per product
@@ -284,6 +286,7 @@ router.get('/discover/movements/:machineId', asyncHandler(async (req, res) => {
   }
 
   const machineId = parseInt(req.params.machineId);
+  if (isNaN(machineId)) return res.status(400).json({ error: 'Invalid machineId' });
   const startDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
   try {
@@ -316,6 +319,7 @@ router.get('/discover/channels/:machineId', asyncHandler(async (req, res) => {
   }
 
   const machineId = parseInt(req.params.machineId);
+  if (isNaN(machineId)) return res.status(400).json({ error: 'Invalid machineId' });
 
   try {
     const channels = await vendliveApi.getChannels(config, { machineId });

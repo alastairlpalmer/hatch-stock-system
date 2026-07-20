@@ -173,6 +173,20 @@ router.delete('/:id', asyncHandler(async (req, res) => {
   res.json({ success: true });
 }));
 
+// Mark a list as shared. Called by the frontend when the user copies the
+// share link or the list text — actions that put the list in front of the
+// warehouse/supplier without the public view necessarily being opened.
+router.post('/:id/shared', asyncHandler(async (req, res) => {
+  const list = await prisma.buyingList.findUnique({ where: { id: req.params.id } });
+  if (!list) return res.status(404).json({ error: 'Buying list not found' });
+  if (list.sharedAt) return res.json({ sharedAt: list.sharedAt });
+  const updated = await prisma.buyingList.update({
+    where: { id: list.id },
+    data: { sharedAt: new Date() },
+  });
+  res.json({ sharedAt: updated.sharedAt });
+}));
+
 // Turn a draft buying list into purchase orders — ONE pending PO per supplier
 // (items with no supplier form their own PO). expectedDate: when the supplier
 // has a configured lead time, order date + lead time; otherwise two days
@@ -182,6 +196,16 @@ router.post('/:id/create-orders', asyncHandler(async (req, res) => {
   if (!list) return res.status(404).json({ error: 'Buying list not found' });
   if (list.status !== 'draft') {
     return res.status(409).json({ error: `Buying list is already ${list.status}` });
+  }
+
+  // Weekly rule: the list is shared (warehouse/supplier have seen it) before
+  // POs are raised. Soft gate — an explicit force creates anyway, so an
+  // urgent buy is never blocked, but it can't happen by accident.
+  if (!list.sharedAt && req.body?.force !== true) {
+    return res.status(409).json({
+      error: 'This list has not been shared yet — the weekly flow is to share it before ordering. Share it, or confirm to create the POs anyway.',
+      code: 'NOT_SHARED',
+    });
   }
 
   const items = (Array.isArray(list.items) ? list.items : [])
@@ -457,6 +481,15 @@ publicBuyingListsRouter.get('/:token', asyncHandler(async (req, res) => {
     where: { shareToken: req.params.token },
   });
   if (!list) return res.status(404).json({ error: 'Not found' });
+
+  // First open of the share view proves the list reached someone — stamp it
+  // (fire-and-forget; a failure here must not break the read-only view).
+  if (!list.sharedAt) {
+    prisma.buyingList.update({
+      where: { id: list.id },
+      data: { sharedAt: new Date() },
+    }).catch(() => {});
+  }
 
   const items = (Array.isArray(list.items) ? list.items : []).filter((i) => (i.quantity || 0) > 0);
   let total = 0;

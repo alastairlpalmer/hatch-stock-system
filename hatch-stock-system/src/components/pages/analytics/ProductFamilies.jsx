@@ -6,8 +6,9 @@ import { formatCurrency } from '../../../utils/helpers';
 /**
  * Product families: parent products ("Barebells", "Estate Dairy") rolled up
  * from their flavour variants, expandable to per-flavour sell rates. The share
- * bar is each flavour's slice of the family's units — the number that will
- * drive the suggested order split in a later phase.
+ * bar is each flavour's slice of the family's units — the same split that
+ * drives the suggested per-flavour quantities in Plan Buy (splitParentNeed in
+ * the backend's order-suggestions service).
  */
 export default function ProductFamilies({ families, stockKnown }) {
   const [openId, setOpenId] = useState(null);
