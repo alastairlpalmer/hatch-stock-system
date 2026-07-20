@@ -226,14 +226,19 @@ export default function AdminSalesImport() {
         await bulkImportProducts(existingProducts);
       }
 
+      let serverResult = null;
       if (newSales.length > 0) {
-        await importSales(newSales, file.name);
+        serverResult = await importSales(newSales, file.name);
       }
 
       setImportResult({
         success: true,
-        salesImported: newSales.length,
-        salesSkipped: sales.length - newSales.length,
+        // Prefer the server's honest counts (it validates per row); fall back
+        // to the client-side estimate in offline mode.
+        salesImported: serverResult?.recordsAdded ?? newSales.length,
+        salesSkipped: serverResult?.recordsSkipped ?? (sales.length - newSales.length),
+        invalidRows: serverResult?.invalidRows || 0,
+        rowErrors: serverResult?.rowErrors || [],
         productsAdded: newProductCount,
         productsUpdated: updatedProductCount
       });
@@ -386,6 +391,17 @@ export default function AdminSalesImport() {
               {importResult.productsAdded > 0 && ` ${importResult.productsAdded} new products added.`}
               {importResult.productsUpdated > 0 && ` ${importResult.productsUpdated} products updated.`}
               {importResult.stockSynced && ` Stock updated for ${importResult.locationsUpdated} location(s).`}
+              {importResult.invalidRows > 0 && (
+                <div className="mt-2 text-amber-400">
+                  {importResult.invalidRows} row{importResult.invalidRows === 1 ? ' was' : 's were'} rejected:
+                  <ul className="list-disc ml-5 mt-1">
+                    {(importResult.rowErrors || []).slice(0, 5).map((r) => (
+                      <li key={r.row}>Row {r.row}{r.id ? ` (${r.id})` : ''} — {r.error}</li>
+                    ))}
+                    {importResult.invalidRows > 5 && <li>… and {importResult.invalidRows - 5} more</li>}
+                  </ul>
+                </div>
+              )}
             </div>
           ) : (
             <div className="text-red-300 text-sm">Import failed: {importResult.error}</div>

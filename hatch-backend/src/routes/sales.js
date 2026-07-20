@@ -66,7 +66,9 @@ router.get('/', asyncHandler(async (req, res) => {
   const sales = await prisma.sale.findMany({
     where,
     orderBy: { timestamp: 'desc' },
-    take: parseInt(limit),
+    // Clamped: `?limit=abc` gave Prisma take:NaN (500), and an unbounded
+    // limit could pull the whole table into memory.
+    take: Math.min(parseInt(limit) || 1000, 10000),
     include: {
       product: {
         select: { category: true }
@@ -84,6 +86,23 @@ router.get('/', asyncHandler(async (req, res) => {
   res.json(salesWithCategory);
 }));
 
+// One CSV sale row. `charged` and `timestamp` are required non-null columns
+// on the sales table — unchecked, a single bad row failed the whole
+// createMany batch with a raw Prisma 500 and no clue which row.
+const importSaleSchema = z.object({
+  id: z.coerce.string().min(1),
+  sku: z.coerce.string().min(1),
+  productName: z.string().nullish(),
+  quantity: z.coerce.number().int().positive().optional(),
+  charged: z.coerce.number().finite(),
+  costPrice: z.coerce.number().finite().nullish(),
+  paymentMethod: z.string().nullish(),
+  locationName: z.string().nullish(),
+  machineName: z.string().nullish(),
+  category: z.string().nullish(),
+  timestamp: z.coerce.date(),
+});
+
 // Import sales from CSV data
 router.post('/import', asyncHandler(async (req, res) => {
   const { sales, filename } = req.body;
@@ -92,7 +111,24 @@ router.post('/import', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'Sales array required' });
   }
 
-  const validSales = sales.filter(s => s?.id && s?.sku);
+  // Per-row validation: bad rows are reported back with their index and
+  // reason instead of aborting the whole import (mirrors the products.js
+  // CSV import). Valid rows proceed.
+  const validSales = [];
+  const rowErrors = [];
+  sales.forEach((row, idx) => {
+    const parsed = importSaleSchema.safeParse(row);
+    if (parsed.success) {
+      validSales.push(parsed.data);
+    } else {
+      const first = parsed.error.errors[0];
+      rowErrors.push({
+        row: idx + 1,
+        id: row?.id ?? null,
+        error: first ? `${first.path.join('.')}: ${first.message}` : 'invalid row',
+      });
+    }
+  });
 
   // Bulk de-duplicate against existing sale IDs (was one query per row)
   const existingIds = new Set(
@@ -112,12 +148,16 @@ router.post('/import', asyncHandler(async (req, res) => {
     const timestamps = newSales.map(s => new Date(s.timestamp).getTime()).filter(t => !isNaN(t));
     if (timestamps.length > 0) {
       const PAD = 10 * 60 * 1000;
+      // reduce, not Math.min(...spread) — a six-figure row count blows the
+      // argument limit / call stack with a spread.
+      const minTs = timestamps.reduce((a, b) => (b < a ? b : a));
+      const maxTs = timestamps.reduce((a, b) => (b > a ? b : a));
       const existingVendlive = await prisma.sale.findMany({
         where: {
           id: { startsWith: 'vl-' },
           timestamp: {
-            gte: new Date(Math.min(...timestamps) - PAD),
-            lte: new Date(Math.max(...timestamps) + PAD),
+            gte: new Date(minTs - PAD),
+            lte: new Date(maxTs + PAD),
           },
         },
         select: { id: true, sku: true, timestamp: true },
@@ -195,6 +235,10 @@ router.post('/import', asyncHandler(async (req, res) => {
     recordsTotal: sales.length,
     duplicatesOfVendliveSales: crossSourceSkipped,
     newProducts: productRows.map(p => p.sku),
+    // Rows rejected by validation, with their 1-based position and reason —
+    // capped so a wholly-broken file doesn't balloon the response.
+    invalidRows: rowErrors.length,
+    rowErrors: rowErrors.slice(0, 50),
   });
 }));
 
@@ -414,7 +458,8 @@ router.get('/daily', asyncHandler(async (req, res) => {
     start = new Date(startDate);
   } else {
     start = new Date();
-    start.setDate(start.getDate() - parseInt(days));
+    // `?days=abc` gave setDate(NaN) → Invalid Date → query 500. Clamp too.
+    start.setDate(start.getDate() - Math.min(parseInt(days) || 30, 3650));
   }
   // Pass the raw endDate through so date-only strings stay day-inclusive
   // (a pre-converted Date would read as an exact instant).
@@ -453,7 +498,8 @@ router.get('/daily-by-category', asyncHandler(async (req, res) => {
     start = new Date(startDate);
   } else {
     start = new Date();
-    start.setDate(start.getDate() - parseInt(days));
+    // Same NaN/size clamp as /daily.
+    start.setDate(start.getDate() - Math.min(parseInt(days) || 30, 3650));
   }
   // Raw endDate for the same day-inclusive reason as /daily above.
   const end = endDate || new Date();
@@ -496,7 +542,7 @@ router.get('/by-product', asyncHandler(async (req, res) => {
     WHERE ${where}
     GROUP BY s.sku
     ORDER BY revenue DESC
-    LIMIT ${parseInt(limit)}
+    LIMIT ${Math.min(parseInt(limit) || 50, 2000)}
   `;
 
   const products = rows.map(p => ({
