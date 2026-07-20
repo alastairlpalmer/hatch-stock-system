@@ -72,6 +72,28 @@ function earliestChannelExpiry(channels) {
 }
 
 /**
+ * Zero LocationStock rows for SKUs VendLive no longer reports for a machine.
+ * A product delisted from the machine (channel deleted or product unassigned)
+ * never appears in the channel report again, so the upsert loop would leave
+ * its row frozen at the last synced quantity/expiry — a ghost row that keeps
+ * the Dashboard's machine-expiry alert alive forever. Skipped when the report
+ * is empty: an API hiccup returning no channels must not wipe the machine.
+ * Returns the number of rows cleared.
+ */
+export async function clearDelistedRows(locationId, reportedSkus) {
+  if (!reportedSkus || reportedSkus.length === 0) return 0;
+  const { count } = await prisma.locationStock.updateMany({
+    where: {
+      locationId,
+      sku: { notIn: reportedSkus },
+      OR: [{ quantity: { not: 0 } }, { earliestExpiry: { not: null } }],
+    },
+    data: { quantity: 0, earliestExpiry: null },
+  });
+  return count;
+}
+
+/**
  * Sync stock for a single machine.
  * Pulls channel data from VendLive, compares to Hatch LocationStock,
  * updates LocationStock to match VendLive, and calculates shrinkage.
@@ -179,7 +201,8 @@ export async function syncMachineStock(vendliveMachineId, locationId, config, sy
 
     // Earliest expiry among this SKU's machine channels — refreshed wholesale
     // on every sync (null when VendLive reports none), so a cleared machine
-    // doesn't keep a stale alert. Rows the sync doesn't touch keep theirs.
+    // doesn't keep a stale alert. SKUs missing from the report entirely are
+    // zeroed in step 5b (clearDelistedRows).
     const earliestExpiry = earliestChannelExpiry(vl.channels);
 
     upsertOperations.push(
@@ -204,7 +227,21 @@ export async function syncMachineStock(vendliveMachineId, locationId, config, sy
     }
   }
 
-  // 5b. Mirror the planogram into LocationAssignment (+ blank maxStock fills
+  // 5b. Zero rows for SKUs the machine no longer stocks (ghost-row cleanup —
+  // see clearDelistedRows). Fail-soft like the mirror: stock levels for
+  // reported SKUs are the primary product of this sync, and a failed cleanup
+  // self-heals on the next run.
+  let delistedCleared = 0;
+  try {
+    delistedCleared = await clearDelistedRows(locationId, allSkus);
+    if (delistedCleared > 0) {
+      console.log(`Stock sync: zeroed ${delistedCleared} delisted SKU row(s) for location ${locationId}`);
+    }
+  } catch (err) {
+    console.error(`Stock sync: delisted-row cleanup failed for location ${locationId}: ${err.message}`);
+  }
+
+  // 5c. Mirror the planogram into LocationAssignment (+ blank maxStock fills
   // from channel idealCapacity). Isolated: stock levels are the primary
   // product of this sync — a mirror failure is recorded in metadata and never
   // fails the sync; assignments self-heal on the next run.
@@ -240,6 +277,7 @@ export async function syncMachineStock(vendliveMachineId, locationId, config, sy
       metadata: {
         channelCount: channels.length,
         productCount: Object.keys(vendliveStock).length,
+        delistedCleared,
         planogram,
         items: items.filter(i => i.variance !== 0), // Only store variance items in metadata
       },

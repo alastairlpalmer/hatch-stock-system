@@ -1,5 +1,19 @@
-import { describe, it, expect } from 'vitest';
-import { parseRestockTypes, isRestockMovement, extractChannelSkus, hasPlanogramDrift } from './vendlive-stock.js';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+vi.mock('../utils/db.js', () => ({
+  default: {
+    locationStock: { updateMany: vi.fn() },
+  },
+}));
+
+import prisma from '../utils/db.js';
+import {
+  parseRestockTypes,
+  isRestockMovement,
+  clearDelistedRows,
+  extractChannelSkus,
+  hasPlanogramDrift,
+} from './vendlive-stock.js';
 
 describe('parseRestockTypes', () => {
   it('splits, trims and lowercases the configured list', () => {
@@ -36,6 +50,33 @@ describe('isRestockMovement', () => {
 
   it('legacy default "In" still matches VendLive "In" movements', () => {
     expect(isRestockMovement('In', parseRestockTypes(undefined))).toBe(true);
+  });
+});
+
+describe('clearDelistedRows', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prisma.locationStock.updateMany.mockResolvedValue({ count: 2 });
+  });
+
+  it('zeroes quantity and expiry for rows not in the reported SKU list', async () => {
+    const cleared = await clearDelistedRows('loc-1', ['A', 'B']);
+
+    expect(cleared).toBe(2);
+    expect(prisma.locationStock.updateMany).toHaveBeenCalledWith({
+      where: {
+        locationId: 'loc-1',
+        sku: { notIn: ['A', 'B'] },
+        OR: [{ quantity: { not: 0 } }, { earliestExpiry: { not: null } }],
+      },
+      data: { quantity: 0, earliestExpiry: null },
+    });
+  });
+
+  it('does NOT touch the database when the report is empty (API hiccup must not wipe the machine)', async () => {
+    expect(await clearDelistedRows('loc-1', [])).toBe(0);
+    expect(await clearDelistedRows('loc-1', undefined)).toBe(0);
+    expect(prisma.locationStock.updateMany).not.toHaveBeenCalled();
   });
 });
 
