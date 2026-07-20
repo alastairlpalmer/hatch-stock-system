@@ -129,8 +129,16 @@ export async function getOrderSales(config, { startId, startDate, endDate, pageS
     }
   }
 
-  console.log(`VendLive polling: complete. ${allResults.length} total results across ${pageCount} pages`);
-  return { results: allResults, pageCount };
+  // Cap hit with more pages remaining: report it rather than pretending the
+  // fetch was complete — the caller must know the window was truncated so the
+  // backlog is drained on subsequent polls instead of silently skipped.
+  const truncated = Boolean(url);
+  if (truncated) {
+    console.warn(`VendLive polling: page cap (${MAX_PAGES}) hit with more data remaining — window truncated at ${allResults.length} results`);
+  } else {
+    console.log(`VendLive polling: complete. ${allResults.length} total results across ${pageCount} pages`);
+  }
+  return { results: allResults, pageCount, truncated };
 }
 
 /**

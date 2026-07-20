@@ -186,52 +186,54 @@ function buildSaleData(orderData, item, product, locationName, syncSource) {
 }
 
 /**
- * Decrement location stock for newly ingested sales, clamped at 0.
- * `decrements` is a Map of "locationId|sku" -> quantity.
- * Idempotency comes from the caller: only sales seen for the FIRST time
- * contribute to this map, so re-syncs never double-decrement.
+ * Prisma operations that decrement a location's stock for a newly ingested
+ * sale, clamped at 0. Returned as an OP ARRAY so callers include them in the
+ * SAME $transaction as the sale insert — a decrement applied after the insert
+ * committed used to be lost forever if the process died in between (the
+ * re-poll saw the sale as existing and never replayed the decrement).
  */
-async function applySaleStockDecrements(decrements) {
-  for (const [key, qty] of decrements) {
-    const [locationId, sku] = key.split('|');
-    try {
-      await prisma.$transaction([
-        prisma.locationStock.upsert({
-          where: { locationId_sku: { locationId, sku } },
-          // No tracked stock yet at this location — start the row at 0
-          create: { locationId, sku, quantity: 0 },
-          update: { quantity: { decrement: qty } },
-        }),
-        prisma.locationStock.updateMany({
-          where: { locationId, sku, quantity: { lt: 0 } },
-          data: { quantity: 0 },
-        }),
-      ]);
-    } catch (err) {
-      console.error(`Sale stock decrement failed for location ${locationId}, sku ${sku}:`, err.message);
-    }
-  }
+function saleStockDecrementOps(locationId, sku, qty) {
+  return [
+    prisma.locationStock.upsert({
+      where: { locationId_sku: { locationId, sku } },
+      // No tracked stock yet at this location — start the row at 0
+      create: { locationId, sku, quantity: 0 },
+      update: { quantity: { decrement: qty } },
+    }),
+    prisma.locationStock.updateMany({
+      where: { locationId, sku, quantity: { lt: 0 } },
+      data: { quantity: 0 },
+    }),
+  ];
 }
 
 /**
- * Restore location stock for sales that were refunded AFTER first ingest
- * (mirror image of applySaleStockDecrements — same "locationId|sku" -> qty map
- * shape). No clamp needed for increments. Idempotency comes from the caller:
- * only isRefunded false→true FLIPS contribute, so re-syncs never double-restore.
+ * Mirror image of saleStockDecrementOps for refund flips (isRefunded
+ * false→true restores the unit). No clamp needed for increments. Same
+ * include-in-the-caller's-transaction contract.
  */
-async function applySaleStockIncrements(increments) {
+function saleStockIncrementOps(locationId, sku, qty) {
+  return [
+    prisma.locationStock.upsert({
+      where: { locationId_sku: { locationId, sku } },
+      create: { locationId, sku, quantity: qty },
+      update: { quantity: { increment: qty } },
+    }),
+  ];
+}
+
+/** Expand a "locationId|sku" -> qty map into transaction ops. */
+function stockOpsFromMaps(decrements, increments) {
+  const ops = [];
+  for (const [key, qty] of decrements) {
+    const [locationId, sku] = key.split('|');
+    ops.push(...saleStockDecrementOps(locationId, sku, qty));
+  }
   for (const [key, qty] of increments) {
     const [locationId, sku] = key.split('|');
-    try {
-      await prisma.locationStock.upsert({
-        where: { locationId_sku: { locationId, sku } },
-        create: { locationId, sku, quantity: qty },
-        update: { quantity: { increment: qty } },
-      });
-    } catch (err) {
-      console.error(`Refund stock restore failed for location ${locationId}, sku ${sku}:`, err.message);
-    }
+    ops.push(...saleStockIncrementOps(locationId, sku, qty));
   }
+  return ops;
 }
 
 // ============ MACHINE MAPPING RESOLUTION ============
@@ -350,8 +352,6 @@ async function quarantineUnknownSkuSale(orderData, item, locationName, syncSourc
  */
 export async function processVendliveOrder(orderData, syncSource, config) {
   const result = { created: 0, skipped: 0, quarantined: 0, errored: 0, errors: [] };
-  const decrements = new Map();
-  const increments = new Map();
   const productMap = new Map();
   const pricedItems = [];
 
@@ -424,31 +424,35 @@ export async function processVendliveOrder(orderData, syncSource, config) {
         // refunded in VendLive after first ingest must not stay frozen).
         const nowRefunded = item.isRefunded || false;
         if (existing.isRefunded !== nowRefunded) {
-          await prisma.sale.update({
-            where: { id: existing.id },
-            data: { isRefunded: nowRefunded, vendStatus: item.vendStatusName || null },
-          });
           // Refund flip false→true: the unit never left (or came back), so
-          // restore the mapped location's stock — mirror of the ingest decrement.
-          if (!existing.isRefunded && nowRefunded && locationId) {
-            const key = `${locationId}|${product.sku}`;
-            increments.set(key, (increments.get(key) || 0) + (existing.quantity || 1));
-          }
+          // restore the mapped location's stock — mirror of the ingest
+          // decrement, in the SAME transaction as the flag update so the two
+          // can never diverge.
+          const restore = !existing.isRefunded && nowRefunded && locationId
+            ? saleStockIncrementOps(locationId, product.sku, existing.quantity || 1)
+            : [];
+          await prisma.$transaction([
+            prisma.sale.update({
+              where: { id: existing.id },
+              data: { isRefunded: nowRefunded, vendStatus: item.vendStatusName || null },
+            }),
+            ...restore,
+          ]);
         }
         result.skipped++;
         continue;
       }
 
-      await prisma.sale.create({
-        data: buildSaleData(orderData, item, product, locationName, syncSource),
-      });
+      // Sale dispensed from the machine → insert it and decrement that
+      // location's stock atomically (a decrement outside this transaction was
+      // permanently lost if the process died between the two writes).
+      await prisma.$transaction([
+        prisma.sale.create({
+          data: buildSaleData(orderData, item, product, locationName, syncSource),
+        }),
+        ...(locationId ? saleStockDecrementOps(locationId, product.sku, 1) : []),
+      ]);
       result.created++;
-
-      // Sale dispensed from the machine → decrement that location's stock
-      if (locationId) {
-        const key = `${locationId}|${product.sku}`;
-        decrements.set(key, (decrements.get(key) || 0) + 1);
-      }
     } catch (err) {
       // If it's a unique constraint violation, treat as skip (duplicate)
       if (err.code === 'P2002') {
@@ -461,8 +465,6 @@ export async function processVendliveOrder(orderData, syncSource, config) {
     }
   }
 
-  await applySaleStockDecrements(decrements);
-  await applySaleStockIncrements(increments);
   await applyProductPriceUpdates(pricedItems, productMap);
 
   return result;
@@ -488,7 +490,7 @@ export async function runPollSync() {
   let highestSaleIdSeen = previousLastPollSaleId;
 
   try {
-    const { results, pageCount } = await vendliveApi.getOrderSales(config, {
+    const { results, pageCount, truncated } = await vendliveApi.getOrderSales(config, {
       startId: previousLastPollSaleId || undefined,
     });
 
@@ -497,8 +499,12 @@ export async function runPollSync() {
     // would skip sales that fail to persist. We only update it at the end if
     // every batch succeeded.
     const allItems = [];
+    let firstSaleId = null;
+    let lastSaleId = null;
     for (const entry of results) {
       const orderData = normalizePollPayload(entry);
+      if (firstSaleId === null) firstSaleId = orderData.orderSaleId;
+      lastSaleId = orderData.orderSaleId;
       if (orderData.orderSaleId > highestSaleIdSeen) {
         highestSaleIdSeen = orderData.orderSaleId;
       }
@@ -593,8 +599,6 @@ export async function runPollSync() {
     // counted re-synced duplicates as "created"), update refund status on
     // existing ones that changed, and decrement location stock for new ones.
     let anyBatchFailed = false;
-    const decrements = new Map();
-    const increments = new Map();
 
     for (let i = 0; i < allItems.length; i += BATCH_SIZE) {
       const chunk = allItems.slice(i, i + BATCH_SIZE);
@@ -643,9 +647,11 @@ export async function runPollSync() {
 
         const createRows = [];
         const refundUpdates = [];
-        // Buffered per chunk and only merged into the run-wide maps once the
-        // transaction commits — a failed chunk must contribute NO stock
-        // movements, or the re-poll would double-apply them.
+        // Stock movements ride in the SAME transaction as the sale inserts —
+        // a decrement applied after the insert committed was permanently lost
+        // if the process died in between (the re-poll saw the sale as
+        // existing and never replayed it). A failed chunk rolls back sales
+        // AND movements together, so the re-poll re-applies both.
         const chunkDecrements = new Map();
         const chunkIncrements = new Map();
 
@@ -684,13 +690,11 @@ export async function runPollSync() {
           const [createResult] = await prisma.$transaction([
             prisma.sale.createMany({ data: createRows, skipDuplicates: true }),
             ...refundUpdates,
+            ...stockOpsFromMaps(chunkDecrements, chunkIncrements),
           ]);
           totals.created += createResult.count;
           totals.skipped += createRows.length - createResult.count; // raced duplicates
         }
-
-        for (const [key, qty] of chunkDecrements) decrements.set(key, (decrements.get(key) || 0) + qty);
-        for (const [key, qty] of chunkIncrements) increments.set(key, (increments.get(key) || 0) + qty);
       } catch (err) {
         console.error(`VendLive sync: batch error at chunk ${Math.floor(i / BATCH_SIZE) + 1}: ${err.message}`);
         totals.errored += resolvable.length;
@@ -701,22 +705,30 @@ export async function runPollSync() {
       console.log(`VendLive sync: processed chunk ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(allItems.length / BATCH_SIZE)}`);
     }
 
-    // Apply stock movements for committed chunks only (failed chunks merged
-    // nothing into these maps, and the re-poll will pick them up): decrement
-    // for newly ingested sales, increment for refund flips.
-    await applySaleStockDecrements(decrements);
-    await applySaleStockIncrements(increments);
-
     // Refresh catalog pricing from this run's sales (newest sale per SKU
     // wins). Uses items from failed batches too — harmless, since the
     // refresh is idempotent and the re-poll repeats it.
     await applyProductPriceUpdates(allItems.map(({ item }) => item), productMap);
 
+    // A truncated fetch (page cap hit with more data remaining) is only safe
+    // to checkpoint past if the feed pages ASCENDING from startId — then the
+    // unfetched remainder has higher ids and the next poll continues from
+    // highestSaleIdSeen. If the window looks descending (newest first),
+    // advancing would permanently skip the unfetched middle, so hold the
+    // checkpoint and flag the run instead (inserts are idempotent, nothing is
+    // lost — it just re-fetches until the cap is raised).
+    const truncatedUnsafely = truncated
+      && firstSaleId !== null && lastSaleId !== null && firstSaleId > lastSaleId;
+    if (truncatedUnsafely) {
+      totals.errors.push(`Fetch truncated at the page cap on a descending feed — checkpoint held at ${previousLastPollSaleId} to avoid skipping unfetched sales`);
+      console.error('VendLive sync: truncated fetch appears DESCENDING — holding checkpoint to avoid losing the unfetched window');
+    }
+
     // Only advance lastPollSaleId if every batch succeeded. If any batch failed,
     // keep it where it was so the next poll re-fetches and retries (inserts are
     // idempotent via skipDuplicates). lastPollAt is always updated so the
     // scheduler knows we ran.
-    const newLastPollSaleId = anyBatchFailed
+    const newLastPollSaleId = (anyBatchFailed || truncatedUnsafely)
       ? previousLastPollSaleId
       : (highestSaleIdSeen || previousLastPollSaleId);
 
@@ -730,6 +742,13 @@ export async function runPollSync() {
 
     if (anyBatchFailed) {
       console.warn(`VendLive sync: kept lastPollSaleId at ${previousLastPollSaleId} because batch(es) failed; will retry on next poll`);
+    }
+    if (truncated) {
+      // The feed pages ascending from startId, so advancing to the highest
+      // FETCHED id is safe — the unfetched remainder has higher ids and the
+      // next poll continues from there. Surfaced here (and in the sync log)
+      // so a large backlog draining over several polls is visible, not silent.
+      console.warn(`VendLive sync: fetch window truncated at the page cap — backlog continues from sale id ${highestSaleIdSeen} on the next poll`);
     }
     if (unknownSkus.size > 0) {
       console.warn(`VendLive sync: quarantined sales for ${unknownSkus.size} unknown SKU(s) (auto-create disabled): ${[...unknownSkus].slice(0, 10).join(', ')}`);
@@ -749,6 +768,7 @@ export async function runPollSync() {
           pageCount,
           totalResults: results.length,
           quarantined: totals.quarantined,
+          ...(truncated ? { truncated: true } : {}),
           ...(unknownSkus.size > 0 ? { unknownSkus: [...unknownSkus].slice(0, 50) } : {}),
         },
       },
