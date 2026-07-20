@@ -332,7 +332,9 @@ function PrintSheet({ list, warehouseName, items }) {
         <div className="pl-short">
           <strong>Short on warehouse stock:</strong>{' '}
           {list.shortfalls
-            .map((s) => `${s.name || s.sku} (need ${s.requested}, have ${s.available})`)
+            .map((s) => s.atConfirm
+              ? `${s.name || s.sku} (need ${s.requested}, loaded ${s.loaded}${s.locationName ? ` at ${s.locationName}` : ''})`
+              : `${s.name || s.sku} (need ${s.requested}, have ${s.available})`)
             .join(' · ')}
         </div>
       )}
@@ -388,6 +390,9 @@ export default function PickListDetail() {
   // Lines where the confirm had to pull from different lots than the plan
   // shown to the packer (stock moved since generation).
   const [deviations, setDeviations] = useState(null);
+  // Confirm-time shortfalls: the server loaded what was available and reports
+  // what it couldn't cover ([{ sku, name, requested, loaded }]).
+  const [confirmShortfalls, setConfirmShortfalls] = useState(null);
 
   const [finishBusy, setFinishBusy] = useState(false);
   const [finishError, setFinishError] = useState(null);
@@ -642,6 +647,7 @@ export default function PickListDetail() {
           : {}),
       });
       setDeviations(Array.isArray(result?.deviations) ? result.deviations : null);
+      setConfirmShortfalls(Array.isArray(result?.shortfalls) ? result.shortfalls : null);
       setOpenLocId(null);
       fetchRun(id, { silent: true });
     } catch (err) {
@@ -898,6 +904,21 @@ export default function PickListDetail() {
         </div>
       )}
 
+      {/* Partial load from the last confirm — warehouse couldn't cover it all */}
+      {confirmShortfalls && confirmShortfalls.length > 0 && (
+        <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded p-3">
+          Warehouse stock couldn't cover this stop in full — the machine was
+          confirmed with what was available:{' '}
+          {confirmShortfalls.map((s, i) => (
+            <span key={s.sku}>
+              {i > 0 && ', '}
+              {s.name || s.sku} ({s.loaded}/{s.requested} loaded)
+            </span>
+          ))}
+          . The gap is journaled on the pick list's shortfall report.
+        </div>
+      )}
+
       {/* 409 conflict banner */}
       {conflict && (
         <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4">
@@ -982,12 +1003,19 @@ export default function PickListDetail() {
           </button>
           {shortfallsOpen && (
             <div className="px-4 pb-4 space-y-1">
-              {list.shortfalls.map((s) => (
-                <div key={s.sku} className="flex items-center justify-between text-xs">
-                  <span className="text-zinc-300">{s.name || s.sku}</span>
+              {list.shortfalls.map((s, i) => (
+                <div key={`${s.sku}-${i}`} className="flex items-center justify-between text-xs">
+                  <span className="text-zinc-300">
+                    {s.name || s.sku}
+                    {/* atConfirm entries were discovered at the van, per machine */}
+                    {s.atConfirm && s.locationName && (
+                      <span className="text-zinc-500"> — {s.locationName}</span>
+                    )}
+                  </span>
                   <span className="text-zinc-400 tabular-nums">
                     requested <span className="text-amber-400 font-medium">{s.requested}</span> ·
-                    available <span className="text-amber-400 font-medium">{s.available}</span>
+                    {s.atConfirm ? ' loaded ' : ' available '}
+                    <span className="text-amber-400 font-medium">{s.loaded ?? s.available}</span>
                   </span>
                 </div>
               ))}
@@ -1152,6 +1180,11 @@ export default function PickListDetail() {
                         {(loc.trimmedUnits || 0) > 0 && (
                           <span className="ml-1.5 rounded bg-amber-500/15 px-1.5 py-0.5 text-amber-400">
                             {loc.trimmedUnits} short — warehouse ran out
+                          </span>
+                        )}
+                        {loc.layoutChangedAt && !loaded && (
+                          <span className="ml-1.5 rounded bg-sky-500/15 px-1.5 py-0.5 text-sky-400">
+                            layout changed since this list was built — consider regenerating
                           </span>
                         )}
                       </p>

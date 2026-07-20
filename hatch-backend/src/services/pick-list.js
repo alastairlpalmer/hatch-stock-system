@@ -603,8 +603,10 @@ export function remainingBatchPlan(itemBatches, priorConsumed) {
  *
  * The confirmation row is created FIRST inside the transaction — its unique
  * (pickListId, locationId) constraint is the double-confirm guard, tripping
- * before any stock moves. A warehouse shortfall throws 409 with `shortfalls`
- * and rolls the whole stop back.
+ * before any stock moves. A warehouse shortfall no longer fails the stop:
+ * what's available is loaded, the gap is journaled on the confirmation and
+ * merged into the list's `shortfalls`, and the response carries `shortfalls`
+ * so the driver sees exactly what couldn't be loaded.
  *
  * `adjustedItems` lets the driver load less than planned ([{ sku, quantity }],
  * 0 ≤ quantity ≤ planned); unloaded units simply never leave warehouse stock.
@@ -715,50 +717,52 @@ export async function confirmPickListLocation(id, {
 
     const journal = [];
     const deviations = [];
+    const shortfalls = [];
     let removal = null;
     if (!legacy && lines.length > 0) {
-      const shortfalls = [];
+      // PARTIAL CONFIRM: if warehouse stock dropped since generation, load
+      // what's actually available and journal the gap instead of hard-failing
+      // the whole stop — the driver is standing at the machine and cannot
+      // regenerate the list mid-route. loadedQty is what physically moves;
+      // the shortfall is reported back and stored on the confirmation.
       for (const line of lines) {
         const plan = remainingBatchPlan(line.batches, priorConsumedBySku.get(line.sku));
         const { consumed, shortfall, offPlanQty } = await consumePlannedBatches(
           tx, list.warehouseId, line.sku, line.qty, plan,
         );
+        line.loadedQty = line.qty - shortfall;
         if (shortfall > 0) {
-          shortfalls.push({ sku: line.sku, name: line.name, requested: line.qty, available: line.qty - shortfall });
+          shortfalls.push({ sku: line.sku, name: line.name, requested: line.qty, loaded: line.loadedQty });
         }
         if (offPlanQty > 0) deviations.push({ sku: line.sku, name: line.name, offPlanQty });
-        journal.push({ sku: line.sku, name: line.name, quantity: line.qty, consumed });
+        journal.push({ sku: line.sku, name: line.name, quantity: line.loadedQty, requested: line.qty, consumed });
       }
 
-      if (shortfalls.length > 0) {
-        const err = httpError(
-          409,
-          'Warehouse stock has changed since this pick list was generated — regenerate it and try again',
-        );
-        err.shortfalls = shortfalls;
-        throw err; // rolls back the confirmation row and every consume above
+      const movedLines = journal.filter((j) => j.quantity > 0);
+      if (movedLines.length > 0) {
+        removal = await tx.stockRemoval.create({
+          data: {
+            warehouseId: list.warehouseId,
+            routeId: list.routeId,
+            routeName: list.routeName,
+            takenBy: performedBy,
+            notes: `Pick list ${list.id} — ${locationName}`,
+            items: movedLines.map(({ sku, quantity }) => ({ sku, quantity })),
+          },
+        });
       }
-
-      removal = await tx.stockRemoval.create({
-        data: {
-          warehouseId: list.warehouseId,
-          routeId: list.routeId,
-          routeName: list.routeName,
-          takenBy: performedBy,
-          notes: `Pick list ${list.id} — ${locationName}`,
-          items: journal.map(({ sku, quantity }) => ({ sku, quantity })),
-        },
-      });
       for (const line of lines) {
         await recomputeWarehouseStock(tx, list.warehouseId, line.sku);
       }
     } else if (legacy) {
       // Warehouse already drained at completion — journal the load only.
       journal.push(...lines.map(({ sku, name, qty }) => ({ sku, name, quantity: qty })));
+      for (const line of lines) line.loadedQty = line.qty;
     }
 
     let restock = null;
-    if (lines.length > 0) {
+    const loadedLines = lines.filter((l) => (l.loadedQty ?? l.qty) > 0);
+    if (loadedLines.length > 0) {
       restock = await tx.restockRecord.create({
         data: {
           locationId,
@@ -767,16 +771,17 @@ export async function confirmPickListLocation(id, {
           photoUrl,
           // productName kept for the history views (same as the old manual
           // restock wizard); reconciliation only reads sku/quantity.
-          items: lines.map(({ sku, name, qty }) => ({ sku, productName: name, quantity: qty })),
+          items: loadedLines.map((l) => ({ sku: l.sku, productName: l.name, quantity: l.loadedQty ?? l.qty })),
         },
       });
-      for (const line of lines) {
+      for (const line of loadedLines) {
+        const qty = line.loadedQty ?? line.qty;
         // Atomic increment — no read-modify-write race (same discipline as
         // POST /inventory/restocks).
         await tx.locationStock.upsert({
           where: { locationId_sku: { locationId, sku: line.sku } },
-          create: { locationId, sku: line.sku, quantity: line.qty },
-          update: { quantity: { increment: line.qty } },
+          create: { locationId, sku: line.sku, quantity: qty },
+          update: { quantity: { increment: qty } },
         });
       }
     }
@@ -790,6 +795,21 @@ export async function confirmPickListLocation(id, {
       },
     });
 
+    // Merge this stop's shortfalls onto the list so the shortfall report
+    // reflects confirm-time reality, not just generation-time trims.
+    if (shortfalls.length > 0) {
+      const existing = Array.isArray(list.shortfalls) ? list.shortfalls : [];
+      await tx.pickList.update({
+        where: { id },
+        data: {
+          shortfalls: [
+            ...existing,
+            ...shortfalls.map((s) => ({ ...s, locationId, locationName, atConfirm: true })),
+          ],
+        },
+      });
+    }
+
     let pickList = list;
     if (!legacy) {
       const confirmedCount = prior.length + 1;
@@ -797,7 +817,14 @@ export async function confirmPickListLocation(id, {
       pickList = await tx.pickList.update({ where: { id }, data: { status } });
     }
 
-    return { pickList, confirmation, restock, removal, deviations: deviations.length ? deviations : null };
+    return {
+      pickList,
+      confirmation,
+      restock,
+      removal,
+      deviations: deviations.length ? deviations : null,
+      shortfalls: shortfalls.length ? shortfalls : null,
+    };
   });
 }
 
@@ -840,7 +867,7 @@ export async function getPickListRun(id) {
     orderedIds = [...onList, ...rest];
   }
 
-  const [stockChecks, restocks, confirmations] = await Promise.all([
+  const [stockChecks, restocks, confirmations, changedLayouts, changedSlots] = await Promise.all([
     // Only checks performed since the list was created count as "this run".
     prisma.stockCheck.findMany({
       where: { locationId: { in: orderedIds }, createdAt: { gte: pickList.createdAt } },
@@ -851,7 +878,35 @@ export async function getPickListRun(id) {
       orderBy: { createdAt: 'desc' },
     }),
     prisma.pickListLocationConfirmation.findMany({ where: { pickListId: id } }),
+    // Staleness signals: the list froze its needs from the planogram at
+    // generation. A layout or slot change after createdAt means the machine
+    // may no longer match the plan — surfaced per stop so the driver knows
+    // to regenerate rather than filling to an outdated diagram.
+    prisma.machineLayout.findMany({
+      where: { locationId: { in: orderedIds }, updatedAt: { gt: pickList.createdAt } },
+      select: { locationId: true, updatedAt: true },
+    }),
+    prisma.slotAssignment.findMany({
+      where: {
+        locationId: { in: orderedIds },
+        OR: [
+          { validFrom: { gt: pickList.createdAt } },
+          { validTo: { gt: pickList.createdAt } },
+        ],
+      },
+      select: { locationId: true, validFrom: true, validTo: true },
+    }),
   ]);
+  const layoutChangedAtByLocation = new Map();
+  for (const l of changedLayouts) {
+    const cur = layoutChangedAtByLocation.get(l.locationId);
+    if (!cur || l.updatedAt > cur) layoutChangedAtByLocation.set(l.locationId, l.updatedAt);
+  }
+  for (const s of changedSlots) {
+    const stamp = [s.validFrom, s.validTo].filter(Boolean).sort().pop();
+    const cur = layoutChangedAtByLocation.get(s.locationId);
+    if (!cur || stamp > cur) layoutChangedAtByLocation.set(s.locationId, stamp);
+  }
   const confirmationByLocation = new Map(confirmations.map((c) => [c.locationId, c]));
 
   // Newest-first, so the first row seen per location is the latest.
@@ -885,6 +940,9 @@ export async function getPickListRun(id) {
       // Units this stop lost to warehouse shortfall trimming at generation —
       // >0 means the stop is knowingly under-served, not fully stocked.
       trimmedUnits: planned.reduce((sum, p) => sum + (p.trimmed || 0), 0),
+      // Set when the machine's planogram changed after this list was
+      // generated — the plan may not match the fridge any more.
+      layoutChangedAt: layoutChangedAtByLocation.get(locationId) || null,
       stockCheck: check
         ? {
             id: check.id,
