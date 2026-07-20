@@ -177,11 +177,41 @@ router.put('/:id/assigned-items', asyncHandler(async (req, res) => {
   res.json({ success: true, assignedItems: skus });
 }));
 
-// Delete location
+// Delete location.
+//
+// Restock and stock-check records reference the location without cascade
+// (operational history must survive), so a bare delete on any location that
+// has been restocked hit the FK constraint and surfaced as a blank 500.
+// Answer 409 pointing at the archive flow instead — archiving hides the
+// machine everywhere while keeping its history.
 router.delete('/:id', asyncHandler(async (req, res) => {
-  await prisma.location.delete({
-    where: { id: req.params.id },
-  });
+  const id = req.params.id;
+
+  const [restockCount, checkCount] = await Promise.all([
+    prisma.restockRecord.count({ where: { locationId: id } }),
+    prisma.stockCheck.count({ where: { locationId: id } }),
+  ]);
+  if (restockCount > 0 || checkCount > 0) {
+    const parts = [
+      restockCount > 0 && `${restockCount} restock${restockCount === 1 ? '' : 's'}`,
+      checkCount > 0 && `${checkCount} stock check${checkCount === 1 ? '' : 's'}`,
+    ].filter(Boolean).join(' and ');
+    return res.status(409).json({
+      error: `Cannot delete: this location has ${parts} in its history, which must be kept. Archive the location instead — it disappears from day-to-day screens but keeps its records.`,
+    });
+  }
+
+  try {
+    await prisma.location.delete({ where: { id } });
+  } catch (err) {
+    if (err.code === 'P2003') {
+      return res.status(409).json({ error: 'Cannot delete: this location is referenced by other records that must be kept. Archive it instead.' });
+    }
+    if (err.code === 'P2025') {
+      return res.status(404).json({ error: 'Location not found' });
+    }
+    throw err;
+  }
 
   res.json({ success: true });
 }));

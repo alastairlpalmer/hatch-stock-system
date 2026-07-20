@@ -63,8 +63,10 @@ export default function ClientReports({ locationOptions = [], routes = [] }) {
       const input = {
         clientName: form.clientName.trim(),
         siteName: form.siteName.trim(),
-        startDate: `${form.start}T00:00:00`,
-        endDate: `${form.end}T23:59:59.999`,
+        // Date-only: the backend widens endDate to the whole day; a timestamp
+        // suffix here previously made it overshoot into the following day.
+        startDate: form.start,
+        endDate: form.end,
       };
       if (form.routeId) input.routeId = form.routeId;
       else if (form.locations.length > 0) input.locationName = form.locations;

@@ -6,6 +6,7 @@ import { asyncHandler } from '../middleware/errorHandler.js';
 import { findLegacyDuplicates } from '../utils/sales-dedupe.js';
 import { guessFreshMeal } from '../services/meal-classifier.js';
 import { SALE_LOCATION_JOINS } from '../utils/sales-location.js';
+import { exclusiveEndBound } from '../utils/date-range.js';
 
 const router = express.Router();
 
@@ -22,12 +23,7 @@ function analyticsWhere({ startDate, endDate, locationName }, { includeRefunded 
   const conditions = [includeRefunded ? Prisma.sql`s.is_refunded = true` : Prisma.sql`s.is_refunded = false`];
   if (startDate) conditions.push(Prisma.sql`s."timestamp" >= ${new Date(startDate)}`);
   if (endDate) {
-    // Date-only endDate parses as midnight at the START of that day, which
-    // would drop the whole final day — bound with an exclusive < next-day so
-    // endDate stays day-inclusive. Mirrors salesWhere() in services/analytics.js.
-    const end = new Date(endDate);
-    end.setDate(end.getDate() + 1);
-    conditions.push(Prisma.sql`s."timestamp" < ${end}`);
+    conditions.push(Prisma.sql`s."timestamp" < ${exclusiveEndBound(endDate)}`);
   }
 
   const names = [].concat(locationName || []).filter(n => n && n !== 'all');
@@ -63,10 +59,7 @@ router.get('/', asyncHandler(async (req, res) => {
     where.timestamp = {};
     if (startDate) where.timestamp.gte = new Date(startDate);
     if (endDate) {
-      // Day-inclusive end bound — see analyticsWhere() above.
-      const end = new Date(endDate);
-      end.setDate(end.getDate() + 1);
-      where.timestamp.lt = end;
+      where.timestamp.lt = exclusiveEndBound(endDate);
     }
   }
 
@@ -276,10 +269,7 @@ router.get('/location-resolution', asyncHandler(async (req, res) => {
   const conditions = [Prisma.sql`s.is_refunded = false`];
   if (startDate) conditions.push(Prisma.sql`s."timestamp" >= ${new Date(startDate)}`);
   if (endDate) {
-    // Day-inclusive end bound — see analyticsWhere() above.
-    const end = new Date(endDate);
-    end.setDate(end.getDate() + 1);
-    conditions.push(Prisma.sql`s."timestamp" < ${end}`);
+    conditions.push(Prisma.sql`s."timestamp" < ${exclusiveEndBound(endDate)}`);
   }
   const where = Prisma.join(conditions, ' AND ');
 
@@ -426,7 +416,9 @@ router.get('/daily', asyncHandler(async (req, res) => {
     start = new Date();
     start.setDate(start.getDate() - parseInt(days));
   }
-  const end = endDate ? new Date(endDate) : new Date();
+  // Pass the raw endDate through so date-only strings stay day-inclusive
+  // (a pre-converted Date would read as an exact instant).
+  const end = endDate || new Date();
 
   const where = analyticsWhere({ startDate: start, endDate: end, locationName: req.query.locationName });
 
@@ -460,7 +452,8 @@ router.get('/daily-by-category', asyncHandler(async (req, res) => {
     start = new Date();
     start.setDate(start.getDate() - parseInt(days));
   }
-  const end = endDate ? new Date(endDate) : new Date();
+  // Raw endDate for the same day-inclusive reason as /daily above.
+  const end = endDate || new Date();
 
   const where = analyticsWhere({ startDate: start, endDate: end, locationName: req.query.locationName });
 

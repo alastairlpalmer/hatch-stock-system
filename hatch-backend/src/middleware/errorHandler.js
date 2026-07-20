@@ -17,6 +17,15 @@ export function errorHandler(err, req, res, next) {
     });
   }
 
+  // Foreign-key violation: the payload references a record that doesn't exist
+  // (e.g. an unknown supplierId/sku), or the record still has dependents.
+  if (err.code === 'P2003') {
+    return res.status(409).json({
+      error: 'Related record not found or still referenced',
+      field: err.meta?.field_name,
+    });
+  }
+
   // Validation errors (Zod)
   if (err.name === 'ZodError') {
     return res.status(400).json({
@@ -38,9 +47,15 @@ export function errorHandler(err, req, res, next) {
     });
   }
 
-  // Default error
-  res.status(err.status || 500).json({
-    error: err.message || 'Internal server error',
+  // Default error. Errors that set their own status are intentional messages
+  // (e.g. 400/409 thrown by route logic) and safe to pass through; anything
+  // else is an unexpected 500 — log it above but don't leak internals
+  // (Prisma/driver messages can contain table names and query fragments).
+  if (err.status) {
+    return res.status(err.status).json({ error: err.message || 'Request failed' });
+  }
+  res.status(500).json({
+    error: 'Something went wrong on the server. Try again — if it keeps happening, check the server logs.',
   });
 }
 

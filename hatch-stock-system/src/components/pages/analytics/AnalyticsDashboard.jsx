@@ -95,8 +95,10 @@ export default function AnalyticsDashboard({ locationOptions = [], routes = [] }
   const params = useMemo(() => {
     const p = {};
     if (range) {
-      p.startDate = `${range.start}T00:00:00`;
-      p.endDate = `${range.end}T23:59:59.999`;
+      // Date-only: the backend widens endDate to the whole day; a timestamp
+      // suffix here previously made it overshoot into the following day.
+      p.startDate = range.start;
+      p.endDate = range.end;
     }
     if (routeId) p.routeId = routeId;
     else if (locations.length > 0) p.locationName = locations;

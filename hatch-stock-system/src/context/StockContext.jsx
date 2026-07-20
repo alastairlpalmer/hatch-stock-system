@@ -105,6 +105,7 @@ export function StockProvider({ children }) {
       const locationParentConfig = {};
       let allStockChecks = [];
       let allRestocks = [];
+      const failedLocations = [];
 
       await Promise.all(locations.map(async (loc) => {
         try {
@@ -124,7 +125,10 @@ export function StockProvider({ children }) {
           allStockChecks = [...allStockChecks, ...stockChecks.map(sc => ({ ...sc, locationId: loc.id, locationName: loc.name }))];
           allRestocks = [...allRestocks, ...restocks.map(r => ({ ...r, locationId: loc.id, locationName: loc.name }))];
         } catch (e) {
-          console.log(`Failed to load stock/config for location ${loc.id}`);
+          // Don't let one flaky machine load silently zero its stock picture —
+          // collect and surface below so pickers don't trust incomplete data.
+          console.error(`Failed to load stock/config for location ${loc.id}`, e);
+          failedLocations.push(loc.name || loc.id);
         }
       }));
 
@@ -153,6 +157,13 @@ export function StockProvider({ children }) {
 
       setSyncStatus({ status: 'connected', lastSaved: new Date() });
       setIsOfflineMode(false);
+      if (failedLocations.length > 0) {
+        setError(
+          `Couldn't load stock for ${failedLocations.length} machine${failedLocations.length > 1 ? 's' : ''} ` +
+          `(${failedLocations.slice(0, 3).join(', ')}${failedLocations.length > 3 ? ', …' : ''}) — ` +
+          'their figures may show as empty. Reload to retry.'
+        );
+      }
     } catch (err) {
       console.log('Backend unavailable, trying local storage...');
 

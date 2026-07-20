@@ -84,11 +84,51 @@ router.put('/:id', asyncHandler(async (req, res) => {
   res.json(warehouse);
 }));
 
-// Delete warehouse
+// Delete warehouse.
+//
+// Removals and transfers reference the warehouse without cascade (movement
+// history must survive), so a bare delete on a warehouse with history hit the
+// FK constraint and surfaced as a blank 500. Orders' delivery destination
+// would silently null out. Check first and answer 409 with an explanation;
+// stock rows DO cascade, so refuse while any stock remains.
 router.delete('/:id', asyncHandler(async (req, res) => {
-  await prisma.warehouse.delete({
-    where: { id: req.params.id },
-  });
+  const id = req.params.id;
+
+  const [removalCount, transferCount, orderCount, stockUnits] = await Promise.all([
+    prisma.stockRemoval.count({ where: { warehouseId: id } }),
+    prisma.stockTransfer.count({ where: { OR: [{ fromWarehouseId: id }, { toWarehouseId: id }] } }),
+    prisma.order.count({ where: { warehouseId: id } }),
+    prisma.warehouseStock.aggregate({ where: { warehouseId: id, quantity: { gt: 0 } }, _sum: { quantity: true } }),
+  ]);
+
+  const heldUnits = stockUnits._sum.quantity || 0;
+  if (heldUnits > 0) {
+    return res.status(409).json({
+      error: `Cannot delete: this warehouse still holds ${heldUnits} unit${heldUnits === 1 ? '' : 's'} of stock. Transfer or remove the stock first.`,
+    });
+  }
+  if (removalCount > 0 || transferCount > 0 || orderCount > 0) {
+    const parts = [
+      removalCount > 0 && `${removalCount} stock removal${removalCount === 1 ? '' : 's'}`,
+      transferCount > 0 && `${transferCount} transfer${transferCount === 1 ? '' : 's'}`,
+      orderCount > 0 && `${orderCount} order${orderCount === 1 ? '' : 's'}`,
+    ].filter(Boolean).join(', ');
+    return res.status(409).json({
+      error: `Cannot delete: this warehouse has ${parts} in its history, which must be kept for reporting.`,
+    });
+  }
+
+  try {
+    await prisma.warehouse.delete({ where: { id } });
+  } catch (err) {
+    if (err.code === 'P2003') {
+      return res.status(409).json({ error: 'Cannot delete: this warehouse is referenced by other records that must be kept.' });
+    }
+    if (err.code === 'P2025') {
+      return res.status(404).json({ error: 'Warehouse not found' });
+    }
+    throw err;
+  }
 
   res.json({ success: true });
 }));

@@ -133,6 +133,22 @@ function PredictionsPanel({ selectedLocationIds, locations }) {
 function OrderCard({ order, data, onEdit, onDelete }) {
   const [expanded, setExpanded] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState(null);
+
+  const handleDelete = async () => {
+    if (deleting) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await onDelete(order.id);
+      setConfirmDelete(false);
+    } catch (e) {
+      setDeleteError(e?.response?.data?.error || e.message || 'Could not delete the order.');
+    } finally {
+      setDeleting(false);
+    }
+  };
   const supplier = data.suppliers.find(s => s.id === order.supplierId);
   const warehouse = data.warehouses.find(w => w.id === order.warehouseId);
 
@@ -255,10 +271,11 @@ function OrderCard({ order, data, onEdit, onDelete }) {
               <span className="flex items-center gap-2">
                 <span className="text-xs text-zinc-500">Delete?</span>
                 <button
-                  onClick={() => { onDelete(order.id); setConfirmDelete(false); }}
-                  className="text-xs text-red-400 hover:text-red-300 font-medium"
+                  onClick={handleDelete}
+                  disabled={deleting}
+                  className="text-xs text-red-400 hover:text-red-300 font-medium disabled:opacity-50"
                 >
-                  Yes
+                  {deleting ? 'Deleting…' : 'Yes'}
                 </button>
                 <button
                   onClick={() => setConfirmDelete(false)}
@@ -271,6 +288,9 @@ function OrderCard({ order, data, onEdit, onDelete }) {
           </>
         )}
       </div>
+      {deleteError && (
+        <div className="mt-2 text-xs text-red-400">{deleteError}</div>
+      )}
     </div>
   );
 }
@@ -307,6 +327,9 @@ export default function Orders() {
   const [panelBanner, setPanelBanner] = useState(null); // { type, message, details? }
   const [savingList, setSavingList] = useState(false);
   const [creatingOrders, setCreatingOrders] = useState(false);
+  // Manual PO form: block double-submit and surface save failures.
+  const [submittingForm, setSubmittingForm] = useState(false);
+  const [formError, setFormError] = useState(null);
 
   // Keys ('sku' or 'frive:{mealType}') whose orderQty/unitPrice/selected the
   // user has touched — re-fetches must not clobber these lines.
@@ -345,6 +368,7 @@ export default function Orders() {
     });
     setEditingOrder(null);
     setShowForm(false);
+    setFormError(null);
   };
 
   // A consolidated line is a concrete SKU, a fresh-meal group keyed by meal
@@ -872,6 +896,7 @@ export default function Orders() {
   };
 
   const submit = async () => {
+    if (submittingForm) return;
     if (!form.supplierId || !form.items[0].sku) return;
     if (form.deliveryType === 'warehouse' && !form.warehouseId) return;
     if (form.deliveryType === 'custom' && !form.customAddress) return;
@@ -900,12 +925,20 @@ export default function Orders() {
       updatedAt: new Date().toISOString()
     };
 
-    if (editingOrder) {
-      await updateOrder(editingOrder, order);
-    } else {
-      await createOrder(order);
+    setSubmittingForm(true);
+    setFormError(null);
+    try {
+      if (editingOrder) {
+        await updateOrder(editingOrder, order);
+      } else {
+        await createOrder(order);
+      }
+      resetForm();
+    } catch (e) {
+      setFormError(e?.response?.data?.error || e.message || 'Could not save the order — check the connection and try again.');
+    } finally {
+      setSubmittingForm(false);
     }
-    resetForm();
   };
 
   // Dynamic order search: every typed word must match somewhere in the
@@ -1723,13 +1756,18 @@ export default function Orders() {
             />
           </div>
 
+          {formError && (
+            <div className="bg-red-500/10 border border-red-500/30 text-red-400 rounded px-3 py-2 text-sm">
+              {formError}
+            </div>
+          )}
           <div className="flex gap-3">
             <button
               onClick={submit}
-              disabled={!form.supplierId || !form.items[0].sku || (form.deliveryType === 'warehouse' && !form.warehouseId) || (form.deliveryType === 'custom' && !form.customAddress)}
+              disabled={submittingForm || !form.supplierId || !form.items[0].sku || (form.deliveryType === 'warehouse' && !form.warehouseId) || (form.deliveryType === 'custom' && !form.customAddress)}
               className="px-4 py-2 bg-emerald-600 text-white rounded text-sm font-medium hover:bg-emerald-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {editingOrder ? 'Update Order' : 'Create Order'}
+              {submittingForm ? 'Saving…' : editingOrder ? 'Update Order' : 'Create Order'}
             </button>
             <button onClick={resetForm} className="px-4 py-2 bg-zinc-700 text-zinc-300 rounded text-sm hover:bg-zinc-600">
               Cancel

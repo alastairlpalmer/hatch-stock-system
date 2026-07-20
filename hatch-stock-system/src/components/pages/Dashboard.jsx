@@ -294,8 +294,14 @@ export default function Dashboard() {
   const recentSales = (data.salesData || []).filter(
     s => !(s.isRefunded ?? s.is_refunded) && new Date(s.timestamp) >= thirtyDaysAgo
   );
-  const totalSalesRevenue = recentSales.reduce((acc, s) => acc + s.charged, 0);
-  const totalSalesProfit = recentSales.reduce((acc, s) => acc + (s.charged - s.costPrice), 0);
+  // Defensive fallbacks: CSV-imported sales can lack charged/costPrice, which
+  // previously turned these tiles into "£NaN". Profit matches the backend's
+  // charged − costPrice × quantity (costPrice is per unit).
+  const totalSalesRevenue = recentSales.reduce((acc, s) => acc + (s.charged ?? s.price ?? 0), 0);
+  const totalSalesProfit = recentSales.reduce(
+    (acc, s) => acc + (s.charged ?? s.price ?? 0) - (s.costPrice ?? 0) * (s.quantity ?? 1),
+    0
+  );
 
   // Expiry tracking
   const getExpiryStatus = (expiryDate) => {

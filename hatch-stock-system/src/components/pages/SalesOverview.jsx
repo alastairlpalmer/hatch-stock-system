@@ -44,7 +44,9 @@ export default function SalesOverview() {
   useEffect(() => {
     const params = {};
     if (dateFilter.start) params.startDate = dateFilter.start;
-    if (dateFilter.end) params.endDate = `${dateFilter.end}T23:59:59.999`;
+    // Date-only: the backend widens endDate to the whole day; a timestamp
+    // suffix here previously made it overshoot into the following day.
+    if (dateFilter.end) params.endDate = dateFilter.end;
     if (locationFilter.length > 0) params.locationName = locationFilter;
     Promise.all([
       salesService.getAnalytics(params),
