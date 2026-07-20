@@ -9,29 +9,32 @@
 export const DOW_LABELS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 /**
- * Length of a period in days (continuous span, floored at 1) — used as the
- * denominator for sales velocity. A same-day range counts as 1 day so velocity
- * never divides by zero.
+ * Length of a period in whole days, DAY-INCLUSIVE of both endpoints (a same-day
+ * range is 1 day, Mon–Tue is 2) — used as the denominator for sales velocity.
+ * Matches the day-inclusive endDate filtering in the sales WHERE clauses, so a
+ * range's velocity divides the sales actually counted by the days actually
+ * covered. Floored at 1 so velocity never divides by zero.
  */
 export function periodDays(start, end) {
   const span = new Date(end).getTime() - new Date(start).getTime();
-  if (!Number.isFinite(span) || span <= 0) return 1;
-  return Math.max(1, span / 86_400_000);
+  if (!Number.isFinite(span) || span < 0) return 1;
+  return Math.floor(span / 86_400_000) + 1;
 }
 
 /**
- * The equal-length period immediately preceding [start, end], used for the
- * "vs previous period" comparison. The previous period ends 1ms before the
- * current one begins so the two never overlap.
+ * The equal-length period immediately preceding [start, end], in whole days and
+ * day-inclusive on both sides: it ends the day before `start` and spans
+ * periodDays(start, end) days. Returned dates are date-boundary values, so the
+ * day-inclusive endDate filtering applies to them the same way as to the
+ * current period — the two periods never overlap.
  */
 export function previousPeriod(start, end) {
-  const s = new Date(start).getTime();
-  const e = new Date(end).getTime();
-  const span = e - s;
-  return {
-    start: new Date(s - 1 - span),
-    end: new Date(s - 1),
-  };
+  const days = periodDays(start, end);
+  const prevEnd = new Date(start);
+  prevEnd.setDate(prevEnd.getDate() - 1);
+  const prevStart = new Date(start);
+  prevStart.setDate(prevStart.getDate() - days);
+  return { start: prevStart, end: prevEnd };
 }
 
 /**

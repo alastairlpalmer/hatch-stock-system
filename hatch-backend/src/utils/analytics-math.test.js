@@ -12,19 +12,26 @@ import {
 } from './analytics-math.js';
 
 describe('periodDays', () => {
-  it('counts a continuous span in days, floored at 1', () => {
-    expect(periodDays('2026-06-01', '2026-06-08')).toBe(7);
+  it('counts whole days, inclusive of both endpoints', () => {
+    expect(periodDays('2026-06-01', '2026-06-08')).toBe(8);
+    expect(periodDays('2026-06-01', '2026-06-01')).toBe(1); // same-day range is 1 day
     expect(periodDays('2026-06-01T00:00:00', '2026-06-01T06:00:00')).toBe(1); // sub-day floors to 1
     expect(periodDays('2026-06-08', '2026-06-01')).toBe(1); // inverted floors to 1
   });
 });
 
 describe('previousPeriod', () => {
-  it('returns the equal-length, non-overlapping prior period', () => {
+  it('returns the equal-length, non-overlapping prior period in whole days', () => {
+    // Jun 8–15 is 8 days inclusive; previous is the 8 days ending Jun 7.
     const { start, end } = previousPeriod('2026-06-08T00:00:00.000Z', '2026-06-15T00:00:00.000Z');
-    // current span is 7 days; previous ends 1ms before current start
-    expect(end.toISOString()).toBe('2026-06-07T23:59:59.999Z');
-    expect(start.toISOString()).toBe('2026-05-31T23:59:59.999Z');
+    expect(end.toISOString()).toBe('2026-06-07T00:00:00.000Z');
+    expect(start.toISOString()).toBe('2026-05-31T00:00:00.000Z');
+  });
+
+  it('handles a same-day range (previous is the single prior day)', () => {
+    const { start, end } = previousPeriod('2026-07-20', '2026-07-20');
+    expect(end.toISOString()).toBe('2026-07-19T00:00:00.000Z');
+    expect(start.toISOString()).toBe('2026-07-19T00:00:00.000Z');
   });
 });
 
