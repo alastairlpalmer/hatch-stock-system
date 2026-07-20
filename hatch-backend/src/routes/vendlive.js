@@ -186,6 +186,9 @@ router.get('/machine-mappings', asyncHandler(async (req, res) => {
 // PUT /api/vendlive/machine-mappings/:vendliveMachineId
 router.put('/machine-mappings/:vendliveMachineId', asyncHandler(async (req, res) => {
   const vendliveMachineId = parseInt(req.params.vendliveMachineId);
+  if (isNaN(vendliveMachineId)) {
+    return res.status(400).json({ error: 'Invalid vendliveMachineId' });
+  }
   const { machineName, locationId } = req.body;
 
   const mapping = await prisma.vendliveMachineMapping.upsert({
@@ -375,7 +378,7 @@ router.get('/sync/logs', asyncHandler(async (req, res) => {
 
   const logs = await prisma.vendliveSyncLog.findMany({
     orderBy: { createdAt: 'desc' },
-    take: parseInt(limit),
+    take: Math.min(parseInt(limit) || 50, 500),
   });
 
   res.json(logs);

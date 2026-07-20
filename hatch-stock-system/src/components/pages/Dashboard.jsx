@@ -319,14 +319,18 @@ export default function Dashboard() {
   const warningBatches = batches.filter(b => getExpiryStatus(b.expiryDate) === 'warning');
   const expiryAlertCount = expiredBatches.length + criticalBatches.length;
 
-  // Find low stock at locations
-  const lowStockLocations = data.locations.map(loc => {
+  // Find low stock at locations. Same definition as the "Needs attention"
+  // rail and MachineOverview (qty === 0 → out, qty < minStock → low), and
+  // archived machines excluded — the two panels on this screen previously
+  // disagreed about which machines were low.
+  const lowStockLocations = data.locations.filter(l => !l.archivedAt).map(loc => {
     const locStock = data.locationStock[loc.id] || {};
     const locConfig = data.locationConfig[loc.id] || {};
     const lowItems = data.products.filter(p => {
       const config = locConfig[p.sku] || {};
       const qty = locStock[p.sku] || 0;
-      return config.minStock && qty <= config.minStock;
+      if (config.maxStock == null && config.minStock == null) return false;
+      return qty === 0 || (config.minStock != null && qty < config.minStock);
     });
     return { location: loc, lowItems };
   }).filter(l => l.lowItems.length > 0);
@@ -460,7 +464,7 @@ export default function Dashboard() {
             <p className="text-zinc-500 text-sm">No locations configured</p>
           ) : (
             <div className="space-y-3">
-              {data.locations.map(loc => {
+              {data.locations.filter(l => !l.archivedAt).map(loc => {
                 const units = Object.values(data.locationStock[loc.id] || {}).reduce((a, b) => a + b, 0);
                 const skus = Object.keys(data.locationStock[loc.id] || {}).length;
                 return (

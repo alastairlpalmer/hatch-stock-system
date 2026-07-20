@@ -23,8 +23,11 @@ export default function StockCheck() {
   const [searchParams] = useSearchParams();
 
   const qpLocationParam = searchParams.get('locationId') || '';
+  // archivedAt is the real archive marker (see schema) — the old
+  // archived/status fields don't exist on location rows, so archived
+  // machines were slipping through here while other pages hid them.
   const qpLocationId = data.locations.some(
-    l => l.id === qpLocationParam && !l.archived && l.status !== 'archived'
+    l => l.id === qpLocationParam && !l.archivedAt
   )
     ? qpLocationParam
     : null;
@@ -55,7 +58,7 @@ export default function StockCheck() {
   const machines = useMemo(() => {
     const query = machineSearch.trim().toLowerCase();
     return data.locations
-      .filter(l => !l.archived && l.status !== 'archived')
+      .filter(l => !l.archivedAt)
       .filter(l => !query || l.name?.toLowerCase().includes(query))
       .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
   }, [data.locations, machineSearch]);

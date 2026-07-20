@@ -51,6 +51,7 @@ export default function BottomNav() {
             <Link
               key={key}
               to={to}
+              aria-label={label}
               aria-current={isActive ? 'page' : undefined}
               className={`flex flex-col items-center justify-center gap-1 transition-colors ${
                 isActive ? 'text-emerald-400' : 'text-zinc-500 hover:text-zinc-300'

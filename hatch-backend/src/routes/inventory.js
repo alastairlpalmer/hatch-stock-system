@@ -3,6 +3,7 @@ import { z } from 'zod';
 import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { categorizeBatchesByExpiry } from '../utils/expiry.js';
+import { exclusiveEndBound } from '../utils/date-range.js';
 import { resolveOrderingConfig, DEFAULT_LEAD_TIME_DAYS, DEFAULT_COVER_DAYS } from '../config/ordering.js';
 import {
   recomputeWarehouseStock,
@@ -697,7 +698,8 @@ router.get('/removals', asyncHandler(async (req, res) => {
   if (startDate || endDate) {
     where.createdAt = {};
     if (startDate) where.createdAt.gte = new Date(startDate);
-    if (endDate) where.createdAt.lte = new Date(endDate);
+    // Day-inclusive — see utils/date-range.js.
+    if (endDate) where.createdAt.lt = exclusiveEndBound(endDate);
   }
 
   const removals = await prisma.stockRemoval.findMany({
