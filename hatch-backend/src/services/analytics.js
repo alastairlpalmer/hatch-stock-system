@@ -10,6 +10,7 @@ import {
   computeSuggestions,
   aggregateFamilies,
 } from '../utils/analytics-math.js';
+import { exclusiveEndBound } from '../utils/date-range.js';
 
 /**
  * Analytics aggregation — the single source of truth for the Sales dashboard
@@ -41,12 +42,7 @@ function salesWhere({ startDate, endDate, names }, { includeRefunded = false } =
   const cond = [includeRefunded ? Prisma.sql`s.is_refunded = true` : Prisma.sql`s.is_refunded = false`];
   if (startDate) cond.push(Prisma.sql`s."timestamp" >= ${new Date(startDate)}`);
   if (endDate) {
-    // endDate is a date-only string; new Date() parses it as midnight at the
-    // START of that day, which would exclude the whole final day. Bound with an
-    // exclusive < next-day instead so endDate stays day-inclusive.
-    const end = new Date(endDate);
-    end.setDate(end.getDate() + 1);
-    cond.push(Prisma.sql`s."timestamp" < ${end}`);
+    cond.push(Prisma.sql`s."timestamp" < ${exclusiveEndBound(endDate)}`);
   }
 
   const list = (names || []).filter((n) => n && n !== 'all');
