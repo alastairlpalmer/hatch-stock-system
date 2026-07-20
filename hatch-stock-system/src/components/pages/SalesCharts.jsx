@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import InfoTip from '../ui/InfoTip';
+import { localDay } from '../../utils/helpers';
 
 /**
  * Two professional, dependency-free SVG charts for the Sales Overview:
@@ -92,7 +93,9 @@ function weekStart(dateStr) {
   const d = new Date(`${dateStr}T00:00:00`);
   if (isNaN(d)) return dateStr;
   d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); // Mon=0 … Sun=6
-  return d.toISOString().split('T')[0];
+  // localDay, not toISOString: on BST devices toISOString shifted the local
+  // Monday midnight back to Sunday 23:00 UTC, keying weeks to the wrong day.
+  return localDay(d);
 }
 
 // Keep the trailing N days of rows, anchored to the newest date present (not
@@ -102,7 +105,7 @@ function applyRange(rows, days) {
   const last = rows.reduce((max, r) => (r.date > max ? r.date : max), rows[0].date);
   const cutoffDate = new Date(`${last}T00:00:00`);
   cutoffDate.setDate(cutoffDate.getDate() - (days - 1));
-  const cutoff = cutoffDate.toISOString().split('T')[0];
+  const cutoff = localDay(cutoffDate);
   return rows.filter((r) => r.date >= cutoff);
 }
 

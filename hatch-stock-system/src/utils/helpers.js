@@ -22,6 +22,34 @@ export function formatCurrency(amount, options = {}) {
 }
 
 /**
+ * YYYY-MM-DD for a timestamp in Europe/London — matches the backend's daily
+ * bucketing (services/analytics.js), so client-side day grouping agrees with
+ * server charts even during BST and on devices in other timezones.
+ */
+const londonDayFormat = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Europe/London',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
+export function londonDay(timestamp) {
+  const d = new Date(timestamp);
+  if (isNaN(d)) return '';
+  return londonDayFormat.format(d); // en-CA renders as YYYY-MM-DD
+}
+
+/**
+ * YYYY-MM-DD of a Date in the DEVICE's local calendar. Use instead of
+ * toISOString().split('T')[0] for pure calendar arithmetic on local-midnight
+ * dates — toISOString shifts local midnight into the previous UTC day for any
+ * timezone ahead of UTC (e.g. all of BST).
+ */
+export function localDay(d) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/**
  * Format date in UK format
  */
 export function formatDate(date, options = {}) {
