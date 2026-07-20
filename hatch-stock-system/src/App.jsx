@@ -11,7 +11,6 @@ import Orders from './components/pages/Orders';
 import ReceiveStock from './components/pages/ReceiveStock';
 import Inventory from './components/pages/Inventory';
 import RemoveStock from './components/pages/RemoveStock';
-import RestockMachine from './components/pages/RestockMachine';
 import History from './components/pages/History';
 import Shrinkage from './components/pages/Shrinkage';
 import Admin from './components/pages/Admin';
@@ -25,11 +24,9 @@ import RestockSheet from './components/pages/RestockSheet';
 import PickLists from './components/pages/restock/PickLists';
 import PickListDetail from './components/pages/restock/PickListDetail';
 import StockCheck from './components/pages/restock/StockCheck';
-import RestockRun from './components/pages/restock/RestockRun';
 import Account from './components/pages/Account';
 import MobileHome from './components/pages/mobile/MobileHome';
 import MorePage from './components/pages/mobile/MorePage';
-import RestockHub from './components/pages/restock/RestockHub';
 import OrdersHub from './components/pages/orders/OrdersHub';
 import OrdersLanding from './components/pages/orders/OrdersLanding';
 
@@ -37,9 +34,7 @@ import OrdersLanding from './components/pages/orders/OrdersLanding';
 import OrdersLayout from './components/pages/orders/OrdersLayout';
 import SuppliersConfig from './components/pages/orders/SuppliersConfig';
 import RestockLayout from './components/pages/restock/RestockLayout';
-import RestockPlanner from './components/pages/restock/RestockPlanner';
-import RestockWorkflow from './components/pages/restock/RestockWorkflow';
-import SelectRoute from './components/pages/restock/SelectRoute';
+import RestockHome from './components/pages/restock/RestockHome';
 import SupportLayout from './components/pages/support/SupportLayout';
 
 // Layout components
@@ -93,15 +88,7 @@ function App() {
   );
 }
 
-// The /restock index is the action hub on phones and the 3-step workflow on
-// desktop. Same URL either way, so the bottom bar and old links both just
-// point at /restock.
-function RestockIndex() {
-  const isMobile = useIsMobile();
-  return isMobile ? <RestockHub /> : <RestockWorkflow />;
-}
-
-// Same pattern for /orders: action hub on phones, an action landing (cards +
+// The /orders index: action hub on phones, an action landing (cards +
 // pending-orders snapshot) on desktop.
 function OrdersIndex() {
   const isMobile = useIsMobile();
@@ -174,6 +161,7 @@ function AppLayout() {
               <Route path="/locations" element={<LocationStock />} />
 
               <Route path="/warehouse" element={<Inventory />} />
+              <Route path="/warehouse/remove" element={<RemoveStock />} />
 
               <Route path="/orders" element={<OrdersLayout />}>
                 <Route index element={<OrdersIndex />} />
@@ -187,16 +175,17 @@ function AppLayout() {
               </Route>
 
               <Route path="/restock" element={<RestockLayout />}>
-                <Route index element={<RestockIndex />} />
-                <Route path="planner" element={<RestockPlanner />} />
-                <Route path="route" element={<SelectRoute />} />
+                <Route index element={<RestockHome />} />
                 <Route path="picklists" element={<PickLists />} />
                 <Route path="picklists/:id" element={<PickListDetail />} />
                 <Route path="check" element={<StockCheck />} />
-                <Route path="run" element={<RestockRun />} />
-                <Route path="remove" element={<RemoveStock />} />
-                <Route path="machine" element={<RestockMachine />} />
                 <Route path="shrinkage" element={<Shrinkage />} />
+                {/* Consolidated tabs — keep old bookmarks/deep links working. */}
+                <Route path="planner" element={<Navigate to="/restock" replace />} />
+                <Route path="route" element={<Navigate to="/restock/picklists" replace />} />
+                <Route path="run" element={<Navigate to="/restock/picklists" replace />} />
+                <Route path="machine" element={<Navigate to="/restock/picklists" replace />} />
+                <Route path="remove" element={<Navigate to="/warehouse/remove" replace />} />
               </Route>
 
               <Route path="/support" element={<SupportLayout />}>

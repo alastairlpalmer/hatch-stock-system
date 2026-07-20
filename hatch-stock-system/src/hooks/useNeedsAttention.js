@@ -201,15 +201,18 @@ export default function useNeedsAttention() {
       });
     }
 
-    // 8. Packed list with shortfalls — the van left short.
+    // 8. In-flight/finished list with shortfalls — the run left short.
+    // 'packed' is the legacy two-step status; new-flow lists move
+    // draft → in_progress → completed.
+    const shortStatuses = new Set(['packed', 'in_progress', 'completed']);
     const shortPacked = pickLists
-      .filter((l) => l.status === 'packed' && Array.isArray(l.shortfalls) && l.shortfalls.length > 0)
+      .filter((l) => shortStatuses.has(l.status) && Array.isArray(l.shortfalls) && l.shortfalls.length > 0)
       .sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt))[0];
     if (shortPacked) {
       out.push({
         id: 'picklist-shortfalls',
         severity: 'amber',
-        title: `Packed pick list has ${shortPacked.shortfalls.length} shortfall${shortPacked.shortfalls.length === 1 ? '' : 's'}`,
+        title: `Pick list has ${shortPacked.shortfalls.length} shortfall${shortPacked.shortfalls.length === 1 ? '' : 's'}`,
         to: `/restock/picklists/${shortPacked.id}`,
       });
     }

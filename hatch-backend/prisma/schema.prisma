@@ -451,7 +451,7 @@ model PickList {
   routeName   String?   @map("route_name")
   warehouseId String    @map("warehouse_id")
   targetDate  DateTime  @map("target_date")
-  status      String    @default("draft") // draft, packed, cancelled
+  status      String    @default("draft") // draft, in_progress, completed, cancelled (+ legacy: packed)
   items       Json
   shortfalls  Json? // [{ sku, name, requested, available }]
   removalId   String?   @map("removal_id")
@@ -470,6 +470,29 @@ model PickList {
   @@index([targetDate])
   @@index([createdAt])
   @@map("pick_lists")
+}
+
+// One row per (pick list, machine) when the driver taps "Confirm loaded" — the
+// single action that decrements warehouse batches AND increments the machine's
+// LocationStock. The unique constraint is the double-confirm guard: the confirm
+// transaction creates this row first, so a concurrent second confirm fails
+// before any stock moves. items journals what moved, including the per-batch
+// `consumed` takes so later stops reduce their stored FEFO plan accordingly.
+// See manual-sql/028_pick_list_location_confirm.sql.
+// items: [{ sku, name, quantity, consumed: [{ batchId, take }] }]
+model PickListLocationConfirmation {
+  id              String   @id @default(uuid())
+  pickListId      String   @map("pick_list_id")
+  locationId      String   @map("location_id")
+  performedBy     String?  @map("performed_by")
+  items           Json?
+  removalId       String?  @map("removal_id")
+  restockRecordId String?  @map("restock_record_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@unique([pickListId, locationId])
+  @@index([pickListId])
+  @@map("pick_list_location_confirmations")
 }
 
 // ============ STOCK MOVEMENTS ============

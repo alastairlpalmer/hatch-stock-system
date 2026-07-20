@@ -1,17 +1,15 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { useStock } from '../../context/StockContext';
-import { useRestockRun } from '../../context/RestockRunContext';
 import BarcodeScanner from '../scanner/BarcodeScanner';
 import { productsService } from '../../services/products.service';
 import { unlockAudio } from '../../utils/feedback';
 
 export default function RemoveStock() {
   const { data, recordStockRemoval } = useStock();
-  const { selectedRouteId, setSelectedRouteId, markStepComplete } = useRestockRun();
   const [form, setForm] = useState({
     fromWarehouse: '',
-    routeId: selectedRouteId || '',
+    routeId: '',
     takenBy: '',
     notes: '',
     items: [{ sku: '', quantity: '' }]
@@ -22,12 +20,6 @@ export default function RemoveStock() {
   const formRef = useRef(form);
   useEffect(() => { formRef.current = form; }, [form]);
   const scannerApiRef = useRef(null);
-
-  useEffect(() => {
-    if (selectedRouteId && form.routeId !== selectedRouteId) {
-      setForm((prev) => ({ ...prev, routeId: selectedRouteId, items: [{ sku: '', quantity: '' }] }));
-    }
-  }, [selectedRouteId]);
   const [warnings, setWarnings] = useState({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -281,7 +273,6 @@ export default function RemoveStock() {
         items: itemsToRemove
       });
 
-      markStepComplete('remove');
       setSuccess({
         routeName: selectedRoute?.name || form.routeId,
         totalUnits: itemsToRemove.reduce((sum, i) => sum + i.quantity, 0),
@@ -290,7 +281,7 @@ export default function RemoveStock() {
           quantity: i.quantity,
         })),
       });
-      setForm({ fromWarehouse: '', routeId: selectedRouteId || '', takenBy: '', notes: '', items: [{ sku: '', quantity: '' }] });
+      setForm({ fromWarehouse: '', routeId: '', takenBy: '', notes: '', items: [{ sku: '', quantity: '' }] });
       setWarnings({});
     } catch (err) {
       setError(err.message || 'Failed to remove stock');
@@ -311,7 +302,7 @@ export default function RemoveStock() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-xl font-semibold">Remove Stock</h2>
+      <h2 className="text-xl font-semibold">Remove stock from warehouse</h2>
 
       <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-lg p-4 flex items-center justify-between gap-3">
         <p className="text-sm text-zinc-300">
@@ -374,7 +365,7 @@ export default function RemoveStock() {
             <label className="block text-xs text-zinc-500 mb-1">Re-stock Route</label>
             <select
               value={form.routeId}
-              onChange={e => { setForm({ ...form, routeId: e.target.value, items: [{ sku: '', quantity: '' }] }); setSelectedRouteId(e.target.value); setWarnings({}); }}
+              onChange={e => { setForm({ ...form, routeId: e.target.value, items: [{ sku: '', quantity: '' }] }); setWarnings({}); }}
               className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500"
             >
               <option value="">Select route</option>

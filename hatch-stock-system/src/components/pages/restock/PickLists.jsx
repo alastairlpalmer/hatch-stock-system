@@ -1,8 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { AlertTriangle, ClipboardList, Loader2, MapPin, PackageCheck } from 'lucide-react';
+import { AlertTriangle, ChevronDown, ChevronUp, ClipboardList, Loader2, MapPin, PackageCheck } from 'lucide-react';
 import { useStock } from '../../../context/StockContext';
 import { pickListsService } from '../../../services/pickLists.service';
+
+// Written by PickListDetail while a run is draft/in progress — lets this index
+// surface a "Continue run" pill after a reload.
+const ACTIVE_LIST_KEY = 'hatch_active_picklist';
 
 // Next Monday from today (if today is Monday, the one a week out —
 // pick lists are packed Sunday night for the Monday run).
@@ -23,18 +27,28 @@ function formatDate(iso, opts = { weekday: 'short', day: 'numeric', month: 'shor
 
 const STATUS_STYLES = {
   draft: 'bg-zinc-800 text-zinc-300 border border-zinc-700',
-  packed: 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30',
+  in_progress: 'bg-amber-500/15 text-amber-400 border border-amber-500/30',
+  completed: 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30',
+  packed: 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30', // legacy
   cancelled: 'bg-red-500/10 text-red-400 border border-red-500/30',
+};
+
+const STATUS_LABELS = {
+  draft: 'Draft',
+  in_progress: 'In progress',
+  completed: 'Completed',
+  packed: 'Packed', // legacy two-step lists
+  cancelled: 'Cancelled',
 };
 
 export function StatusChip({ status }) {
   return (
     <span
-      className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium capitalize ${
+      className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
         STATUS_STYLES[status] || STATUS_STYLES.draft
       }`}
     >
-      {status}
+      {STATUS_LABELS[status] || status}
     </span>
   );
 }
@@ -42,6 +56,13 @@ export function StatusChip({ status }) {
 export default function PickLists() {
   const { data } = useStock();
   const navigate = useNavigate();
+
+  const activeListId = useMemo(() => {
+    try { return localStorage.getItem(ACTIVE_LIST_KEY) || ''; } catch { return ''; }
+  }, []);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [viewingRestock, setViewingRestock] = useState(null);
+  const machineRestocks = data.restockHistory || [];
 
   const routes = (data.restockRoutes || []).filter((r) => r.type !== 'adhoc');
   const warehouses = data.warehouses || [];
@@ -268,6 +289,11 @@ export default function PickLists() {
                         {pl.routeName || 'Custom locations'}
                       </span>
                       <StatusChip status={pl.status} />
+                      {pl.id === activeListId && (pl.status === 'draft' || pl.status === 'in_progress') && (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-500 text-zinc-900">
+                          Continue run →
+                        </span>
+                      )}
                       {(pl.shortfalls?.length || 0) > 0 && (
                         <span
                           className="inline-flex items-center gap-1 text-amber-400 text-xs"
@@ -289,6 +315,149 @@ export default function PickLists() {
             ))}
           </div>
         )}
+      </div>
+
+      {/* Machine load history — every RestockRecord (confirm-loaded taps and
+          legacy restock-wizard entries), relocated from the old Restock
+          Machine tab. Data comes from StockContext; no extra fetching. */}
+      <div className="space-y-3">
+        <button
+          onClick={() => setHistoryOpen((v) => !v)}
+          className="flex items-center gap-2 text-sm font-medium text-zinc-400 hover:text-zinc-200"
+        >
+          Machine load history
+          {historyOpen ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+        </button>
+
+        {historyOpen && (viewingRestock ? (
+          <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="font-medium text-zinc-200">Restock Details</h3>
+              <button onClick={() => setViewingRestock(null)} className="text-zinc-500 hover:text-zinc-300 text-sm">
+                Back to list
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4 text-sm">
+              <div>
+                <span className="text-zinc-500">Location:</span>
+                <span className="text-zinc-200 ml-2">{viewingRestock.locationName}</span>
+              </div>
+              <div>
+                <span className="text-zinc-500">Loaded by:</span>
+                <span className="text-zinc-200 ml-2">{viewingRestock.performedBy || viewingRestock.restockerName || '—'}</span>
+              </div>
+              <div>
+                <span className="text-zinc-500">Date:</span>
+                <span className="text-zinc-200 ml-2">
+                  {new Date(viewingRestock.createdAt || viewingRestock.timestamp).toLocaleString('en-GB')}
+                </span>
+              </div>
+              <div>
+                <span className="text-zinc-500">Photo:</span>
+                {viewingRestock.imageOverride ? (
+                  <span className="text-emerald-400 ml-2">Overridden (no photo)</span>
+                ) : (viewingRestock.photoUrl || viewingRestock.image) ? (
+                  <span className="text-emerald-400 ml-2">Included</span>
+                ) : (
+                  <span className="text-zinc-600 ml-2">None</span>
+                )}
+              </div>
+            </div>
+
+            <div className="border-t border-zinc-800 pt-4">
+              <h4 className="text-sm font-medium text-zinc-400 mb-3">Items loaded</h4>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-zinc-800">
+                      <th className="text-left py-2 text-zinc-500 font-medium">Product</th>
+                      <th className="text-right py-2 text-zinc-500 font-medium">Quantity</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(viewingRestock.items || []).map((item, idx) => (
+                      <tr key={idx} className="border-b border-zinc-800/50">
+                        <td className="py-2 text-zinc-200">{item.productName || item.name || item.sku}</td>
+                        <td className="text-right py-2 text-emerald-400">+{item.quantity}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {(viewingRestock.photoUrl || viewingRestock.image) && (
+              <div className="border-t border-zinc-800 pt-4">
+                <h4 className="text-sm font-medium text-zinc-400 mb-3">Machine Photo</h4>
+                <img
+                  src={viewingRestock.photoUrl || viewingRestock.image}
+                  alt="Restocked machine"
+                  className="max-w-full max-h-96 rounded border border-zinc-700"
+                />
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-zinc-800">
+                    <th className="text-left px-4 py-3 text-zinc-500 font-medium">Date</th>
+                    <th className="text-left px-4 py-3 text-zinc-500 font-medium">Location</th>
+                    <th className="text-left px-4 py-3 text-zinc-500 font-medium">Loaded By</th>
+                    <th className="text-right px-4 py-3 text-zinc-500 font-medium">Items</th>
+                    <th className="text-center px-4 py-3 text-zinc-500 font-medium">Photo</th>
+                    <th className="text-right px-4 py-3 text-zinc-500 font-medium"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {machineRestocks.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="px-4 py-8 text-center text-zinc-600">
+                        No machine loads recorded yet
+                      </td>
+                    </tr>
+                  ) : (
+                    machineRestocks.slice().reverse().map(restock => (
+                      <tr key={restock.id} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
+                        <td className="px-4 py-3 text-zinc-400 text-xs">
+                          {new Date(restock.createdAt || restock.timestamp).toLocaleDateString('en-GB')}
+                          <div className="text-zinc-600">
+                            {new Date(restock.createdAt || restock.timestamp).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 text-zinc-200">{restock.locationName}</td>
+                        <td className="px-4 py-3 text-zinc-400">{restock.performedBy || restock.restockerName || '—'}</td>
+                        <td className="text-right px-4 py-3 text-emerald-400">
+                          +{(restock.items || []).reduce((acc, i) => acc + (i.quantity || 0), 0)}
+                        </td>
+                        <td className="text-center px-4 py-3">
+                          {restock.imageOverride ? (
+                            <span className="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded">Override</span>
+                          ) : (restock.photoUrl || restock.image) ? (
+                            <span className="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded">OK</span>
+                          ) : (
+                            <span className="text-zinc-600">-</span>
+                          )}
+                        </td>
+                        <td className="text-right px-4 py-3">
+                          <button
+                            onClick={() => setViewingRestock(restock)}
+                            className="text-emerald-400 hover:text-emerald-300 text-sm"
+                          >
+                            View
+                          </button>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );

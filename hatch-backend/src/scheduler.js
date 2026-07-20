@@ -59,7 +59,7 @@ export function startScheduler() {
       lastStockPollAt = Date.now();
       const result = await runStockPollJob();
       if (result) {
-        console.log(`VendLive stock poll complete: ${result.machinesChecked} machines checked, ${result.syncsTriggered} syncs triggered`);
+        console.log(`VendLive stock poll complete: ${result.machinesChecked} machines checked, ${result.syncsTriggered} syncs triggered (${result.restockSyncs} restock, ${result.driftSyncs} planogram change, ${result.fallbackSyncs} stale fallback)`);
       }
     } catch (err) {
       console.error('VendLive stock poll scheduler error:', err.message);

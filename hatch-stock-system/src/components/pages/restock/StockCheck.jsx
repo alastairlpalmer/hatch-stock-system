@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, CheckCircle2, ChevronRight, MapPin, Search } from 'lucide-react';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { ArrowLeft, CheckCircle2, ChevronDown, ChevronRight, ChevronUp, MapPin, Search } from 'lucide-react';
 import { useStock } from '../../../context/StockContext';
 import StockCheckForm from './StockCheckForm';
 
@@ -9,12 +9,13 @@ const NAME_STORAGE_KEY = 'hatch_checker_name';
 /**
  * Standalone stock-check page (route: /restock/check).
  * Step 1: who's checking + pick a machine. Step 2: StockCheckForm.
- * On complete: variance summary with options to check another machine or
- * continue to the restock wizard.
+ * On complete: variance summary with the option to check another machine.
+ * The full log of past checks per machine lives in the collapsible history
+ * section under the picker.
  *
  * Deep-link support: ?locationId= preselects the machine (skipping the
  * picker), ?return= sends the primary completion button back to the caller
- * (e.g. /restock/run).
+ * (e.g. a pick list run).
  */
 export default function StockCheck() {
   const { data } = useStock();
@@ -37,6 +38,10 @@ export default function StockCheck() {
   const [locationId, setLocationId] = useState(qpLocationId);
   const [machineSearch, setMachineSearch] = useState('');
   const [result, setResult] = useState(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  // The log of every check at every machine (hydrated with locationName by
+  // StockContext) — relocated here from the old Restock Machine tab.
+  const stockChecks = data.stockCheckHistory || [];
 
   const updateName = (value) => {
     setCheckerName(value);
@@ -130,26 +135,36 @@ export default function StockCheck() {
         </div>
 
         {returnTo ? (
-          <button
-            onClick={() => navigate(returnTo)}
-            className="h-14 w-full rounded-xl bg-emerald-500 text-base font-semibold text-zinc-900 hover:bg-emerald-400"
-          >
-            Continue
-          </button>
+          <>
+            <button
+              onClick={() => navigate(returnTo)}
+              className="h-14 w-full rounded-xl bg-emerald-500 text-base font-semibold text-zinc-900 hover:bg-emerald-400"
+            >
+              Continue
+            </button>
+            <button
+              onClick={reset}
+              className="h-12 w-full rounded-xl border border-zinc-700 bg-zinc-800 text-sm font-medium text-zinc-300 hover:bg-zinc-700"
+            >
+              Check another machine
+            </button>
+          </>
         ) : (
-          <button
-            onClick={() => navigate('/restock/machine')}
-            className="h-14 w-full rounded-xl bg-emerald-500 text-base font-semibold text-zinc-900 hover:bg-emerald-400"
-          >
-            Continue to restock this machine
-          </button>
+          <>
+            <button
+              onClick={reset}
+              className="h-14 w-full rounded-xl bg-emerald-500 text-base font-semibold text-zinc-900 hover:bg-emerald-400"
+            >
+              Check another machine
+            </button>
+            <Link
+              to="/restock"
+              className="flex h-12 w-full items-center justify-center rounded-xl border border-zinc-700 bg-zinc-800 text-sm font-medium text-zinc-300 hover:bg-zinc-700"
+            >
+              Back to Restock home
+            </Link>
+          </>
         )}
-        <button
-          onClick={reset}
-          className="h-12 w-full rounded-xl border border-zinc-700 bg-zinc-800 text-sm font-medium text-zinc-300 hover:bg-zinc-700"
-        >
-          Check another machine
-        </button>
       </div>
     );
   }
@@ -255,6 +270,73 @@ export default function StockCheck() {
                 </button>
               );
             })}
+          </div>
+        )}
+      </div>
+
+      {/* Stock check history — the full log of past checks at every machine */}
+      <div className="space-y-2">
+        <button
+          onClick={() => setHistoryOpen((v) => !v)}
+          className="flex items-center gap-2 text-xs font-medium text-zinc-500 hover:text-zinc-300"
+        >
+          Stock check history ({stockChecks.length})
+          {historyOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+        </button>
+
+        {historyOpen && (
+          <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-zinc-800">
+                    <th className="text-left px-4 py-3 text-zinc-500 font-medium">Date</th>
+                    <th className="text-left px-4 py-3 text-zinc-500 font-medium">Location</th>
+                    <th className="text-left px-4 py-3 text-zinc-500 font-medium">Checked By</th>
+                    <th className="text-right px-4 py-3 text-zinc-500 font-medium">Products</th>
+                    <th className="text-right px-4 py-3 text-zinc-500 font-medium">Discrepancies</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {stockChecks.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="px-4 py-8 text-center text-zinc-600">
+                        No stock checks recorded yet
+                      </td>
+                    </tr>
+                  ) : (
+                    [...stockChecks]
+                      .sort((a, b) =>
+                        new Date(b.createdAt || b.timestamp || 0) - new Date(a.createdAt || a.timestamp || 0)
+                      )
+                      .map(check => {
+                        const items = check.items || [];
+                        const discrepancies = items.filter(i => (i.variance ?? 0) !== 0).length;
+                        return (
+                          <tr key={check.id} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
+                            <td className="px-4 py-3 text-zinc-400 text-xs">
+                              {new Date(check.createdAt || check.timestamp).toLocaleDateString('en-GB')}
+                              <div className="text-zinc-600">
+                                {new Date(check.createdAt || check.timestamp).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
+                              </div>
+                            </td>
+                            <td className="px-4 py-3 text-zinc-200">{check.locationName}</td>
+                            <td className="px-4 py-3 text-zinc-400">{check.performedBy || check.checkedBy || '—'}</td>
+                            <td className="text-right px-4 py-3 text-zinc-300">{items.length}</td>
+                            <td className="text-right px-4 py-3">
+                              {discrepancies === 0 ? (
+                                <span className="text-emerald-400">Match</span>
+                              ) : (
+                                <span className="text-amber-400">{discrepancies}</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
       </div>
