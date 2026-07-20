@@ -83,11 +83,33 @@ router.put('/:id', asyncHandler(async (req, res) => {
   res.json(supplier);
 }));
 
-// Delete supplier
+// Delete supplier.
+//
+// Orders reference the supplier with a nullable FK, so a bare delete silently
+// detached every historical order from its supplier (they showed as
+// supplier-less rather than erroring). Block while order history exists;
+// products' preferredSupplier detaching is harmless and allowed.
 router.delete('/:id', asyncHandler(async (req, res) => {
-  await prisma.supplier.delete({
-    where: { id: req.params.id },
-  });
+  const id = req.params.id;
+
+  const orderCount = await prisma.order.count({ where: { supplierId: id } });
+  if (orderCount > 0) {
+    return res.status(409).json({
+      error: `Cannot delete: this supplier has ${orderCount} order${orderCount === 1 ? '' : 's'} in its history, which must be kept for reporting.`,
+    });
+  }
+
+  try {
+    await prisma.supplier.delete({ where: { id } });
+  } catch (err) {
+    if (err.code === 'P2003') {
+      return res.status(409).json({ error: 'Cannot delete: this supplier is referenced by other records that must be kept.' });
+    }
+    if (err.code === 'P2025') {
+      return res.status(404).json({ error: 'Supplier not found' });
+    }
+    throw err;
+  }
 
   res.json({ success: true });
 }));
