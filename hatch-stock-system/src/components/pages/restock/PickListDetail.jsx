@@ -630,12 +630,32 @@ export default function PickListDetail() {
     );
   };
 
+  // Downscale the proof photo before upload: a raw phone JPEG is 4–8MB, and
+  // as base64 in the JSON body it brushes the server's 10mb limit (413 at the
+  // machine, on mobile data). ~1280px JPEG is plenty for "shelves look right".
+  const MAX_PHOTO_DIM = 1280;
   const handlePhotoUpload = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => setConfirmPhoto(ev.target?.result || null);
-    reader.readAsDataURL(file);
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const scale = Math.min(1, MAX_PHOTO_DIM / Math.max(img.width, img.height));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(img.width * scale));
+      canvas.height = Math.max(1, Math.round(img.height * scale));
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      setConfirmPhoto(canvas.toDataURL('image/jpeg', 0.7));
+    };
+    img.onerror = () => {
+      // Undecodable in this browser (e.g. HEIC) — fall back to the raw file.
+      URL.revokeObjectURL(url);
+      const reader = new FileReader();
+      reader.onload = (ev) => setConfirmPhoto(ev.target?.result || null);
+      reader.readAsDataURL(file);
+    };
+    img.src = url;
   };
 
   const confirmLoaded = async (loc) => {

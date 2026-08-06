@@ -800,9 +800,15 @@ export async function confirmPickListLocation(id, {
     });
 
     // Merge this stop's shortfalls onto the list so the shortfall report
-    // reflects confirm-time reality, not just generation-time trims.
+    // reflects confirm-time reality, not just generation-time trims. Re-read
+    // inside the transaction — the pre-transaction `list` snapshot would lose
+    // entries merged by a concurrent confirm on another machine.
     if (shortfalls.length > 0) {
-      const existing = Array.isArray(list.shortfalls) ? list.shortfalls : [];
+      const fresh = await tx.pickList.findUnique({
+        where: { id },
+        select: { shortfalls: true },
+      });
+      const existing = Array.isArray(fresh?.shortfalls) ? fresh.shortfalls : [];
       await tx.pickList.update({
         where: { id },
         data: {
@@ -816,7 +822,12 @@ export async function confirmPickListLocation(id, {
 
     let pickList = list;
     if (!legacy) {
-      const confirmedCount = prior.length + 1;
+      // Count confirmations inside the transaction rather than trusting the
+      // pre-transaction `prior` snapshot — two stops confirmed concurrently
+      // would each see N and leave the list stuck in_progress at N+2 == all.
+      const confirmedCount = await tx.pickListLocationConfirmation.count({
+        where: { pickListId: id },
+      });
       const status = confirmedCount >= allLocationIds.size ? 'completed' : 'in_progress';
       pickList = await tx.pickList.update({ where: { id }, data: { status } });
     }
@@ -1047,7 +1058,13 @@ export async function returnPickListLeftovers(id, { items, performedBy = null })
       await recomputeWarehouseStock(tx, list.warehouseId, sku);
     }
 
-    const existing = Array.isArray(list.returnedItems) ? list.returnedItems : [];
+    // Re-read inside the transaction — merging onto the pre-transaction
+    // snapshot would silently drop a concurrent return's journal entries.
+    const fresh = await tx.pickList.findUnique({
+      where: { id: list.id },
+      select: { returnedItems: true },
+    });
+    const existing = Array.isArray(fresh?.returnedItems) ? fresh.returnedItems : [];
     return tx.pickList.update({
       where: { id: list.id },
       data: {
