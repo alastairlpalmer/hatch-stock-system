@@ -472,6 +472,10 @@ export async function generatePickList({
       warehouseId,
       routeId,
       routeName,
+      // Custom-location lists persist their resolved location set: a location
+      // with zero need appears in no item, so regeneration cannot recover it
+      // from the items JSON. Route lists keep null — the route is the truth.
+      locationIds: routeId ? null : locIds,
       targetDate: new Date(targetDate),
       status: 'draft',
       items,

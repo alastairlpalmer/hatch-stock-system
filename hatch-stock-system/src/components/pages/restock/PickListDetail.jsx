@@ -580,7 +580,13 @@ export default function PickListDetail() {
     const params = { warehouseId: list.warehouseId, targetDate: list.targetDate };
     if (list.routeId) {
       params.routeId = list.routeId;
+    } else if (Array.isArray(list.locationIds) && list.locationIds.length > 0) {
+      // The stored set from generation — includes locations that had zero
+      // need and so appear in no item line.
+      params.locationIds = list.locationIds;
     } else {
+      // Older lists (created before locationIds was stored): best effort from
+      // the items' perLocation entries.
       const locIds = new Set();
       items.forEach((it) => (it.perLocation || []).forEach((pl) => pl.locationId && locIds.add(pl.locationId)));
       params.locationIds = Array.from(locIds);
