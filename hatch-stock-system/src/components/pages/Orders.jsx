@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { format } from 'date-fns';
-import { RefreshCw, ChevronDown, ChevronRight, ArrowRight } from 'lucide-react';
+import { RefreshCw, ChevronDown, ChevronRight, ArrowRight, Plus } from 'lucide-react';
 import { useStock } from '../../context/StockContext';
 import ordersService from '../../services/orders.service';
 import buyingListsService from '../../services/buyingLists.service';
@@ -302,6 +302,9 @@ export default function Orders() {
   const [hideTinyTopups, setHideTinyTopups] = useState(false);
   const [expandedLines, setExpandedLines] = useState(() => new Set());
   const [orderNotes, setOrderNotes] = useState('');
+  // Manually added lines (products outside the suggestions)
+  const [manualSku, setManualSku] = useState('');
+  const [manualQty, setManualQty] = useState('');
   const [stockFreshness, setStockFreshness] = useState([]); // [{ locationId, mapped, lastSyncedAt }]
   const [syncingLocations, setSyncingLocations] = useState(() => new Set());
   const [panelBanner, setPanelBanner] = useState(null); // { type, message, details? }
@@ -408,7 +411,14 @@ export default function Orders() {
         }
         return base;
       });
-      setSuggestedItems(items);
+      // Manually added lines live outside the engine's world — a re-fetch
+      // must not drop them. If the fresh response now suggests the same SKU,
+      // the server line wins (the manual qty survives via editedKeysRef).
+      const serverKeys = new Set(items.map(i => i.key));
+      const manualCarryOver = suggestedItemsRef.current.filter(
+        i => i.manual && !serverKeys.has(i.key)
+      );
+      setSuggestedItems([...items, ...manualCarryOver]);
       // Meta fields ride at the top level of the response (there is no `meta`
       // envelope) — pick the ones the panel and saveAsBuyingList need.
       setSuggestionMeta({
@@ -603,6 +613,41 @@ export default function Orders() {
   const calculateSuggestedTotal = () => suggestedItems
     .filter(i => i.selected)
     .reduce((acc, i) => acc + lineValue(i), 0);
+
+  // Add a product the engine didn't suggest. If the SKU is already a line
+  // (suggested or previously added), bump its quantity instead of duplicating.
+  const addManualProduct = () => {
+    const product = data.products.find(p => p.sku === manualSku);
+    const qty = parseInt(manualQty) || 0;
+    if (!product || qty <= 0) return;
+    const supplier = data.suppliers.find(s => s.id === product.preferredSupplierId);
+    const key = product.sku;
+    editedKeysRef.current.add(key);
+    setSuggestedItems(items => {
+      const existing = items.find(i => i.key === key);
+      if (existing) {
+        return items.map(i => i.key === key
+          ? { ...i, orderQty: (i.orderQty || 0) + qty, selected: true, edited: true }
+          : i);
+      }
+      return [...items, {
+        key,
+        sku: product.sku,
+        name: product.name,
+        supplierId: supplier?.id || null,
+        supplierName: supplier?.name || null,
+        unitsPerBox: product.unitsPerBox || 1,
+        unitPrice: product.unitCost || 0,
+        unitCost: product.unitCost || 0,
+        orderQty: qty,
+        selected: true,
+        manual: true,
+        edited: true,
+      }];
+    });
+    setManualSku('');
+    setManualQty('');
+  };
 
   // Map a suggestion line to buying-list item lines. Fresh-meal groups stay
   // as ONE meal-type line (like the Location Stock page) — the Frive menu
@@ -932,7 +977,8 @@ export default function Orders() {
   // decides what saves); they just drop out of the table.
   const isTinyTopup = (i) => (i.orderQty ?? 0) > 0 && boxesFor(i) <= 1 && (i.netNeed ?? 0) <= 2;
   const isSuppressed = (i) =>
-    (hideZero && (i.orderQty ?? 0) === 0) || (hideTinyTopups && isTinyTopup(i));
+    !i.manual && // explicitly added lines are never filtered out of view
+    ((hideZero && (i.orderQty ?? 0) === 0) || (hideTinyTopups && isTinyTopup(i)));
   const visibleSuggestions = suggestedItems.filter((i) => !isSuppressed(i));
   const suppressedCount = suggestedItems.length - visibleSuggestions.length;
 
@@ -1027,11 +1073,17 @@ export default function Orders() {
             )}
           </td>
           <td className="px-2 py-2">
-            <span className={`text-xs px-1.5 py-0.5 rounded whitespace-nowrap ${
-              item.priority === 'critical' ? 'bg-red-500/20 text-red-400' : 'bg-yellow-500/20 text-yellow-400'
-            }`}>
-              {item.priority === 'critical' ? 'CRITICAL' : 'LOW'}
-            </span>
+            {item.manual ? (
+              <span className="text-xs px-1.5 py-0.5 rounded whitespace-nowrap bg-teal-500/20 text-teal-400" title="Added by hand — not from the suggestion engine">
+                ADDED
+              </span>
+            ) : (
+              <span className={`text-xs px-1.5 py-0.5 rounded whitespace-nowrap ${
+                item.priority === 'critical' ? 'bg-red-500/20 text-red-400' : 'bg-yellow-500/20 text-yellow-400'
+              }`}>
+                {item.priority === 'critical' ? 'CRITICAL' : 'LOW'}
+              </span>
+            )}
           </td>
         </tr>
         {expanded && (
@@ -1501,6 +1553,39 @@ export default function Orders() {
             )}
             </>
           )}
+
+          {/* Add any product to the buy — suggestions are a starting point,
+              not the whole list. Added lines get an ADDED badge, are never
+              hidden by the concise-list filters, and survive re-fetches. */}
+          <div className="bg-zinc-800/40 border border-zinc-700 rounded-lg p-3">
+            <label className="block text-xs text-zinc-500 mb-2">Add another product</label>
+            <div className="flex flex-col sm:flex-row gap-2">
+              <ProductSearchCombobox
+                className="flex-1"
+                products={data.products}
+                value={manualSku}
+                onSelect={sku => setManualSku(sku)}
+                recentsKey="hatch-recent-products-planbuy"
+              />
+              <input
+                type="number"
+                inputMode="numeric"
+                min="1"
+                placeholder="Qty"
+                value={manualQty}
+                onChange={(e) => setManualQty(e.target.value)}
+                className="w-full sm:w-24 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-teal-500"
+              />
+              <button
+                onClick={addManualProduct}
+                disabled={!manualSku || !(parseInt(manualQty) > 0)}
+                className="flex items-center justify-center gap-1.5 px-4 py-2 bg-zinc-700 text-zinc-200 rounded text-sm hover:bg-zinc-600 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Plus size={14} />
+                Add to buy
+              </button>
+            </div>
+          </div>
 
           <div>
             <label className="block text-xs text-zinc-500 mb-1">Notes (Optional)</label>
