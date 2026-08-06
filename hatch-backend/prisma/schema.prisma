@@ -456,6 +456,11 @@ model PickList {
   warehouseId String    @map("warehouse_id")
   targetDate  DateTime  @map("target_date")
   status      String    @default("draft") // draft, in_progress, completed, cancelled (+ legacy: packed)
+  // Resolved location ids the list was generated for (custom-location lists
+  // only; null for route lists — the route is the source of truth). Lets
+  // "Regenerate" rebuild the same set even for locations that had zero need
+  // at generation time. See manual-sql/031_pick_list_location_ids.sql.
+  locationIds Json?     @map("location_ids")
   items       Json
   shortfalls  Json? // [{ sku, name, requested, available }]
   removalId   String?   @map("removal_id")
