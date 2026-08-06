@@ -127,7 +127,35 @@ export default function ReceiveStock() {
   const [receiptsError, setReceiptsError] = useState(null);
   const [expandedReceipts, setExpandedReceipts] = useState({});
 
-  const pendingOrders = data.orders.filter(o => o.status === 'pending');
+  // Each supplier delivers separately, so the queue is ordered by when the
+  // van is expected: overdue first, then due today, then upcoming; orders
+  // with no expected date sink to the bottom (newest first among themselves).
+  const pendingOrders = data.orders
+    .filter(o => o.status === 'pending')
+    .slice()
+    .sort((a, b) => {
+      const ta = a.expectedDate ? new Date(a.expectedDate).getTime() : Infinity;
+      const tb = b.expectedDate ? new Date(b.expectedDate).getTime() : Infinity;
+      if (ta !== tb) return ta - tb;
+      return new Date(b.createdAt) - new Date(a.createdAt);
+    });
+
+  // Calendar-day delivery status for a pending order's expected date.
+  const deliveryStatus = (expectedDate) => {
+    if (!expectedDate) return null;
+    const d = new Date(expectedDate);
+    if (Number.isNaN(d.getTime())) return null;
+    const today = new Date();
+    const dayStart = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+    const diffDays = Math.round((dayStart(d) - dayStart(today)) / 86_400_000);
+    const dateLabel = d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
+    if (diffDays < 0) return { kind: 'overdue', label: `Overdue — expected ${dateLabel}`, color: 'bg-red-500/20 text-red-400' };
+    if (diffDays === 0) return { kind: 'today', label: 'Due today', color: 'bg-emerald-500/20 text-emerald-400' };
+    if (diffDays === 1) return { kind: 'soon', label: 'Due tomorrow', color: 'bg-zinc-800 text-zinc-300' };
+    return { kind: 'future', label: `Expected ${dateLabel}`, color: 'bg-zinc-800 text-zinc-400' };
+  };
+
+  const orderRef = (order) => String(order.id || '').slice(-6).toUpperCase();
 
   // Deep link: /orders/receive?orderId=… pre-selects that order (links from
   // the Orders landing page and Needs Attention). Consumed once — the param
@@ -592,6 +620,7 @@ export default function ReceiveStock() {
                     const deliveryMethodLabels = { standard: 'Standard', match: 'Match Delivery', pickup: 'Pick Up' };
                     const orderedUnits = order.items.reduce((sum, it) => sum + (it.quantity || 0), 0);
                     const receivedUnits = order.items.reduce((sum, it) => sum + Math.min(it.receivedQty || 0, it.quantity || 0), 0);
+                    const due = deliveryStatus(order.expectedDate);
                     return (
                       <button
                         key={order.id}
@@ -602,6 +631,12 @@ export default function ReceiveStock() {
                           <div>
                             <div className="flex items-center gap-2 flex-wrap">
                               <span className="font-medium text-zinc-200">{getSupplierName(order.supplierId)}</span>
+                              <span className="text-xs text-zinc-600">#{orderRef(order)}</span>
+                              {due && (
+                                <span className={`text-xs px-2 py-0.5 rounded ${due.color}`}>
+                                  {due.label}
+                                </span>
+                              )}
                               {order.deliveryMethod && (
                                 <span className="text-xs bg-zinc-800 px-2 py-0.5 rounded text-zinc-400">
                                   {deliveryMethodLabels[order.deliveryMethod] || 'Standard'}
@@ -616,13 +651,18 @@ export default function ReceiveStock() {
                             <div className="text-sm text-zinc-500 mt-1">
                               → {order.warehouseId ? getWarehouseName(order.warehouseId) : order.customAddress || 'Custom Address'}
                             </div>
+                            {/* Origin, e.g. `From buying list "Buy for Mon 10 Aug"` —
+                                tells same-supplier orders apart at a glance. */}
+                            {order.notes && (
+                              <div className="text-xs text-zinc-600 mt-0.5 truncate max-w-md">{order.notes}</div>
+                            )}
                           </div>
                           <div className="sm:text-right">
                             <div className="text-sm text-zinc-400">{order.items.length} items</div>
                             {order.total > 0 && (
                               <div className="text-emerald-400 text-sm">£{order.total?.toFixed(2)}</div>
                             )}
-                            <div className="text-xs text-zinc-600">{new Date(order.createdAt).toLocaleDateString('en-GB')}</div>
+                            <div className="text-xs text-zinc-600">Ordered {new Date(order.createdAt).toLocaleDateString('en-GB')}</div>
                           </div>
                         </div>
                       </button>
@@ -635,10 +675,22 @@ export default function ReceiveStock() {
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4 md:p-6 space-y-6">
               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                 <div>
-                  <h3 className="font-medium text-zinc-200">Receiving: {getSupplierName(selectedOrder.supplierId)}</h3>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="font-medium text-zinc-200">Receiving: {getSupplierName(selectedOrder.supplierId)}</h3>
+                    <span className="text-xs text-zinc-600">#{orderRef(selectedOrder)}</span>
+                    {(() => {
+                      const due = deliveryStatus(selectedOrder.expectedDate);
+                      return due ? (
+                        <span className={`text-xs px-2 py-0.5 rounded ${due.color}`}>{due.label}</span>
+                      ) : null;
+                    })()}
+                  </div>
                   <p className="text-sm text-zinc-500">
                     Ordered to: {selectedOrder.warehouseId ? getWarehouseName(selectedOrder.warehouseId) : selectedOrder.customAddress}
                   </p>
+                  {selectedOrder.notes && (
+                    <p className="text-xs text-zinc-600 mt-0.5">{selectedOrder.notes}</p>
+                  )}
                 </div>
                 <div className="flex items-center gap-3">
                   <button
