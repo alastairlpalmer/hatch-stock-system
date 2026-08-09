@@ -20,24 +20,39 @@
 -- ============================================================================
 -- Part 1 — Hill St min/max ← Berkeley Street
 -- ============================================================================
--- Location lookup is tolerant of spelling ("Berkeley"/"Berkely", "St"/
--- "Street") but STRICT: it errors if either name matches zero or multiple
+-- Location lookup is tolerant of spelling (substring match on "hill" /
+-- "berkel") but still errors if either pattern matches zero or multiple
 -- active locations, so a wrong guess can't silently write to the wrong
--- machine. If it errors, check:  SELECT id, name FROM locations WHERE archived_at IS NULL;
+-- machine. The error message lists all active location names — if it fires,
+-- adjust the two ILIKE patterns below to match the real names exactly.
 
 DO $$
 DECLARE
   hill_id     text;
   berkeley_id text;
   n           integer;
+  all_names   text;
 BEGIN
-  SELECT id INTO STRICT hill_id
-    FROM locations
-   WHERE archived_at IS NULL AND name ILIKE 'hill st%';
+  SELECT string_agg(name, ' | ' ORDER BY name) INTO all_names
+    FROM locations WHERE archived_at IS NULL;
 
-  SELECT id INTO STRICT berkeley_id
+  SELECT min(id), count(*) INTO hill_id, n
     FROM locations
-   WHERE archived_at IS NULL AND name ILIKE 'berkel%';
+   WHERE archived_at IS NULL AND name ILIKE '%hill%';
+  IF n <> 1 THEN
+    RAISE EXCEPTION 'Hill St lookup matched % active locations (need exactly 1). Active names: %', n, all_names;
+  END IF;
+
+  SELECT min(id), count(*) INTO berkeley_id, n
+    FROM locations
+   WHERE archived_at IS NULL AND (name ILIKE '%berkel%' OR name ILIKE '%berkeley%');
+  IF n <> 1 THEN
+    RAISE EXCEPTION 'Berkeley St lookup matched % active locations (need exactly 1). Active names: %', n, all_names;
+  END IF;
+
+  RAISE NOTICE 'Copying config: % -> %',
+    (SELECT name FROM locations WHERE id = berkeley_id),
+    (SELECT name FROM locations WHERE id = hill_id);
 
   -- Per-SKU min/max
   INSERT INTO location_config (location_id, sku, min_stock, max_stock)
@@ -113,12 +128,12 @@ UPDATE products p
 -- prune by hand if you actually want an exact mirror.
 SELECT lc.sku, pr.name, lc.min_stock, lc.max_stock
   FROM location_config lc
-  JOIN locations l  ON l.id = lc.location_id AND l.name ILIKE 'hill st%' AND l.archived_at IS NULL
+  JOIN locations l  ON l.id = lc.location_id AND l.name ILIKE '%hill%' AND l.archived_at IS NULL
   JOIN products pr  ON pr.sku = lc.sku
  WHERE NOT EXISTS (
    SELECT 1
      FROM location_config b
-     JOIN locations bl ON bl.id = b.location_id AND bl.name ILIKE 'berkel%' AND bl.archived_at IS NULL
+     JOIN locations bl ON bl.id = b.location_id AND bl.name ILIKE '%berkel%' AND bl.archived_at IS NULL
     WHERE b.sku = lc.sku
  )
  ORDER BY pr.name;
