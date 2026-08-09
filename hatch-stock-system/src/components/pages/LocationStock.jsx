@@ -234,23 +234,6 @@ export default function LocationStock() {
   const parentedProducts = products.filter(p => !p.isFreshMeal && p.parentId);
   const regularProducts = products.filter(p => !p.isFreshMeal && !p.parentId);
 
-  // Regular products grouped by category (alphabetical, products alphabetical
-  // within), matching the Stock Levels page layout
-  const groupedProducts = (() => {
-    const groups = {};
-    regularProducts.forEach(p => {
-      const cat = p.category || 'Uncategorised';
-      if (!groups[cat]) groups[cat] = [];
-      groups[cat].push(p);
-    });
-    return Object.entries(groups)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([category, items]) => ({
-        category,
-        items: items.sort((x, y) => (x.name || x.sku).localeCompare(y.name || y.sku)),
-      }));
-  })();
-
   // Collapse fresh meals into one row per meal-type bucket. Current stock is the
   // SUM of member SKUs' location stock (single source of truth — VendLive sync,
   // restocks keep writing per-SKU). Capacity is per group.
@@ -297,6 +280,33 @@ export default function LocationStock() {
         config: parentConfig[parentId] || {},
       }))
       .sort((a, b) => a.mealType.localeCompare(b.mealType));
+  })();
+
+  // Category sections (alphabetical, rows alphabetical within), matching the
+  // Stock Levels page layout. Family group rows sit INSIDE their category
+  // (Barebells is still Snacks etc.) rather than in a separate section; a
+  // family's category is its members' most common one.
+  const groupedProducts = (() => {
+    const groups = {};
+    const add = (cat, row) => { (groups[cat] = groups[cat] || []).push(row); };
+    regularProducts.forEach(p => add(p.category || 'Uncategorised', { name: p.name || p.sku, product: p }));
+    familyGroups.forEach(g => {
+      const counts = {};
+      g.items.forEach(p => {
+        const c = p.category || 'Uncategorised';
+        counts[c] = (counts[c] || 0) + 1;
+      });
+      const category = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+      add(category, { name: g.mealType, family: g });
+    });
+    return Object.entries(groups)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([category, rows]) => ({
+        category,
+        rows: rows.sort((x, y) => x.name.localeCompare(y.name)),
+        productCount: rows.reduce((acc, r) => acc + (r.family ? r.family.items.length : 1), 0),
+        unitCount: rows.reduce((acc, r) => acc + (r.family ? r.family.totalQty : getQty(r.product.sku)), 0),
+      }));
   })();
 
   // Gross margin from the VendLive-synced prices; null when either is missing
@@ -1029,33 +1039,21 @@ export default function LocationStock() {
                       </React.Fragment>
                     )}
 
-                    {/* Product families — collapsed into one row per family */}
-                    {familyGroups.length > 0 && (
-                      <React.Fragment key="product-families">
-                        <tr className="bg-teal-900/40">
-                          <td colSpan={colSpan} className="px-4 py-2">
-                            <span className="text-teal-300 font-medium text-xs uppercase tracking-wide">Product Families</span>
-                            <span className="text-zinc-500 text-xs ml-3">
-                              {familyGroups.length} famil{familyGroups.length === 1 ? 'y' : 'ies'} · {familyGroups.reduce((acc, g) => acc + g.totalQty, 0)} units here · min/max set per family
-                            </span>
-                          </td>
-                        </tr>
-                        {familyGroups.map(group => renderMealGroup(group))}
-                      </React.Fragment>
-                    )}
-
-                    {/* Everything else — per-SKU, grouped by category */}
+                    {/* Everything else — grouped by category; family rows sit
+                        inside their category alongside per-SKU rows */}
                     {groupedProducts.map(group => (
                       <React.Fragment key={group.category}>
                         <tr className="bg-zinc-800/60">
                           <td colSpan={colSpan} className="px-4 py-2">
                             <span className="text-emerald-400 font-medium text-xs uppercase tracking-wide">{group.category}</span>
                             <span className="text-zinc-500 text-xs ml-3">
-                              {group.items.length} product{group.items.length === 1 ? '' : 's'} · {group.items.reduce((acc, p) => acc + getQty(p.sku), 0)} units here
+                              {group.productCount} product{group.productCount === 1 ? '' : 's'} · {group.unitCount} units here
                             </span>
                           </td>
                         </tr>
-                        {group.items.map(product => renderProductRow(product))}
+                        {group.rows.map(row =>
+                          row.family ? renderMealGroup(row.family) : renderProductRow(row.product)
+                        )}
                       </React.Fragment>
                     ))}
                   </>
@@ -1085,29 +1083,19 @@ export default function LocationStock() {
                     </React.Fragment>
                   )}
 
-                  {/* Product families — collapsed into one card per family */}
-                  {familyGroups.length > 0 && (
-                    <React.Fragment key="product-families-mobile">
-                      <div className="bg-teal-900/40 px-4 py-2">
-                        <span className="text-teal-300 font-medium text-xs uppercase tracking-wide">Product Families</span>
-                        <span className="text-zinc-500 text-xs ml-3">
-                          {familyGroups.length} famil{familyGroups.length === 1 ? 'y' : 'ies'} · {familyGroups.reduce((acc, g) => acc + g.totalQty, 0)} units here
-                        </span>
-                      </div>
-                      {familyGroups.map(group => renderMealGroupCard(group))}
-                    </React.Fragment>
-                  )}
-
-                  {/* Everything else — per-SKU, grouped by category */}
+                  {/* Everything else — grouped by category; family cards sit
+                      inside their category alongside per-SKU cards */}
                   {groupedProducts.map(group => (
                     <React.Fragment key={group.category}>
                       <div className="bg-zinc-800/60 px-4 py-2">
                         <span className="text-emerald-400 font-medium text-xs uppercase tracking-wide">{group.category}</span>
                         <span className="text-zinc-500 text-xs ml-3">
-                          {group.items.length} product{group.items.length === 1 ? '' : 's'} · {group.items.reduce((acc, p) => acc + getQty(p.sku), 0)} units here
+                          {group.productCount} product{group.productCount === 1 ? '' : 's'} · {group.unitCount} units here
                         </span>
                       </div>
-                      {group.items.map(product => renderProductCard(product))}
+                      {group.rows.map(row =>
+                        row.family ? renderMealGroupCard(row.family) : renderProductCard(row.product)
+                      )}
                     </React.Fragment>
                   ))}
                 </>
