@@ -11,7 +11,7 @@ against the DIRECT_DATABASE_URL) after taking a backup. Scripts are written to
 be idempotent (`IF NOT EXISTS`) and safe to re-run.
 
 **Ordering:** apply the numbered scripts in ascending numeric order
-(`001` → `033`). Each ships with the backend deploy that depends on it — apply
+(`001` → `034`). Each ships with the backend deploy that depends on it — apply
 the script BEFORE deploying that backend. This directory is the single source
 of truth; the old top-level `hatch-backend/manual-sql/` directory (which held
 `011`–`018` and a colliding second `019`) was merged in here. The collision —
@@ -50,6 +50,11 @@ schema-touching PR to main; Railway deploys main immediately.
 `products.supplier_code`/`cost_locked`. Seeds one baseline `price_history` row
 per costed product so the first reconcile has something to compare against.
 **Not yet applied.**
+
+`034`: product trials — `products.lifecycle` (active | trial | discontinued)
+and the `product_trials` table. A `trial` product bypasses the assignment,
+planogram and velocity gates in the ordering and picking engines and fills to
+its trial quantity instead. **Not yet applied.**
 
 ## `pending/` — NOT part of the applied sequence
 

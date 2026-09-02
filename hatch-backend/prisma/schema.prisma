@@ -30,6 +30,16 @@ model Product {
   // Not unique — two suppliers may reuse a code, and the match is scoped to
   // the invoice's supplier. See prisma/manual-sql/033_supplier_invoices.sql.
   supplierCode        String?  @map("supplier_code")
+  // active | trial | discontinued.
+  //
+  // The suggestion engine is a REORDER engine: it scopes to a location's
+  // assigned items, then to the planogram's slotted targets, then needs sales
+  // history to compute a velocity. A product we have never sold fails all
+  // three, so nothing new could ever reach a buying list — correct for
+  // restocking, fatal for growth. `trial` opts a product into a parallel lane
+  // that bypasses all three and orders to its ProductTrial's target instead.
+  // `discontinued` is the other end: keep the sales history, stop suggesting it.
+  lifecycle           String   @default("active")
   // unitCost is the LAST INVOICED effective cost once an invoice has been
   // reconciled (see PriceHistory). costLocked stops the VendLive catalog sync
   // overwriting a cost we learned from a real invoice with VendLive's own
@@ -60,9 +70,56 @@ model Product {
   sales             Sale[]
   locationConfigs   LocationConfig[]
   priceHistory      PriceHistory[]
+  trials            ProductTrial[]
 
   @@index([supplierCode])
+  @@index([lifecycle])
   @@map("products")
+}
+
+// ============ PRODUCT TRIALS ============
+
+// One run of "let's see if this sells". Trials are their own table rather than
+// fields on Product because a product can be trialled more than once (rejected
+// in the spring, retried when the price drops), and the verdict is only
+// meaningful against the window and machine set it was measured over.
+//
+// The lifecycle: planned (chosen, not yet bought) → ordered (on a PO) → live
+// (stock has reached a machine; the clock starts here, not at ordering) →
+// adopted | rejected. Adopting flips the product to `active` and leaves the
+// operator to slot it on the planogram; rejecting flips it to `discontinued`.
+//
+// locationIds is a plain Json array, matching RestockRoute.locationIds — the
+// same "an ordered set of machines" shape, and a join table would buy nothing
+// for a handful of ids read as a unit.
+model ProductTrial {
+  id          String    @id @default(uuid())
+  sku         String
+  status      String    @default("planned") // planned, ordered, live, adopted, rejected
+  // Units to hold in EACH trial machine. Before a product has any sales there
+  // is no velocity to compute from, so this is the target the ordering and
+  // picking lanes fill to — the trial's stand-in for planogram capacity.
+  trialQty    Int
+  locationIds Json      @map("location_ids")
+  // How long to run before judging. Trading weeks, so 4 = 20 selling days.
+  weeks       Int       @default(4)
+  // Set when trial stock first reaches a machine. Everything about the verdict
+  // is measured from here: ordering it in March and shelving it until June
+  // must not count as three months of failed trial.
+  startedAt   DateTime? @map("started_at")
+  decidedAt   DateTime? @map("decided_at")
+  decision    String?   // adopt, reject
+  decisionNote String?  @map("decision_note")
+  notes       String?
+  createdBy   String?   @map("created_by")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  product Product @relation(fields: [sku], references: [sku], onDelete: Cascade)
+
+  @@index([status])
+  @@index([sku])
+  @@map("product_trials")
 }
 
 // ============ WAREHOUSES ============

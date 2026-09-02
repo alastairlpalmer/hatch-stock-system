@@ -6,6 +6,10 @@ import { ensureFreshMealPlaceholders } from '../utils/fresh-meal-placeholders.js
 
 const router = express.Router();
 
+// Whitelist, not a free-text field: an unrecognised lifecycle would silently
+// drop a product out of BOTH the reorder engine and the trial lane.
+const LIFECYCLES = ['active', 'trial', 'discontinued'];
+
 // Get all products
 router.get('/', asyncHandler(async (req, res) => {
   const { search, category } = req.query;
@@ -165,7 +169,7 @@ router.get('/:sku', asyncHandler(async (req, res) => {
 
 // Create product
 router.post('/', asyncHandler(async (req, res) => {
-  const { sku, name, description, category, unitCost, salePrice, unitsPerBox, barcode, preferredSupplierId, isFreshMeal, mealType, mealTypeConfirmed } = req.body;
+  const { sku, name, description, category, unitCost, salePrice, unitsPerBox, barcode, preferredSupplierId, isFreshMeal, mealType, mealTypeConfirmed, supplierCode, lifecycle } = req.body;
 
   if (!sku || !name) {
     return res.status(400).json({ error: 'SKU and name are required' });
@@ -187,6 +191,11 @@ router.post('/', asyncHandler(async (req, res) => {
       ...(isFreshMeal !== undefined && { isFreshMeal: !!isFreshMeal }),
       ...(mealType !== undefined && { mealType: mealType || null }),
       ...(mealTypeConfirmed !== undefined && { mealTypeConfirmed: !!mealTypeConfirmed }),
+      ...(supplierCode !== undefined && { supplierCode: supplierCode || null }),
+      // Lifecycle is normally set by starting a trial rather than typed in, but
+      // creating a product straight into `trial` is exactly what the Plan Buy
+      // "product we don't stock yet" flow does.
+      ...(LIFECYCLES.includes(lifecycle) && { lifecycle }),
     },
   });
 
@@ -195,7 +204,7 @@ router.post('/', asyncHandler(async (req, res) => {
 
 // Update product
 router.put('/:sku', asyncHandler(async (req, res) => {
-  const { name, description, category, unitCost, salePrice, unitsPerBox, barcode, preferredSupplierId, isFreshMeal, mealType, mealTypeConfirmed } = req.body;
+  const { name, description, category, unitCost, salePrice, unitsPerBox, barcode, preferredSupplierId, isFreshMeal, mealType, mealTypeConfirmed, supplierCode, lifecycle } = req.body;
 
   const product = await prisma.product.update({
     where: { sku: req.params.sku },
@@ -215,6 +224,8 @@ router.put('/:sku', asyncHandler(async (req, res) => {
       ...(isFreshMeal ? { parentId: null } : {}),
       ...(mealType !== undefined && { mealType: mealType || null }),
       ...(mealTypeConfirmed !== undefined && { mealTypeConfirmed: !!mealTypeConfirmed }),
+      ...(supplierCode !== undefined && { supplierCode: supplierCode || null }),
+      ...(LIFECYCLES.includes(lifecycle) && { lifecycle }),
     },
   });
 

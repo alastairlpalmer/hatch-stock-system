@@ -1,6 +1,7 @@
 import prisma from '../utils/db.js';
 import { consumePlannedBatches, recomputeWarehouseStock } from '../utils/inventory-stock.js';
 import { getEffectiveLayout } from './planogram-scope.js';
+import { trialNeedAtLocation, trialsByLocation, ACTIVE_TRIAL_STATUSES } from './product-trials.js';
 
 /**
  * Pick lists: "what to pack into bags tonight for tomorrow's restock run."
@@ -159,6 +160,12 @@ export function computeLocationNeeds({
   configs,
   mealConfigs,
   parentConfigs = [],
+  // Active trials for THIS location: [{ sku, trialQty }]. Trial products have
+  // no config row and no planogram slot, so without this branch the stock we
+  // bought for a trial would sit in the warehouse and the trial would never
+  // start. Handled FIRST so a trial SKU can never also be filled by a config
+  // or slot rule further down.
+  trials = [],
   freshSkus,
   membersByMealType,
   membersByParent = {},
@@ -168,6 +175,14 @@ export function computeLocationNeeds({
 }) {
   const needs = [];
   const addNeed = (sku, qty) => { if (qty > 0) needs.push({ sku, qty }); };
+
+  const trialSkus = new Set(trials.map((t) => t.sku));
+  for (const trial of trials) {
+    addNeed(trial.sku, trialNeedAtLocation({
+      trialQty: trial.trialQty,
+      machineStock: stockOf(trial.sku) || 0,
+    }));
+  }
 
   const configMax = new Map(
     (configs || []).filter((c) => !freshSkus.has(c.sku)).map((c) => [c.sku, c.maxStock]),
@@ -202,7 +217,10 @@ export function computeLocationNeeds({
 
   if (!scope) {
     // Legacy path — fill every configured target to its config max.
-    for (const [sku, max] of configMax) addNeed(sku, Math.max(0, max - (stockOf(sku) || 0)));
+    for (const [sku, max] of configMax) {
+      if (trialSkus.has(sku)) continue; // already filled to its trial target
+      addNeed(sku, Math.max(0, max - (stockOf(sku) || 0)));
+    }
     for (const [mealType, max] of mealMax) splitGroup(mealType, max);
     for (const [parentId, max] of parentMaxCfg) {
       splitFamily(parentId, max, (sku) => configMax.has(sku));
@@ -218,6 +236,7 @@ export function computeLocationNeeds({
   const skuHandled = new Set();
   for (const sku of scope.skuSet) {
     if (freshSkus.has(sku)) continue; // flavour SKUs fill via their group slot
+    if (trialSkus.has(sku)) { skuHandled.add(sku); continue; } // filled to its trial target
     const target = scope.capacityByTarget.get(`sku:${sku}`) ?? configMax.get(sku) ?? null;
     if (target == null) continue; // no capacity anywhere — nothing to fill to
     skuHandled.add(sku);
@@ -238,7 +257,9 @@ export function computeLocationNeeds({
   const notOnPlanogram = {
     // A configured flavour served through its FAMILY slot is not excluded —
     // listing it here trained operators to distrust the warning.
-    skus: [...configMax.keys()].filter((sku) => !scope.skuSet.has(sku) && !familyCovered.has(sku)),
+    skus: [...configMax.keys()].filter(
+      (sku) => !scope.skuSet.has(sku) && !familyCovered.has(sku) && !trialSkus.has(sku),
+    ),
     mealTypes: [...mealMax.keys()].filter((mt) => !scope.mealTypeSet.has(mt)),
     // A configured family is covered by a parent slot, or by EVERY member
     // having its own effective sku slot (de-facto per-flavour placement).
@@ -291,7 +312,7 @@ export async function generatePickList({
   if (locations.length === 0) throw httpError(400, 'No active locations to pick for');
 
   const locIds = locations.map((l) => l.id);
-  const [configRows, mealConfigRows, parentConfigRows, stockRows, freshProducts, parentedProducts, productParents, planograms] = await Promise.all([
+  const [configRows, mealConfigRows, parentConfigRows, stockRows, freshProducts, parentedProducts, productParents, planograms, activeTrials] = await Promise.all([
     prisma.locationConfig.findMany({ where: { locationId: { in: locIds }, maxStock: { not: null } } }),
     prisma.locationMealConfig.findMany({ where: { locationId: { in: locIds }, maxStock: { not: null } } }),
     prisma.locationParentConfig.findMany({ where: { locationId: { in: locIds }, maxStock: { not: null } } }),
@@ -306,7 +327,12 @@ export async function generatePickList({
     }),
     prisma.productParent.findMany({ select: { id: true, name: true } }),
     Promise.all(locIds.map((id) => getEffectiveLayout(id, { prefer: 'next' }))),
+    prisma.productTrial.findMany({
+      where: { status: { in: ACTIVE_TRIAL_STATUSES } },
+      select: { id: true, sku: true, status: true, trialQty: true, locationIds: true },
+    }),
   ]);
+  const trialMap = trialsByLocation(activeTrials);
   const planogramByLocation = new Map(locIds.map((id, i) => [id, planograms[i]]));
   const parentNameOf = new Map(productParents.map((p) => [p.id, p.name]));
 
@@ -330,6 +356,10 @@ export async function generatePickList({
   for (const p of planograms) {
     if (p) for (const sku of p.scope.skuSet) candidateSkus.add(sku);
   }
+  // Trial products have neither a config row nor a slot — without this their
+  // warehouse batches are never even looked up, so the pick list would report
+  // a shortfall against stock that is sitting right there.
+  for (const list of trialMap.values()) for (const t of list) candidateSkus.add(t.sku);
 
   // Warehouse batches in FEFO order (earliest expiry first, nulls last, then
   // oldest received) — used both for availability and the allocation plan.
@@ -375,6 +405,7 @@ export async function generatePickList({
       configs: configsByLocation[location.id] || [],
       mealConfigs: mealConfigsByLocation[location.id] || [],
       parentConfigs: parentConfigsByLocation[location.id] || [],
+      trials: trialMap.get(location.id) || [],
       freshSkus,
       membersByMealType,
       membersByParent,
@@ -786,6 +817,31 @@ export async function confirmPickListLocation(id, {
           where: { locationId_sku: { locationId, sku: line.sku } },
           create: { locationId, sku: line.sku, quantity: qty },
           update: { quantity: { increment: qty } },
+        });
+      }
+    }
+
+    // A trial's clock starts when its stock physically reaches a machine —
+    // which is exactly here. Doing it automatically matters: the verdict is
+    // measured from startedAt, so a forgotten manual "start" would silently
+    // date the window from whenever someone remembered, or leave the trial
+    // permanently unjudgeable. Only stamps trials that have not started (the
+    // update is scoped to startedAt: null), so the second and third machines
+    // on the route do not keep resetting the window.
+    const loadedSkus = loadedLines.map((l) => l.sku);
+    if (loadedSkus.length > 0) {
+      const startable = await tx.productTrial.findMany({
+        where: { sku: { in: loadedSkus }, status: { in: ['planned', 'ordered'] }, startedAt: null },
+        select: { id: true, locationIds: true },
+      });
+      for (const trial of startable) {
+        // Only when THIS machine is one of the trial's machines: trial stock
+        // reaching an unrelated location is a mis-pick, not the trial starting.
+        const ids = Array.isArray(trial.locationIds) ? trial.locationIds : [];
+        if (!ids.includes(locationId)) continue;
+        await tx.productTrial.updateMany({
+          where: { id: trial.id, startedAt: null },
+          data: { status: 'live', startedAt: new Date() },
         });
       }
     }

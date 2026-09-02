@@ -519,3 +519,122 @@ describe('computeLocationNeeds — not-on-planogram report for family flavours',
     expect(notOnPlanogram.skus).toEqual([]);
   });
 });
+
+describe('computeLocationNeeds — trials', () => {
+  const base = {
+    freshSkus: new Set(),
+    membersByMealType: {},
+    membersByParent: {},
+    availableOf: { NEW: 100, COKE: 100 },
+    earliestExpiryOf: () => null,
+  };
+
+  it('picks a trial product that has no config and no planogram slot', () => {
+    const { needs } = computeLocationNeeds({
+      ...base,
+      scope: null,
+      configs: [],
+      mealConfigs: [],
+      trials: [{ sku: 'NEW', trialQty: 10 }],
+      stockOf: () => 0,
+    });
+    expect(needs).toContainEqual({ sku: 'NEW', qty: 10 });
+  });
+
+  it('tops a trial up to its target rather than refilling it every run', () => {
+    const { needs } = computeLocationNeeds({
+      ...base,
+      scope: null,
+      configs: [],
+      mealConfigs: [],
+      trials: [{ sku: 'NEW', trialQty: 10 }],
+      stockOf: (sku) => (sku === 'NEW' ? 6 : 0),
+    });
+    expect(needs).toContainEqual({ sku: 'NEW', qty: 4 });
+  });
+
+  it('asks for nothing when the trial machine is already at target', () => {
+    const { needs } = computeLocationNeeds({
+      ...base,
+      scope: null,
+      configs: [],
+      mealConfigs: [],
+      trials: [{ sku: 'NEW', trialQty: 10 }],
+      stockOf: () => 10,
+    });
+    expect(needs.find((n) => n.sku === 'NEW')).toBeUndefined();
+  });
+
+  it('picks trials alongside the normal configured lines', () => {
+    const { needs } = computeLocationNeeds({
+      ...base,
+      scope: null,
+      configs: [{ sku: 'COKE', maxStock: 12 }],
+      mealConfigs: [],
+      trials: [{ sku: 'NEW', trialQty: 10 }],
+      stockOf: (sku) => (sku === 'COKE' ? 4 : 0),
+    });
+    expect(needs).toContainEqual({ sku: 'COKE', qty: 8 });
+    expect(needs).toContainEqual({ sku: 'NEW', qty: 10 });
+  });
+
+  it('never double-fills a SKU that has both a trial and a config', () => {
+    // Happens while an adopted product is being given a real config and its
+    // trial row is still open.
+    const { needs } = computeLocationNeeds({
+      ...base,
+      scope: null,
+      configs: [{ sku: 'NEW', maxStock: 30 }],
+      mealConfigs: [],
+      trials: [{ sku: 'NEW', trialQty: 10 }],
+      stockOf: () => 0,
+    });
+    const forNew = needs.filter((n) => n.sku === 'NEW');
+    expect(forNew).toEqual([{ sku: 'NEW', qty: 10 }]); // trial target wins, once
+  });
+
+  it('never double-fills a SKU that has both a trial and a planogram slot', () => {
+    const scope = buildPlanogramScope(
+      [{ shelf: 1, position: 0, targetType: 'sku', sku: 'NEW', capacity: 30 }],
+      [{ shelf: 1, slots: 6, unitsPerSlot: 9 }],
+    );
+    const { needs, notOnPlanogram } = computeLocationNeeds({
+      ...base,
+      scope,
+      configs: [],
+      mealConfigs: [],
+      trials: [{ sku: 'NEW', trialQty: 10 }],
+      stockOf: () => 0,
+    });
+    expect(needs.filter((n) => n.sku === 'NEW')).toEqual([{ sku: 'NEW', qty: 10 }]);
+    expect(notOnPlanogram.skus).not.toContain('NEW');
+  });
+
+  it('does not warn that a trial product is missing from the planogram', () => {
+    const scope = buildPlanogramScope(
+      [{ shelf: 1, position: 0, targetType: 'sku', sku: 'COKE', capacity: 12 }],
+      [{ shelf: 1, slots: 6, unitsPerSlot: 9 }],
+    );
+    const { notOnPlanogram } = computeLocationNeeds({
+      ...base,
+      scope,
+      configs: [{ sku: 'NEW', maxStock: 30 }],
+      mealConfigs: [],
+      trials: [{ sku: 'NEW', trialQty: 10 }],
+      stockOf: () => 0,
+    });
+    // NEW is deliberately off-diagram — that is what a trial IS, not a fault.
+    expect(notOnPlanogram.skus).not.toContain('NEW');
+  });
+
+  it('behaves exactly as before when there are no trials', () => {
+    const { needs } = computeLocationNeeds({
+      ...base,
+      scope: null,
+      configs: [{ sku: 'COKE', maxStock: 12 }],
+      mealConfigs: [],
+      stockOf: () => 4,
+    });
+    expect(needs).toEqual([{ sku: 'COKE', qty: 8 }]);
+  });
+});

@@ -1,9 +1,10 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { CalendarClock, PackageCheck, ListChecks, Receipt } from 'lucide-react';
+import { CalendarClock, PackageCheck, ListChecks, Receipt, FlaskConical } from 'lucide-react';
 import { useStock } from '../../../context/StockContext';
 import ActionCard from '../../ui/ActionCard';
 import useUninvoicedCount from './useUninvoicedCount';
+import useTrialsNeedingDecision from './useTrialsNeedingDecision';
 
 function formatDay(iso) {
   if (!iso) return null;
@@ -22,6 +23,7 @@ export default function OrdersLanding() {
 
   const pending = (data.orders || []).filter((o) => o.status === 'pending');
   const uninvoiced = useUninvoicedCount(data.orders);
+  const trialsToDecide = useTrialsNeedingDecision();
   const supplierName = (id) => data.suppliers.find((s) => s.id === id)?.name || 'No supplier';
 
   // Soonest expected delivery first; undated orders last (newest first there).
@@ -75,6 +77,13 @@ export default function OrdersLanding() {
           title="Invoices"
           description="Check what we were charged against what we ordered and received."
           badge={uninvoiced > 0 ? `${uninvoiced} to check` : null}
+        />
+        <ActionCard
+          to="/orders/trials"
+          icon={FlaskConical}
+          title="Trials"
+          description="New products, bought and placed on purpose, judged on what they earn."
+          badge={trialsToDecide > 0 ? `${trialsToDecide} to decide` : null}
         />
       </div>
 

@@ -36,6 +36,7 @@ const OrdersLanding = lazy(() => import('./components/pages/orders/OrdersLanding
 const SuppliersConfig = lazy(() => import('./components/pages/orders/SuppliersConfig'));
 const Invoices = lazy(() => import('./components/pages/orders/Invoices'));
 const InvoiceReconcile = lazy(() => import('./components/pages/orders/InvoiceReconcile'));
+const Trials = lazy(() => import('./components/pages/orders/Trials'));
 
 // Parent layouts — small, stay eager so tab chrome renders instantly.
 import OrdersLayout from './components/pages/orders/OrdersLayout';
@@ -193,6 +194,7 @@ function AppLayout() {
                 <Route path="receive" element={<ReceiveStock />} />
                 <Route path="invoices" element={<Invoices />} />
                 <Route path="invoices/:id" element={<InvoiceReconcile />} />
+                <Route path="trials" element={<Trials />} />
                 <Route path="suppliers" element={<SuppliersConfig />} />
               </Route>
 

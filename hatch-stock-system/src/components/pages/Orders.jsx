@@ -682,6 +682,10 @@ export default function Orders() {
     const baseFields = {
       supplierId: item.supplierId || null,
       supplierName: item.supplierName || null,
+      // Carried onto the buying list and the PO so the line stays identifiable
+      // as a trial all the way to receiving (the item schema is passthrough).
+      isTrial: item.isTrial === true,
+      trialId: item.trialId ?? null,
       unitsPerBox: upb,
       unitCost: item.unitPrice,
       machineStock: item.machineStock,
@@ -1010,7 +1014,10 @@ export default function Orders() {
   // decides what saves); they just drop out of the table.
   const isTinyTopup = (i) => (i.orderQty ?? 0) > 0 && boxesFor(i) <= 1 && (i.netNeed ?? 0) <= 2;
   const isSuppressed = (i) =>
-    !i.manual && // explicitly added lines are never filtered out of view
+    // Explicitly added lines, and trials, are never filtered out of view: a
+    // small trial order looks exactly like a "tiny top-up" to the filters, and
+    // silently hiding the one genuinely new line defeats the point of it.
+    !i.manual && !i.isTrial &&
     ((hideZero && (i.orderQty ?? 0) === 0) || (hideTinyTopups && isTinyTopup(i)));
   const visibleSuggestions = suggestedItems.filter((i) => !isSuppressed(i));
   const suppressedCount = suggestedItems.length - visibleSuggestions.length;
@@ -1106,7 +1113,14 @@ export default function Orders() {
             )}
           </td>
           <td className="px-2 py-2">
-            {item.manual ? (
+            {item.isTrial ? (
+              <span
+                className="text-xs px-1.5 py-0.5 rounded whitespace-nowrap bg-sky-500/20 text-sky-400"
+                title="A product on trial — ordered to its trial quantity, not from sales history"
+              >
+                TRIAL
+              </span>
+            ) : item.manual ? (
               <span className="text-xs px-1.5 py-0.5 rounded whitespace-nowrap bg-teal-500/20 text-teal-400" title="Added by hand — not from the suggestion engine">
                 ADDED
               </span>
