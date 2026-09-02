@@ -416,9 +416,14 @@ export async function syncProductCatalog(config) {
   // "updated" instead — the upsert itself stays correct either way).
   const existing = await prisma.product.findMany({
     where: { sku: { in: allSkus } },
-    select: { sku: true },
+    select: { sku: true, costLocked: true },
   });
   const existingSet = new Set(existing.map(p => p.sku));
+  // Products whose unit cost was proved by a reconciled supplier invoice. This
+  // sync used to overwrite unit_cost from VendLive's costPrice on every pull,
+  // so a cost learned from a real invoice survived until the next nightly run
+  // and margin quietly reverted to whatever was typed into VendLive.
+  const costLocked = new Set(existing.filter(p => p.costLocked).map(p => p.sku));
 
   let created = 0;
   let updated = 0;
@@ -440,7 +445,10 @@ export async function syncProductCatalog(config) {
       update: {
         name: vl.productName,
         ...(vl.category != null && { category: vl.category }),
-        ...(vl.costPrice > 0 && { unitCost: vl.costPrice }),
+        // Invoice-proved costs win over VendLive's costPrice (see costLocked).
+        ...(vl.costPrice > 0 && !costLocked.has(sku) && { unitCost: vl.costPrice }),
+        // salePrice is NOT locked: VendLive is the authority on what the
+        // machine charges, which is the opposite direction to cost.
         ...(vl.salePrice > 0 && { salePrice: vl.salePrice }),
         // fresh-meal classification intentionally left untouched on update
       },

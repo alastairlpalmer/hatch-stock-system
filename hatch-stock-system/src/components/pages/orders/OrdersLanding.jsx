@@ -1,8 +1,9 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { CalendarClock, PackageCheck, ListChecks } from 'lucide-react';
+import { CalendarClock, PackageCheck, ListChecks, Receipt } from 'lucide-react';
 import { useStock } from '../../../context/StockContext';
 import ActionCard from '../../ui/ActionCard';
+import useUninvoicedCount from './useUninvoicedCount';
 
 function formatDay(iso) {
   if (!iso) return null;
@@ -20,6 +21,7 @@ export default function OrdersLanding() {
   const { data } = useStock();
 
   const pending = (data.orders || []).filter((o) => o.status === 'pending');
+  const uninvoiced = useUninvoicedCount(data.orders);
   const supplierName = (id) => data.suppliers.find((s) => s.id === id)?.name || 'No supplier';
 
   // Soonest expected delivery first; undated orders last (newest first there).
@@ -66,6 +68,13 @@ export default function OrdersLanding() {
           icon={ListChecks}
           title="Buying Lists"
           description="The weekly supplier-grouped list — share, PDF, create POs."
+        />
+        <ActionCard
+          to="/orders/invoices"
+          icon={Receipt}
+          title="Invoices"
+          description="Check what we were charged against what we ordered and received."
+          badge={uninvoiced > 0 ? `${uninvoiced} to check` : null}
         />
       </div>
 

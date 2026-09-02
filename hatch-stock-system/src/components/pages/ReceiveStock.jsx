@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useStock } from '../../context/StockContext';
 import QtyInput from '../ui/QtyInput';
 import BarcodeScanner from '../scanner/BarcodeScanner';
@@ -499,6 +499,7 @@ export default function ReceiveStock() {
       await receiveOrder(selectedOrder.id, lines, receiveWarehouseId, { closeShort });
 
       setSuccess({
+        orderId: selectedOrder.id,
         units: totalReceivingNow,
         lines: lines.length,
         supplierName: getSupplierName(selectedOrder.supplierId),
@@ -600,6 +601,16 @@ export default function ReceiveStock() {
                   {success.outcome === 'open' && `Order kept open — ${success.shortUnits} unit${success.shortUnits === 1 ? '' : 's'} still expected.`}
                   {success.outcome === 'closedShort' && `Order closed short — ${success.shortUnits} undelivered unit${success.shortUnits === 1 ? '' : 's'} written off.`}
                 </div>
+                {/* Goods-in is only half the delivery. The invoice check used
+                    to be a separate errand nobody was prompted to run, so it
+                    happened late or not at all — offer it at the one moment
+                    the delivery is fresh in mind. */}
+                <Link
+                  to={`/orders/invoices?orderId=${success.orderId}`}
+                  className="inline-block mt-2 text-emerald-400 hover:text-emerald-300 underline underline-offset-2"
+                >
+                  Check the invoice for this delivery →
+                </Link>
               </div>
               <button onClick={() => setSuccess(null)} className="text-zinc-500 hover:text-zinc-300 text-sm shrink-0">
                 Dismiss
