@@ -13,6 +13,7 @@ import {
   countTradingDaysInWindow,
 } from '../utils/trading-days.js';
 import { getEffectiveLayout } from './planogram-scope.js';
+import { trialNeedAtLocation, trialsByLocation, ACTIVE_TRIAL_STATUSES } from './product-trials.js';
 
 const MS_PER_DAY = 86_400_000;
 const round = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -332,10 +333,20 @@ export function effectiveMaxStock(scope, key, configMax) {
  * fill cap comes from the diagram's slot capacity (config maxStock fallback).
  * Assigned-but-unplaced targets are returned in `excluded` so the UI can warn
  * instead of silently dropping selling products.
+ *
+ * `trials` are the active ProductTrial entries for THIS location. They are the
+ * one thing that bypasses all of the above: a trial product is by definition
+ * not assigned, not on the diagram and has no sales history, so every gate
+ * here would drop it. See the trial branch at the end of this function.
  */
-async function buildLocationGrossLines(location, now, meta, planogram = null) {
+async function buildLocationGrossLines(location, now, meta, planogram = null, trials = []) {
   const assignedSkus = location.assignedItems.map((a) => a.sku);
   const scope = planogram?.scope ?? null;
+  // A trial SKU is served ONLY by the trial branch — excluding it here stops
+  // the same product being counted twice if it is also assigned or slotted
+  // (which happens the moment an adopted product is being slotted while its
+  // trial row is still open).
+  const trialBySku = new Map(trials.map((t) => [t.sku, t]));
 
   const [stockRows, configRows, mealConfigRows, parentConfigRows, parents, velocity] = await Promise.all([
     prisma.locationStock.findMany({ where: { locationId: location.id } }),
@@ -347,8 +358,15 @@ async function buildLocationGrossLines(location, now, meta, planogram = null) {
   ]);
 
   // Mirror the client behaviour: scope to assigned products, or all if none set.
+  // Discontinued products are excluded from BUYING only — a rejected trial (or
+  // a delisted line) stops appearing on buying lists, but pick lists still
+  // place whatever is left in the warehouse so the remaining stock sells
+  // through instead of being written off.
   const products = await prisma.product.findMany({
-    where: assignedSkus.length > 0 ? { sku: { in: assignedSkus } } : undefined,
+    where: {
+      lifecycle: { not: 'discontinued' },
+      ...(assignedSkus.length > 0 ? { sku: { in: assignedSkus } } : {}),
+    },
   });
 
   const stockMap = Object.fromEntries(stockRows.map((s) => [s.sku, s.quantity]));
@@ -368,7 +386,7 @@ async function buildLocationGrossLines(location, now, meta, planogram = null) {
   // THIS machine) is applied per location inside each branch, so the same
   // flavour can be slotted at machine A and absent at machine B without ever
   // being double-counted.
-  for (const p of products.filter((p) => !p.isFreshMeal && !p.parentId)) {
+  for (const p of products.filter((p) => !p.isFreshMeal && !p.parentId && !trialBySku.has(p.sku))) {
     if (scope && !scope.skuSet.has(p.sku)) {
       excluded.skus.push({ sku: p.sku, name: p.name });
       continue;
@@ -550,6 +568,66 @@ async function buildLocationGrossLines(location, now, meta, planogram = null) {
     });
   }
 
+  // --- Trials: the one lane that ignores assignment, planogram and velocity ---
+  //
+  // A product we have never sold has no assignment, no slot and no sales, so
+  // every branch above drops it and the weekly buy can only ever reorder what
+  // we already stock. A trial names the machines and the per-machine quantity
+  // explicitly, and that quantity stands in for slot capacity until the
+  // product earns a real slot.
+  //
+  // The products are fetched here rather than reusing `products` above: that
+  // query is scoped to the location's assigned SKUs, which a trial product is
+  // not in.
+  if (trials.length > 0) {
+    const trialProducts = await prisma.product.findMany({
+      where: { sku: { in: [...trialBySku.keys()] } },
+    });
+
+    for (const p of trialProducts) {
+      const trial = trialBySku.get(p.sku);
+      const machineStock = stockMap[p.sku] || 0;
+      const grossNeed = trialNeedAtLocation({ trialQty: trial.trialQty, machineStock });
+      if (grossNeed <= 0) continue;
+
+      // A trial that has started accrues real velocity; report it so the
+      // buying list shows early movement, but do NOT let it change the target
+      // — the trial quantity is the whole point of a controlled test.
+      const v = velOf(p.sku);
+      const blended = blendVelocity(v.vShort, v.vLong);
+
+      lines.push({
+        type: 'product',
+        sku: p.sku,
+        name: p.name,
+        category: p.category,
+        preferredSupplierId: p.preferredSupplierId ?? null,
+        // Flags, not a new priority value: the frontend keys its row styling
+        // off priority, and adding a fourth value there would silently fall
+        // through every existing style map.
+        isTrial: true,
+        trialId: trial.trialId,
+        machineStock,
+        minStock: null,
+        maxStock: trial.trialQty,
+        unitsPerBox: p.unitsPerBox || 1,
+        unitCost: p.unitCost || 0,
+        vShort: v.vShort,
+        vLong: v.vLong,
+        blendedVelocity: blended,
+        salesSample: v.unitsLong,
+        // No burn-down: with no history there is nothing to burn down, and a
+        // started trial is being topped up to its target anyway.
+        projectedStock: machineStock,
+        targetFill: trial.trialQty,
+        grossNeed,
+        daysOfCover: blended > 0 ? round(machineStock / blended) : null,
+        priority: 'warning',
+        basis: 'trial',
+      });
+    }
+  }
+
   return { lines, excluded };
 }
 
@@ -578,6 +656,10 @@ function mergeLines(perLocationResults) {
           mealType: s.mealType, // undefined except Frive groups
           parentId: s.parentId, // undefined except family groups
           isFreshMeal: s.type === 'freshMealGroup',
+          // A trial line stays a trial line however many machines it merges
+          // across — the flag rides on the product, not the location.
+          isTrial: s.isTrial === true,
+          trialId: s.trialId ?? null,
           name: s.name,
           category: s.category ?? (s.type === 'freshMealGroup' ? 'Fresh Meal' : 'Other'),
           supplierId,
@@ -606,6 +688,7 @@ function mergeLines(perLocationResults) {
       if (s.maxStock == null) line.maxStockKnown = false;
       else line.maxStock += s.maxStock;
       if (s.priority === 'critical') line.priority = 'critical';
+      if (s.isTrial) { line.isTrial = true; line.trialId = line.trialId ?? s.trialId ?? null; }
 
       if (s.type === 'freshMealGroup' || s.type === 'parentGroup') {
         for (const m of s.members || []) {
@@ -789,6 +872,18 @@ export function mergeNotOnPlanogram(perLocation) {
 }
 
 /**
+ * Active trials indexed by location. One query per suggestion run, however
+ * many locations are in it.
+ */
+async function loadTrialsByLocation() {
+  const trials = await prisma.productTrial.findMany({
+    where: { status: { in: ACTIVE_TRIAL_STATUSES } },
+    select: { id: true, sku: true, status: true, trialQty: true, locationIds: true },
+  });
+  return trialsByLocation(trials);
+}
+
+/**
  * Build purchase-order suggestions for ONE location, netted against the shared
  * warehouse pool and pending POs.
  *
@@ -808,11 +903,14 @@ export async function buildOrderSuggestions(locationId, now = new Date(), option
   const { leadTimeDays, coverDays } = resolveOrderingConfig(location);
   const meta = resolveModeMeta(now, { mode, coverDays });
 
-  const [planogram, suppliers] = await Promise.all([
+  const [planogram, suppliers, trialMap] = await Promise.all([
     getEffectiveLayout(location.id, { prefer: 'next' }),
     prisma.supplier.findMany({ select: { id: true, name: true } }),
+    loadTrialsByLocation(),
   ]);
-  const { lines, excluded } = await buildLocationGrossLines(location, now, meta, planogram);
+  const { lines, excluded } = await buildLocationGrossLines(
+    location, now, meta, planogram, trialMap.get(location.id) || [],
+  );
   const supplierNameOf = Object.fromEntries(suppliers.map((s) => [s.id, s.name]));
 
   const merged = mergeLines([{ location, lines }]);
@@ -868,6 +966,8 @@ export async function buildConsolidatedSuggestions(locationIds, now = new Date()
 
   const meta = resolveModeMeta(now, { mode });
 
+  const trialMap = await loadTrialsByLocation();
+
   const [perLocationResults, suppliers] = await Promise.all([
     Promise.all(
       locations.map(async (location) => {
@@ -877,7 +977,9 @@ export async function buildConsolidatedSuggestions(locationIds, now = new Date()
           ? { ...meta, coverTradingDays: resolveOrderingConfig(location).coverDays }
           : meta;
         const planogram = await getEffectiveLayout(location.id, { prefer: 'next' });
-        const { lines, excluded } = await buildLocationGrossLines(location, now, locMeta, planogram);
+        const { lines, excluded } = await buildLocationGrossLines(
+          location, now, locMeta, planogram, trialMap.get(location.id) || [],
+        );
         return { location, lines, excluded, planogram };
       }),
     ),

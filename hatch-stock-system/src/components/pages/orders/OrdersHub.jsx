@@ -1,9 +1,10 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { CalendarClock, PackageCheck, Receipt } from 'lucide-react';
+import { CalendarClock, PackageCheck, Receipt, FlaskConical } from 'lucide-react';
 import { useStock } from '../../../context/StockContext';
 import ActionCard from '../../ui/ActionCard';
 import useUninvoicedCount from './useUninvoicedCount';
+import useTrialsNeedingDecision from './useTrialsNeedingDecision';
 
 // Mobile entry point for the Orders area (the /orders index on phones —
 // desktop gets OrdersLanding). Big tap targets for the three ordering jobs;
@@ -12,6 +13,7 @@ export default function OrdersHub() {
   const { data } = useStock();
   const pendingCount = (data.orders || []).filter((o) => o.status === 'pending').length;
   const uninvoiced = useUninvoicedCount(data.orders);
+  const trialsToDecide = useTrialsNeedingDecision();
 
   return (
     <div className="space-y-4">
@@ -36,6 +38,13 @@ export default function OrdersHub() {
           title="Invoices"
           description="Check what we were charged against what we ordered and received."
           badge={uninvoiced > 0 ? `${uninvoiced} to check` : null}
+        />
+        <ActionCard
+          to="/orders/trials"
+          icon={FlaskConical}
+          title="Trials"
+          description="New products, bought and placed on purpose, judged on what they earn."
+          badge={trialsToDecide > 0 ? `${trialsToDecide} to decide` : null}
         />
       </div>
 

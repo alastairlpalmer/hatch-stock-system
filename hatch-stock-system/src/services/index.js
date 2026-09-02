@@ -12,6 +12,7 @@ export { authService } from './auth.service';
 export { buyingListsService } from './buyingLists.service';
 export { pickListsService } from './pickLists.service';
 export { invoicesService } from './invoices.service';
+export { productTrialsService } from './productTrials.service';
 export {
   warehousesService,
   suppliersService,
