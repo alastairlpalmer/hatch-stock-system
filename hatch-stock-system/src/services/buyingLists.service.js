@@ -50,8 +50,15 @@ export const buyingListsService = {
    * Returns { orders: [...], buyingList }. A never-shared list answers 409
    * code NOT_SHARED unless force is true (the weekly rule is share-first).
    */
-  createOrders: async (id, { force = false } = {}) => {
-    const response = await api.post(`/buying-lists/${id}/create-orders`, force ? { force } : {});
+  createOrders: async (id, { force = false, forceBelowMinimum = false } = {}) => {
+    // Two INDEPENDENT soft gates, each with its own flag and its own 409:
+    //   NOT_SHARED     — the warehouse/supplier have not seen this list
+    //   BELOW_MINIMUM  — a supplier group is under their order minimum
+    // Confirming one must never waive the other, so they are never combined.
+    const response = await api.post(`/buying-lists/${id}/create-orders`, {
+      ...(force ? { force } : {}),
+      ...(forceBelowMinimum ? { forceBelowMinimum } : {}),
+    });
     return response.data;
   },
 

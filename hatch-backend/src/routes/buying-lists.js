@@ -5,6 +5,7 @@ import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { contentDispositionAttachment } from '../utils/http.js';
 import { ensureFreshMealPlaceholders } from '../utils/fresh-meal-placeholders.js';
+import { computeShortfall } from '../services/order-topup.js';
 
 const router = express.Router();
 
@@ -86,7 +87,10 @@ async function supplierMetaFor(items) {
   if (ids.length === 0) return {};
   const suppliers = await prisma.supplier.findMany({
     where: { id: { in: ids } },
-    select: { id: true, name: true, orderDays: true, leadTimeDays: true, minOrderValue: true },
+    select: {
+      id: true, name: true, orderDays: true, leadTimeDays: true,
+      minOrderValue: true, minOrderUnits: true, freeDeliveryValue: true,
+    },
   });
   return Object.fromEntries(suppliers.map((s) => [s.id, s]));
 }
@@ -224,6 +228,54 @@ router.post('/:id/create-orders', asyncHandler(async (req, res) => {
   const orderSkuFor = (item) => (isGroupLine(item) ? placeholderSkus[item.mealType] : item.sku);
 
   const supplierMeta = await supplierMetaFor(items);
+
+  // Second soft gate, same shape as NOT_SHARED above: a supplier group that
+  // falls short of its minimum was warned about in the UI, but nothing stopped
+  // the PO going out — and a rejected order discovered on delivery day costs a
+  // whole restock cycle. Reports every short group at once so one confirmation
+  // clears them all rather than the operator hitting this repeatedly.
+  //
+  // Its own flag, NOT the `force` that clears NOT_SHARED: "I know the
+  // warehouse hasn't seen this list" and "I know this order may be refused"
+  // are different risks, and letting one confirmation silently waive the other
+  // is how a soft gate becomes decoration.
+  const belowMinimum = groupBySupplier(items)
+    .filter((g) => g.supplierId)
+    .map((g) => {
+      const meta = supplierMeta[g.supplierId];
+      if (!meta) return null;
+      const shortfall = computeShortfall({
+        subtotal: g.items.reduce((sum, i) => sum + lineTotal(i), 0),
+        totalUnits: g.items.reduce((sum, i) => sum + (i.quantity || 0), 0),
+        minOrderValue: meta.minOrderValue,
+        minOrderUnits: meta.minOrderUnits,
+      });
+      return shortfall.blocked
+        ? {
+            supplierId: g.supplierId,
+            supplierName: g.supplierName,
+            minOrderValue: meta.minOrderValue ?? null,
+            minOrderUnits: meta.minOrderUnits ?? null,
+            ...shortfall,
+          }
+        : null;
+    })
+    .filter(Boolean);
+
+  if (belowMinimum.length > 0 && req.body?.forceBelowMinimum !== true) {
+    const describe = (b) => {
+      const parts = [];
+      if (b.value > 0) parts.push(`${money(b.value)} short of their ${money(b.minOrderValue)} minimum`);
+      if (b.units > 0) parts.push(`${b.units} units short of their ${b.minOrderUnits}-unit minimum`);
+      return `${b.supplierName} is ${parts.join(', and ')}`;
+    };
+    return res.status(409).json({
+      error: `${belowMinimum.map(describe).join('; ')}. Top the order up, or confirm to send it anyway.`,
+      code: 'BELOW_MINIMUM',
+      belowMinimum,
+    });
+  }
+
   const defaultExpected = list.targetDate
     ? new Date(new Date(list.targetDate).getTime() - 2 * MS_PER_DAY)
     : null;
@@ -420,15 +472,33 @@ export function renderBuyingListPdf(list, supplierMeta = {}) {
           .text(`${group.supplierName} total: ${money(subtotal)}`, MARGIN, y + 5, { width: W, align: 'right' });
         y += 20;
 
-        // Minimum-order shortfall warning ("!" — the Helvetica core font has
-        // no ⚠ glyph).
+        // Minimum-order shortfall warnings ("!" — the Helvetica core font has
+        // no ⚠ glyph). A supplier's floor can be a value, a unit count, or
+        // both, and each is reported on its own line: "£40 short" and "20 units
+        // short" are different things to fix.
+        const groupUnits = group.items.reduce((sum, i) => sum + (i.quantity || 0), 0);
+        const warnings = [];
         if (meta?.minOrderValue != null && subtotal < meta.minOrderValue) {
-          ensureRoom(14);
-          doc.font('Helvetica-Bold').fontSize(8).fillColor('#B45309').text(
-            `! ${money(meta.minOrderValue - subtotal)} below the ${money(meta.minOrderValue)} minimum order`,
-            MARGIN, y, { width: W, align: 'right' },
-          );
-          y = doc.y + 8;
+          warnings.push(`! ${money(meta.minOrderValue - subtotal)} below the ${money(meta.minOrderValue)} minimum order`);
+        }
+        if (meta?.minOrderUnits != null && groupUnits < meta.minOrderUnits) {
+          warnings.push(`! ${meta.minOrderUnits - groupUnits} units below the ${meta.minOrderUnits}-unit minimum`);
+        }
+        // Free delivery is a saving, not a blocker — noted only once the
+        // blocking minimums are already met, so it never reads as a problem.
+        if (warnings.length === 0 && meta?.freeDeliveryValue != null && subtotal < meta.freeDeliveryValue) {
+          warnings.push(`${money(meta.freeDeliveryValue - subtotal)} more for free delivery`);
+        }
+
+        if (warnings.length > 0) {
+          for (const warning of warnings) {
+            ensureRoom(14);
+            doc.font('Helvetica-Bold').fontSize(8)
+              .fillColor(warning.startsWith('!') ? '#B45309' : BRAND.sub)
+              .text(warning, MARGIN, y, { width: W, align: 'right' });
+            y = doc.y + 2;
+          }
+          y += 6;
         } else {
           y += 6;
         }
