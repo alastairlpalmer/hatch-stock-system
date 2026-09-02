@@ -1,8 +1,9 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { CalendarClock, PackageCheck } from 'lucide-react';
+import { CalendarClock, PackageCheck, Receipt } from 'lucide-react';
 import { useStock } from '../../../context/StockContext';
 import ActionCard from '../../ui/ActionCard';
+import useUninvoicedCount from './useUninvoicedCount';
 
 // Mobile entry point for the Orders area (the /orders index on phones —
 // desktop gets OrdersLanding). Big tap targets for the three ordering jobs;
@@ -10,6 +11,7 @@ import ActionCard from '../../ui/ActionCard';
 export default function OrdersHub() {
   const { data } = useStock();
   const pendingCount = (data.orders || []).filter((o) => o.status === 'pending').length;
+  const uninvoiced = useUninvoicedCount(data.orders);
 
   return (
     <div className="space-y-4">
@@ -27,6 +29,13 @@ export default function OrdersHub() {
           title="Receive Order"
           description="Check deliveries in — quantities, expiry dates, flavour allocation."
           badge={pendingCount > 0 ? `${pendingCount} pending` : null}
+        />
+        <ActionCard
+          to="/orders/invoices"
+          icon={Receipt}
+          title="Invoices"
+          description="Check what we were charged against what we ordered and received."
+          badge={uninvoiced > 0 ? `${uninvoiced} to check` : null}
         />
       </div>
 

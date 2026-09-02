@@ -24,6 +24,17 @@ model Product {
   unitsPerBox         Int?     @default(1) @map("units_per_box")
   barcode             String?  @unique
   preferredSupplierId String?  @map("preferred_supplier_id")
+  // The supplier's OWN code for this product, as printed on their invoices.
+  // Learned: when an operator hand-matches an invoice line, the code on that
+  // line is saved here, so the same supplier's next invoice auto-matches.
+  // Not unique — two suppliers may reuse a code, and the match is scoped to
+  // the invoice's supplier. See prisma/manual-sql/033_supplier_invoices.sql.
+  supplierCode        String?  @map("supplier_code")
+  // unitCost is the LAST INVOICED effective cost once an invoice has been
+  // reconciled (see PriceHistory). costLocked stops the VendLive catalog sync
+  // overwriting a cost we learned from a real invoice with VendLive's own
+  // costPrice field, which is only ever as good as what was typed into it.
+  costLocked          Boolean  @default(false) @map("cost_locked")
   // Frive fresh-meal grouping. isFreshMeal flags a weekly-rotating Frive meal;
   // mealType holds the configurable bucket name (see MealType); mealTypeConfirmed
   // gates name-based auto-guesses until a human confirms them.
@@ -48,7 +59,9 @@ model Product {
   orderItems        OrderItem[]
   sales             Sale[]
   locationConfigs   LocationConfig[]
+  priceHistory      PriceHistory[]
 
+  @@index([supplierCode])
   @@map("products")
 }
 
@@ -332,8 +345,10 @@ model Supplier {
   createdAt DateTime @default(now()) @map("created_at")
 
   // Relations
-  orders   Order[]
-  products Product[]
+  orders       Order[]
+  products     Product[]
+  invoices     SupplierInvoice[]
+  priceHistory PriceHistory[]
 
   @@map("suppliers")
 }
@@ -365,6 +380,7 @@ model Order {
   supplier Supplier?      @relation(fields: [supplierId], references: [id])
   items    OrderItem[]
   receipts OrderReceipt[]
+  invoices SupplierInvoice[]
 
   @@map("orders")
 }
@@ -379,6 +395,14 @@ model OrderItem {
   // the operator explicitly closes it short.
   receivedQty Int   @default(0) @map("received_qty")
   unitPrice Float? @map("unit_price")
+  // What the supplier actually billed for this line, written when an invoice
+  // is reconciled against the PO. Kept separate from quantity/receivedQty
+  // because all three legitimately differ: we order 48, 44 turn up, 48 are
+  // invoiced — and that gap is exactly what the reconcile screen exists to
+  // surface. invoicedUnitPrice is the EFFECTIVE cost (line and whole-invoice
+  // discounts applied), not the headline price on the page.
+  invoicedQty       Float? @map("invoiced_qty")
+  invoicedUnitPrice Float? @map("invoiced_unit_price")
 
   order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
   product Product @relation(fields: [sku], references: [sku])
@@ -406,6 +430,119 @@ model OrderReceipt {
   @@index([orderId])
   @@index([createdAt])
   @@map("order_receipts")
+}
+
+// ============ SUPPLIER INVOICES ============
+
+// What we were actually CHARGED, against what we ordered and what turned up.
+//
+// Before this existed the loop ended at goods-in: a PO carried catalogue costs,
+// receiving recorded quantities, and the supplier's invoice was reconciled by
+// hand in a spreadsheet — so discounts, price rises and over-billing never
+// reached the system, and every margin figure was computed from a guess.
+//
+// The operator converts the supplier's PDF to CSV and pastes it; parsing and
+// matching live in services/invoice-reconcile.js. Reconciling writes the
+// effective unit costs back to products.unit_cost (+ PriceHistory) so the next
+// buying list prices itself off what we really pay.
+//
+// orderId is nullable: a credit note, or an invoice that arrives before anyone
+// raised a PO, is still worth recording. Header figures are stored AS PRINTED
+// so the screen can check the lines add up to the supplier's own total.
+model SupplierInvoice {
+  id             String    @id @default(uuid())
+  orderId        String?   @map("order_id")
+  supplierId     String?   @map("supplier_id")
+  invoiceRef     String    @map("invoice_ref")
+  invoiceDate    DateTime? @map("invoice_date")
+  // Header, as printed. goodsTotal is net of line discounts and before
+  // orderDiscount; orderDiscount is a whole-invoice deduction (settlement
+  // discount, volume rebate) that reconciling spreads across the lines pro
+  // rata by line value.
+  goodsTotal     Float?    @map("goods_total")
+  orderDiscount  Float?    @map("order_discount")
+  deliveryCharge Float?    @map("delivery_charge")
+  vat            Float?
+  invoiceTotal   Float?    @map("invoice_total")
+  // Whether the delivery charge was landed onto unit costs at reconcile time.
+  // Off by default: delivery is a cost of the ORDER, and folding it in makes a
+  // product's unit cost depend on what else shared the van.
+  spreadDelivery Boolean   @default(false) @map("spread_delivery")
+  status         String    @default("draft") // draft, reconciled
+  notes          String?
+  reconciledAt   DateTime? @map("reconciled_at")
+  reconciledBy   String?   @map("reconciled_by")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  order    Order?                @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  supplier Supplier?             @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  lines    SupplierInvoiceLine[]
+
+  @@index([orderId])
+  @@index([supplierId, invoiceDate])
+  @@index([status])
+  @@map("supplier_invoices")
+}
+
+// One line as it appears on the supplier's invoice.
+//
+// sku is NULLABLE on purpose: an unmatched line (a supplier code we've never
+// seen, a delivery surcharge billed as a product) is kept verbatim rather than
+// dropped, so the stored invoice always reconciles to its own printed total.
+// rawCode/rawName preserve the supplier's own wording — rawCode is what gets
+// promoted to products.supplier_code when an operator matches the line by hand,
+// which is what makes each week's invoice faster than the last.
+//
+// quantity is a Float: suppliers bill part-cases and weights.
+model SupplierInvoiceLine {
+  id           String  @id @default(uuid())
+  invoiceId    String  @map("invoice_id")
+  sku          String?
+  rawCode      String? @map("raw_code")
+  rawName      String? @map("raw_name")
+  quantity     Float
+  // Headline price per unit, before discounts.
+  unitPrice    Float   @map("unit_price")
+  lineDiscount Float   @default(0) @map("line_discount")
+  lineTotal    Float   @map("line_total")
+  // After the line discount and this line's pro-rata share of the whole-invoice
+  // discount — this is what feeds PriceHistory and products.unit_cost.
+  effectiveUnitCost Float? @map("effective_unit_cost")
+  // How the sku was arrived at: supplierCode | sku | barcode | name | manual.
+  // 'manual' is the signal to learn rawCode as the product's supplier code.
+  matchedBy    String? @map("matched_by")
+
+  invoice SupplierInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId])
+  @@index([sku])
+  @@map("supplier_invoice_lines")
+}
+
+// Append-only cost trail. products.unit_cost holds only the CURRENT cost, so
+// without this a price rise is invisible the moment it is applied — and "are
+// we paying more than we were in the spring?" is unanswerable. One row per
+// observed cost change, per supplier (the same SKU legitimately costs
+// different amounts from different suppliers).
+model PriceHistory {
+  id            String   @id @default(uuid())
+  sku           String
+  supplierId    String?  @map("supplier_id")
+  unitCost      Float    @map("unit_cost")
+  // invoice | manual | vendlive — where the number came from, so a hand-typed
+  // cost is never mistaken for one proved by an invoice.
+  source        String
+  invoiceId     String?  @map("invoice_id")
+  effectiveFrom DateTime @map("effective_from")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  product  Product   @relation(fields: [sku], references: [sku], onDelete: Cascade)
+  supplier Supplier? @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+
+  @@index([sku, effectiveFrom])
+  @@index([invoiceId])
+  @@map("price_history")
 }
 
 // ============ BUYING LISTS ============

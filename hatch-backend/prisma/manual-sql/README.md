@@ -11,7 +11,7 @@ against the DIRECT_DATABASE_URL) after taking a backup. Scripts are written to
 be idempotent (`IF NOT EXISTS`) and safe to re-run.
 
 **Ordering:** apply the numbered scripts in ascending numeric order
-(`001` → `029`). Each ships with the backend deploy that depends on it — apply
+(`001` → `033`). Each ships with the backend deploy that depends on it — apply
 the script BEFORE deploying that backend. This directory is the single source
 of truth; the old top-level `hatch-backend/manual-sql/` directory (which held
 `011`–`018` and a colliding second `019`) was merged in here. The collision —
@@ -38,6 +38,18 @@ confirmations.
 
 `029`: restock planner (renumbered — see above; applied in production between
 018 and 020).
+
+`030`–`032`: buying-list shared_at, pick-list location_ids, Hill St config copy
++ family backfill. Applied 2026-08-31 — late: the backends that needed 030/031
+were already deployed, which broke all pick-list queries (missing
+`pick_lists.location_ids`) until the scripts were run. Apply BEFORE merging a
+schema-touching PR to main; Railway deploys main immediately.
+
+`033`: supplier invoices — `supplier_invoices`, `supplier_invoice_lines`,
+`price_history`, plus `order_items.invoiced_qty`/`invoiced_unit_price` and
+`products.supplier_code`/`cost_locked`. Seeds one baseline `price_history` row
+per costed product so the first reconcile has something to compare against.
+**Not yet applied.**
 
 ## `pending/` — NOT part of the applied sequence
 

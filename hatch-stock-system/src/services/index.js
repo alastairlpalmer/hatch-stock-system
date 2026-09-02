@@ -11,6 +11,7 @@ export { vendliveService } from './vendlive.service';
 export { authService } from './auth.service';
 export { buyingListsService } from './buyingLists.service';
 export { pickListsService } from './pickLists.service';
+export { invoicesService } from './invoices.service';
 export {
   warehousesService,
   suppliersService,

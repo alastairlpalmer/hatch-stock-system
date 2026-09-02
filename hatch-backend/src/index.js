@@ -17,6 +17,7 @@ import locationsRouter from './routes/locations.js';
 import inventoryRouter from './routes/inventory.js';
 import ordersRouter from './routes/orders.js';
 import buyingListsRouter, { publicBuyingListsRouter } from './routes/buying-lists.js';
+import invoicesRouter from './routes/invoices.js';
 import pickListsRouter from './routes/pick-lists.js';
 import attentionRouter from './routes/attention.js';
 import restockPlannerRouter from './routes/restock-planner.js';
@@ -162,6 +163,7 @@ app.use('/api/locations', locationsRouter);
 app.use('/api/inventory', inventoryRouter);
 app.use('/api/orders', ordersRouter);
 app.use('/api/buying-lists', buyingListsRouter);
+app.use('/api/invoices', invoicesRouter);
 // Read-only share view — exempted from auth above; the token is the credential.
 app.use('/api/public/buying-lists', publicBuyingListsRouter);
 app.use('/api/pick-lists', pickListsRouter);
