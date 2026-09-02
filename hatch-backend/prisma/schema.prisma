@@ -399,6 +399,12 @@ model Supplier {
   orderDays     Json?  @map("order_days")
   leadTimeDays  Int?   @map("lead_time_days")
   minOrderValue Float? @map("min_order_value")
+  // A supplier's floor is not always money: some quote a case or unit count,
+  // and free delivery is a SEPARATE, softer threshold above the minimum —
+  // missing it costs a delivery fee, missing the minimum means the order is
+  // refused outright. See manual-sql/035_supplier_minimums.sql.
+  minOrderUnits     Int?   @map("min_order_units")
+  freeDeliveryValue Float? @map("free_delivery_value")
   createdAt DateTime @default(now()) @map("created_at")
 
   // Relations

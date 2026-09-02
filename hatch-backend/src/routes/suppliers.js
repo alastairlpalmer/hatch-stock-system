@@ -20,6 +20,8 @@ const supplierFieldsSchema = z.object({
   orderDays: z.array(z.enum(WEEKDAYS)).nullish(),
   leadTimeDays: z.coerce.number().int().min(0).max(30).nullish(),
   minOrderValue: z.coerce.number().min(0).nullish(),
+  minOrderUnits: z.coerce.number().int().min(0).nullish(),
+  freeDeliveryValue: z.coerce.number().min(0).nullish(),
 });
 
 export const supplierCreateSchema = supplierFieldsSchema;
@@ -70,7 +72,7 @@ router.put('/:id', asyncHandler(async (req, res) => {
 
   // Only touch fields that were present in the payload; explicit nulls clear.
   const data = {};
-  for (const key of ['name', 'contact', 'email', 'phone', 'address', 'orderDays', 'leadTimeDays', 'minOrderValue']) {
+  for (const key of ['name', 'contact', 'email', 'phone', 'address', 'orderDays', 'leadTimeDays', 'minOrderValue', 'minOrderUnits', 'freeDeliveryValue']) {
     if (key in req.body) data[key] = parsed[key] ?? null;
   }
   if (data.name === null) delete data.name; // name is required — ignore null

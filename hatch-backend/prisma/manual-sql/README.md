@@ -11,7 +11,7 @@ against the DIRECT_DATABASE_URL) after taking a backup. Scripts are written to
 be idempotent (`IF NOT EXISTS`) and safe to re-run.
 
 **Ordering:** apply the numbered scripts in ascending numeric order
-(`001` → `034`). Each ships with the backend deploy that depends on it — apply
+(`001` → `035`). Each ships with the backend deploy that depends on it — apply
 the script BEFORE deploying that backend. This directory is the single source
 of truth; the old top-level `hatch-backend/manual-sql/` directory (which held
 `011`–`018` and a colliding second `019`) was merged in here. The collision —
@@ -55,6 +55,11 @@ per costed product so the first reconcile has something to compare against.
 and the `product_trials` table. A `trial` product bypasses the assignment,
 planogram and velocity gates in the ordering and picking engines and fills to
 its trial quantity instead. **Not yet applied.**
+
+`035`: supplier minimums — `suppliers.min_order_units` and
+`free_delivery_value`, so a supplier's floor can be a case count as well as a
+pound value, and free delivery is tracked as the separate (softer) threshold it
+is. Feeds the minimum-order top-up planner. **Not yet applied.**
 
 ## `pending/` — NOT part of the applied sequence
 

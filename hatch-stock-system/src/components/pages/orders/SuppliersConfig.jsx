@@ -31,10 +31,12 @@ export function supplierConfigSummary(s) {
   }
   if (s.leadTimeDays != null) parts.push(`${s.leadTimeDays}d lead`);
   if (s.minOrderValue != null) parts.push(`£${s.minOrderValue} min`);
+  if (s.minOrderUnits != null) parts.push(`${s.minOrderUnits} units min`);
+  if (s.freeDeliveryValue != null) parts.push(`free del. over £${s.freeDeliveryValue}`);
   return parts.join(' · ');
 }
 
-const emptyForm = { name: '', contact: '', email: '', phone: '', orderDays: [], leadTimeDays: '', minOrderValue: '' };
+const emptyForm = { name: '', contact: '', email: '', phone: '', orderDays: [], leadTimeDays: '', minOrderValue: '', minOrderUnits: '', freeDeliveryValue: '' };
 
 export default function SuppliersConfig() {
   const { data, addSupplier, updateSupplier, deleteSupplier, updateProduct } = useStock();
@@ -80,6 +82,8 @@ export default function SuppliersConfig() {
       orderDays: Array.isArray(sup.orderDays) ? sup.orderDays : [],
       leadTimeDays: sup.leadTimeDays != null ? String(sup.leadTimeDays) : '',
       minOrderValue: sup.minOrderValue != null ? String(sup.minOrderValue) : '',
+      minOrderUnits: sup.minOrderUnits != null ? String(sup.minOrderUnits) : '',
+      freeDeliveryValue: sup.freeDeliveryValue != null ? String(sup.freeDeliveryValue) : '',
     });
     setEditingId(sup.id);
     setShowForm(true);
@@ -106,6 +110,8 @@ export default function SuppliersConfig() {
         orderDays: form.orderDays.length ? form.orderDays : null,
         leadTimeDays: form.leadTimeDays !== '' ? parseInt(form.leadTimeDays, 10) : null,
         minOrderValue: form.minOrderValue !== '' ? parseFloat(form.minOrderValue) : null,
+        minOrderUnits: form.minOrderUnits !== '' ? parseInt(form.minOrderUnits, 10) : null,
+        freeDeliveryValue: form.freeDeliveryValue !== '' ? parseFloat(form.freeDeliveryValue) : null,
       };
       if (editingId) await updateSupplier(editingId, supplier);
       else await addSupplier(supplier);
@@ -201,7 +207,18 @@ export default function SuppliersConfig() {
               <Field label="Minimum order (£)">
                 <input type="number" min="0" step="0.01" value={form.minOrderValue} onChange={e => setForm({ ...form, minOrderValue: e.target.value })} placeholder="—" className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm" />
               </Field>
+              <Field label="Minimum order (units)">
+                <input type="number" min="0" value={form.minOrderUnits} onChange={e => setForm({ ...form, minOrderUnits: e.target.value })} placeholder="—" className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm" />
+              </Field>
+              <Field label="Free delivery over (£)">
+                <input type="number" min="0" step="0.01" value={form.freeDeliveryValue} onChange={e => setForm({ ...form, freeDeliveryValue: e.target.value })} placeholder="—" className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm" />
+              </Field>
             </div>
+            <p className="text-xs text-zinc-600">
+              Leave any of these blank when the supplier sets no such rule. A minimum
+              blocks the order; the free-delivery threshold only costs a delivery fee,
+              so the buy warns about it separately and never treats it as urgent.
+            </p>
           </div>
           <button onClick={submit} disabled={loading} className="px-4 py-2 bg-emerald-600 text-white rounded text-sm font-medium hover:bg-emerald-500 disabled:opacity-50">
             {loading ? 'Saving...' : editingId ? 'Update' : 'Add'} Supplier

@@ -1,5 +1,6 @@
 import express from 'express';
 import { z } from 'zod';
+import { Prisma } from '@prisma/client';
 import prisma from '../utils/db.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { batchInputFromReceivedItem, validateReceiptLines } from '../utils/receiving.js';
@@ -10,8 +11,23 @@ import {
   buildOrderSuggestions,
   buildConsolidatedSuggestions,
 } from '../services/order-suggestions.js';
+import { computeShortfall, planTopup, DEFAULT_MAX_COVER_DAYS } from '../services/order-topup.js';
+import { VELOCITY_WINDOW_DAYS } from '../config/ordering.js';
+import { SALE_LOCATION_JOINS } from '../utils/sales-location.js';
+import { countTradingDaysInWindow } from '../utils/trading-days.js';
 
 const router = express.Router();
+
+// The supplier fields the top-up response needs — the caller renders the
+// thresholds alongside the plan, and re-fetching the supplier for them would
+// be a round-trip for data we already have in hand.
+const supplierSummary = (s) => ({
+  id: s.id,
+  name: s.name,
+  minOrderValue: s.minOrderValue,
+  minOrderUnits: s.minOrderUnits,
+  freeDeliveryValue: s.freeDeliveryValue,
+});
 
 // Get all orders
 router.get('/', asyncHandler(async (req, res) => {
@@ -90,6 +106,136 @@ router.get('/suggestions/consolidated', asyncHandler(async (req, res) => {
   }
 
   res.json(result);
+}));
+
+/**
+ * Propose what to add to a supplier's order so it clears their minimum.
+ *
+ * A supplier minimum used to be a warning and nothing more — shown in three
+ * places, actionable in none, leaving the operator to scroll the catalogue
+ * guessing at padding. Guessing costs money both ways: pad with the wrong
+ * thing and it expires in the warehouse; don't pad and the order is refused
+ * (or a delivery charge that was avoidable gets paid).
+ *
+ * Candidates are that supplier's own products, ranked by how few days of cover
+ * each box adds — buying more of something that turns over fast just means it
+ * arrives a week early, whereas anything that doesn't move is dead money.
+ * Nothing is pushed past a cover ceiling, and the answer is allowed to be
+ * "this can't be reached sensibly" (see `exhausted`).
+ *
+ * Excluded outright: fresh meals (perishable, and the Frive menu rotates
+ * weekly, so a padded box may not even exist by delivery), trials (the
+ * quantity IS the experiment), discontinued lines, and anything already on
+ * this buy — `excludeSkus` carries what the caller has selected, which the
+ * server cannot know.
+ *
+ * NOTE: must be declared BEFORE `/:id` (route-ordering gotcha).
+ */
+router.post('/topup', asyncHandler(async (req, res) => {
+  const { supplierId, subtotal, totalUnits, excludeSkus, maxCoverDays, includeFreeDelivery } = z.object({
+    supplierId: z.string().min(1),
+    subtotal: z.coerce.number().min(0).default(0),
+    totalUnits: z.coerce.number().int().min(0).default(0),
+    excludeSkus: z.array(z.string()).default([]),
+    maxCoverDays: z.coerce.number().int().min(1).max(120).default(DEFAULT_MAX_COVER_DAYS),
+    // Opt in to padding up to the free-delivery threshold as well. Off by
+    // default: it is a saving, not a requirement, and treating it as blocking
+    // would inflate every order.
+    includeFreeDelivery: z.coerce.boolean().default(false),
+  }).parse(req.body);
+
+  const supplier = await prisma.supplier.findUnique({ where: { id: supplierId } });
+  if (!supplier) return res.status(404).json({ error: 'Supplier not found' });
+
+  const shortfall = computeShortfall({
+    subtotal,
+    totalUnits,
+    minOrderValue: supplier.minOrderValue,
+    minOrderUnits: supplier.minOrderUnits,
+    freeDeliveryValue: supplier.freeDeliveryValue,
+  });
+
+  const valueShortfall = includeFreeDelivery
+    ? Math.max(shortfall.value, shortfall.freeDelivery)
+    : shortfall.value;
+
+  if (valueShortfall <= 0 && shortfall.units <= 0) {
+    return res.json({ supplier: supplierSummary(supplier), shortfall, plan: null, candidatesConsidered: 0 });
+  }
+
+  const excluded = new Set(excludeSkus);
+  const products = await prisma.product.findMany({
+    where: {
+      preferredSupplierId: supplierId,
+      isFreshMeal: false,
+      lifecycle: 'active',
+    },
+    select: { sku: true, name: true, unitsPerBox: true, unitCost: true },
+  });
+  const skus = products.map((p) => p.sku).filter((sku) => !excluded.has(sku));
+  if (skus.length === 0) {
+    return res.json({ supplier: supplierSummary(supplier), shortfall, plan: null, candidatesConsidered: 0 });
+  }
+
+  // Velocity over the long window, summed across every active location — a
+  // top-up is a warehouse-level decision, so per-location rates would only be
+  // re-summed here anyway. Per TRADING day, matching the ordering engine.
+  const since = new Date(Date.now() - VELOCITY_WINDOW_DAYS.long * 86_400_000);
+  const tradingDays = Math.max(1, countTradingDaysInWindow(since, new Date()));
+  const soldRows = await prisma.$queryRaw`
+    SELECT s.sku, COALESCE(SUM(s.quantity), 0)::int AS units
+    FROM sales s
+    ${SALE_LOCATION_JOINS}
+    WHERE s.is_refunded = false
+      AND s."timestamp" >= ${since}
+      AND s.sku IN (${Prisma.join(skus)})
+    GROUP BY s.sku
+  `;
+  const soldOf = Object.fromEntries(soldRows.map((r) => [r.sku, r.units]));
+
+  // "How much have we got" = warehouse + machines + already on order. All
+  // three delay the moment a padded box is actually needed, and ignoring any
+  // of them would recommend padding something we are already sitting on.
+  const [whRows, locRows, pendingItems] = await Promise.all([
+    prisma.warehouseStock.groupBy({ by: ['sku'], where: { sku: { in: skus } }, _sum: { quantity: true } }),
+    prisma.locationStock.groupBy({ by: ['sku'], where: { sku: { in: skus } }, _sum: { quantity: true } }),
+    prisma.orderItem.findMany({
+      where: { sku: { in: skus }, order: { status: 'pending' } },
+      select: { sku: true, quantity: true, receivedQty: true },
+    }),
+  ]);
+  const onHandOf = {};
+  for (const r of whRows) onHandOf[r.sku] = (onHandOf[r.sku] || 0) + (r._sum.quantity || 0);
+  for (const r of locRows) onHandOf[r.sku] = (onHandOf[r.sku] || 0) + (r._sum.quantity || 0);
+  for (const it of pendingItems) {
+    onHandOf[it.sku] = (onHandOf[it.sku] || 0) + Math.max(0, it.quantity - (it.receivedQty || 0));
+  }
+
+  const candidates = products
+    .filter((p) => !excluded.has(p.sku))
+    .map((p) => ({
+      sku: p.sku,
+      name: p.name,
+      unitsPerBox: p.unitsPerBox || 1,
+      unitCost: p.unitCost,
+      velocityPerDay: (soldOf[p.sku] || 0) / tradingDays,
+      currentUnits: onHandOf[p.sku] || 0,
+    }));
+
+  const plan = planTopup({
+    candidates,
+    valueShortfall,
+    unitsShortfall: shortfall.units,
+    maxCoverDays,
+  });
+
+  res.json({
+    supplier: supplierSummary(supplier),
+    shortfall,
+    targetedFreeDelivery: includeFreeDelivery && shortfall.freeDelivery > shortfall.value,
+    plan,
+    candidatesConsidered: candidates.filter((c) => c.velocityPerDay > 0).length,
+  });
 }));
 
 // Recent receiving events across all orders (partial receipts included) —

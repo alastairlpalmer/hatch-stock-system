@@ -325,6 +325,10 @@ export default function Orders() {
   // Manually added lines (products outside the suggestions)
   const [manualSku, setManualSku] = useState('');
   const [manualQty, setManualQty] = useState('');
+  // Minimum-order top-up, keyed by supplier id so two short suppliers can each
+  // hold their own proposal:
+  //   { [supplierId]: { loading?, error?, shortfall, plan, targetedFreeDelivery } }
+  const [topups, setTopups] = useState({});
   const [stockFreshness, setStockFreshness] = useState([]); // [{ locationId, mapped, lastSyncedAt }]
   const [syncingLocations, setSyncingLocations] = useState(() => new Set());
   const [panelBanner, setPanelBanner] = useState(null); // { type, message, details? }
@@ -671,6 +675,80 @@ export default function Orders() {
     });
     setManualSku('');
     setManualQty('');
+  };
+
+  /**
+   * Ask the server what to add so a supplier's group clears their minimum.
+   *
+   * The server does the ranking (it needs velocity, warehouse, machine and
+   * on-order figures for the supplier's WHOLE catalogue, not just the lines
+   * already on this buy), but only the client knows what is currently
+   * selected — hence excludeSkus.
+   */
+  const requestTopup = async (supplierId, group, { includeFreeDelivery = false } = {}) => {
+    const selected = group.items.filter(i => i.selected && i.orderQty > 0);
+    setTopups(prev => ({ ...prev, [supplierId]: { loading: true } }));
+    try {
+      const res = await ordersService.topup({
+        supplierId,
+        subtotal: selected.reduce((a, i) => a + lineValue(i), 0),
+        totalUnits: selected.reduce((a, i) => a + (i.orderQty || 0), 0),
+        // Everything already on the buy for ANY supplier: a product's
+        // preferred supplier can differ from the group it landed in, and
+        // proposing a SKU that is already on the list would double it.
+        excludeSkus: suggestedItems.filter(i => i.sku && i.selected).map(i => i.sku),
+        includeFreeDelivery,
+      });
+      setTopups(prev => ({ ...prev, [supplierId]: res }));
+    } catch (err) {
+      setTopups(prev => ({
+        ...prev,
+        [supplierId]: { error: err.response?.data?.error || 'Could not work out a top-up — try again.' },
+      }));
+    }
+  };
+
+  /** Accept a proposal: fold every addition into the buy as an edited line. */
+  const applyTopup = (supplierId) => {
+    const plan = topups[supplierId]?.plan;
+    if (!plan?.additions?.length) return;
+    const supplier = data.suppliers.find(s => s.id === supplierId);
+
+    setSuggestedItems(items => {
+      const next = [...items];
+      for (const add of plan.additions) {
+        editedKeysRef.current.add(add.sku);
+        const idx = next.findIndex(i => i.key === add.sku);
+        if (idx !== -1) {
+          // Already a line (a zero-order one, or a hidden tiny top-up) — add to
+          // it rather than creating a duplicate key.
+          next[idx] = {
+            ...next[idx],
+            orderQty: (next[idx].orderQty || 0) + add.units,
+            selected: true,
+            edited: true,
+          };
+        } else {
+          next.push({
+            key: add.sku,
+            sku: add.sku,
+            name: add.name,
+            supplierId,
+            supplierName: supplier?.name || null,
+            unitsPerBox: add.unitsPerBox || 1,
+            unitPrice: add.unitCost || 0,
+            unitCost: add.unitCost || 0,
+            orderQty: add.units,
+            selected: true,
+            manual: true, // shows the ADDED badge and survives re-fetches
+            edited: true,
+          });
+        }
+      }
+      return next;
+    });
+
+    setTopups(prev => ({ ...prev, [supplierId]: undefined }));
   };
 
   // Map a suggestion line to buying-list item lines. Fresh-meal groups stay
@@ -1565,9 +1643,24 @@ export default function Orders() {
                     const orderDays = Array.isArray(supplier?.orderDays) && supplier.orderDays.length
                       ? supplier.orderDays.map(d => ({ mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' }[d] || d)).join(' · ')
                       : null;
+                    const groupUnits = selectedInGroup.reduce((a, i) => a + (i.orderQty || 0), 0);
                     const minShort = supplier?.minOrderValue != null && subtotal < supplier.minOrderValue
                       ? supplier.minOrderValue - subtotal
                       : null;
+                    const unitsShort = supplier?.minOrderUnits != null && groupUnits < supplier.minOrderUnits
+                      ? supplier.minOrderUnits - groupUnits
+                      : null;
+                    // Free delivery is a saving, not a requirement — offered
+                    // only once the blocking minimums are already met, so it
+                    // never competes for attention with an order that would be
+                    // refused outright.
+                    const freeDelShort = supplier?.freeDeliveryValue != null
+                      && subtotal < supplier.freeDeliveryValue
+                      && minShort == null && unitsShort == null
+                      ? supplier.freeDeliveryValue - subtotal
+                      : null;
+                    const topup = group.supplierId ? topups[group.supplierId] : null;
+                    const isShort = minShort != null || unitsShort != null;
                     return (
                       <React.Fragment key={group.supplierId || '__none__'}>
                         <tr className="bg-zinc-800/60">
@@ -1586,10 +1679,95 @@ export default function Orders() {
                                     £{minShort.toFixed(2)} short of £{supplier.minOrderValue.toFixed(2)} min
                                   </span>
                                 )}
+                                {unitsShort != null && (
+                                  <span className="ml-2 text-amber-400">
+                                    {unitsShort} units short of {supplier.minOrderUnits}
+                                  </span>
+                                )}
+                                {freeDelShort != null && (
+                                  <span className="ml-2 text-sky-400">
+                                    £{freeDelShort.toFixed(2)} to free delivery
+                                  </span>
+                                )}
+                                {(isShort || freeDelShort != null) && !topup && (
+                                  <button
+                                    onClick={() => requestTopup(group.supplierId, group, { includeFreeDelivery: !isShort })}
+                                    className="ml-2 px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 hover:bg-amber-500/30"
+                                  >
+                                    Top it up
+                                  </button>
+                                )}
+                                {topup?.loading && <span className="ml-2 text-zinc-500">Working it out…</span>}
                               </span>
                             </div>
                           </td>
                         </tr>
+                        {topup && !topup.loading && (
+                          <tr className="bg-zinc-900/60">
+                            <td colSpan={6} className="px-2 py-2">
+                              {topup.error ? (
+                                <div className="text-xs text-red-400">{topup.error}</div>
+                              ) : !topup.plan?.additions?.length ? (
+                                <div className="flex items-center justify-between gap-2 text-xs">
+                                  <span className="text-zinc-400">
+                                    Nothing here is worth padding with — everything from this
+                                    supplier is either already well stocked or has no sales to
+                                    justify buying more.
+                                  </span>
+                                  <button
+                                    onClick={() => setTopups(prev => ({ ...prev, [group.supplierId]: undefined }))}
+                                    className="text-zinc-500 hover:text-zinc-300"
+                                  >
+                                    Dismiss
+                                  </button>
+                                </div>
+                              ) : (
+                                <div className="space-y-2">
+                                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                                    <span className="text-xs text-zinc-300">
+                                      Add £{topup.plan.valueAdded.toFixed(2)} ({topup.plan.unitsAdded} units)
+                                      {topup.targetedFreeDelivery ? ' to reach free delivery' : ' to clear the minimum'}
+                                    </span>
+                                    <span className="flex items-center gap-2">
+                                      <button
+                                        onClick={() => applyTopup(group.supplierId)}
+                                        className="px-2.5 py-1 rounded bg-emerald-500 text-zinc-900 text-xs font-medium hover:bg-emerald-400"
+                                      >
+                                        Add these
+                                      </button>
+                                      <button
+                                        onClick={() => setTopups(prev => ({ ...prev, [group.supplierId]: undefined }))}
+                                        className="text-xs text-zinc-500 hover:text-zinc-300"
+                                      >
+                                        No thanks
+                                      </button>
+                                    </span>
+                                  </div>
+                                  <ul className="space-y-1">
+                                    {topup.plan.additions.map(a => (
+                                      <li key={a.sku} className="flex items-baseline justify-between gap-3 text-xs">
+                                        <span className="text-zinc-300 truncate">
+                                          {a.boxes} × {a.name}
+                                          <span className="text-zinc-600"> ({a.units} units)</span>
+                                        </span>
+                                        <span className="shrink-0 text-zinc-500">{a.reason}</span>
+                                        <span className="shrink-0 text-zinc-400">£{a.lineTotal.toFixed(2)}</span>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                  {topup.plan.exhausted && (
+                                    <p className="text-xs text-amber-400">
+                                      Still £{topup.plan.valueRemaining.toFixed(2)} short after this.
+                                      Nothing else from this supplier can take more stock without
+                                      going past four weeks of cover — worth a call to them rather
+                                      than buying it.
+                                    </p>
+                                  )}
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        )}
                         {group.items.map(renderSuggestionRow)}
                       </React.Fragment>
                     );

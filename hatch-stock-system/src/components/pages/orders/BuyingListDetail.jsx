@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { useStock } from '../../../context/StockContext';
 import buyingListsService from '../../../services/buyingLists.service';
+import { ordersService } from '../../../services/orders.service';
 import ProductSearchCombobox from '../../ui/ProductSearchCombobox';
 
 const STATUS_STYLES = {
@@ -85,7 +86,18 @@ export default function BuyingListDetail() {
   const [addQty, setAddQty] = useState('');
 
   // Action confirms / async states
-  const [confirmAction, setConfirmAction] = useState(null); // 'createOrders' | 'archive' | 'delete'
+  const [confirmAction, setConfirmAction] = useState(null); // 'createOrders' | 'createOrdersUnshared' | 'createOrdersBelowMinimum' | 'archive' | 'delete'
+  // Overrides the operator has already granted this attempt. Accumulated
+  // rather than passed straight through, because the two soft gates fire in
+  // sequence: clearing NOT_SHARED must not lose that grant when the next
+  // attempt trips BELOW_MINIMUM, and clearing BELOW_MINIMUM must not silently
+  // re-waive NOT_SHARED.
+  const [orderOverrides, setOrderOverrides] = useState({ force: false, forceBelowMinimum: false });
+  // Per-supplier shortfalls from a BELOW_MINIMUM 409, so the prompt can say
+  // which supplier is short and by how much.
+  const [belowMinimum, setBelowMinimum] = useState(null);
+  // Minimum-order top-up proposals, keyed by supplier id.
+  const [topups, setTopups] = useState({});
   const [actionBusy, setActionBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const [shareCopied, setShareCopied] = useState(false);
@@ -193,6 +205,76 @@ export default function BuyingListDetail() {
     setAddQty('');
   };
 
+  /**
+   * Ask the server what to add so this supplier's group clears their minimum,
+   * and fold the answer straight into the list.
+   *
+   * Available here as well as in Plan Buy because create-orders BLOCKS on a
+   * short group from this screen — telling the operator to "top it up first"
+   * with no way to do it here would be a dead end.
+   */
+  const requestTopup = async (supplierId, rows, { includeFreeDelivery = false } = {}) => {
+    setTopups(prev => ({ ...prev, [supplierId]: { loading: true } }));
+    try {
+      const res = await ordersService.topup({
+        supplierId,
+        subtotal: rows.reduce((a, { item }) => a + (item.quantity || 0) * (item.unitCost || 0), 0),
+        totalUnits: rows.reduce((a, { item }) => a + (item.quantity || 0), 0),
+        // Every SKU already on the list, whatever supplier group it sits in —
+        // proposing one that is already here would double it.
+        excludeSkus: (list.items || []).map(i => i.sku).filter(Boolean),
+        includeFreeDelivery,
+      });
+      setTopups(prev => ({ ...prev, [supplierId]: res }));
+    } catch (err) {
+      setTopups(prev => ({
+        ...prev,
+        [supplierId]: { error: err.response?.data?.error || 'Could not work out a top-up — try again.' },
+      }));
+    }
+  };
+
+  const applyTopup = (supplierId) => {
+    const plan = topups[supplierId]?.plan;
+    if (!plan?.additions?.length) return;
+    const supplier = data.suppliers.find(s => s.id === supplierId);
+
+    mutateList(prev => {
+      const items = [...(prev.items || [])];
+      for (const add of plan.additions) {
+        const idx = items.findIndex(i => i.sku === add.sku);
+        if (idx !== -1) {
+          // Already a line — add to it rather than creating a duplicate the
+          // PO would then carry twice.
+          const quantity = (items[idx].quantity || 0) + add.units;
+          items[idx] = {
+            ...items[idx],
+            quantity,
+            boxes: boxesFor(quantity, items[idx].unitsPerBox || add.unitsPerBox || 1),
+          };
+        } else {
+          items.push({
+            sku: add.sku,
+            name: add.name,
+            supplierId,
+            supplierName: supplier?.name || null,
+            quantity: add.units,
+            unitsPerBox: add.unitsPerBox || 1,
+            boxes: add.boxes,
+            unitCost: add.unitCost || 0,
+          });
+        }
+      }
+      return { ...prev, items };
+    });
+
+    setTopups(prev => ({ ...prev, [supplierId]: undefined }));
+    // The shortfall that triggered the block is gone — clear the prompt so the
+    // operator is not still looking at a stale "send anyway?".
+    setBelowMinimum(null);
+    setConfirmAction(null);
+  };
+
   // ===== Actions =====
 
   // Copying the text or the link counts as sharing — stamp sharedAt so the
@@ -250,7 +332,9 @@ export default function BuyingListDetail() {
     }
   };
 
-  const createOrders = async ({ force = false } = {}) => {
+  const createOrders = async (grant = {}) => {
+    const overrides = { ...orderOverrides, ...grant };
+    setOrderOverrides(overrides);
     setActionBusy(true);
     setBanner(null);
     let keepConfirm = false;
@@ -262,7 +346,7 @@ export default function BuyingListDetail() {
         items: list.items,
         notes: list.notes || '',
       });
-      const res = await buyingListsService.createOrders(list.id, { force });
+      const res = await buyingListsService.createOrders(list.id, overrides);
       // Server responses here don't carry supplierMeta — keep the loaded copy.
       if (res.buyingList) setList(prev => ({ ...res.buyingList, supplierMeta: prev?.supplierMeta }));
       else setList(prev => ({ ...prev, status: 'ordered', orderIds: (res.orders || []).map(o => o.id) }));
@@ -271,9 +355,18 @@ export default function BuyingListDetail() {
       // Pull the new POs into shared state so they show on the Orders page.
       try { await refresh(); } catch { /* non-fatal */ }
     } catch (err) {
-      if (err.response?.status === 409 && err.response?.data?.code === 'NOT_SHARED') {
+      const code = err.response?.status === 409 ? err.response?.data?.code : null;
+      if (code === 'NOT_SHARED') {
         // Weekly rule: share the list before ordering. Offer the override.
         setConfirmAction('createOrdersUnshared');
+        keepConfirm = true;
+        return;
+      }
+      if (code === 'BELOW_MINIMUM') {
+        // A supplier group is under their order minimum — an order that may be
+        // refused on delivery day, which costs a whole restock cycle.
+        setBelowMinimum(err.response.data.belowMinimum || []);
+        setConfirmAction('createOrdersBelowMinimum');
         keepConfirm = true;
         return;
       }
@@ -517,11 +610,36 @@ export default function BuyingListDetail() {
                 {actionBusy ? 'Creating…' : 'Create anyway'}
               </button>
               <button
-                onClick={() => setConfirmAction(null)}
+                onClick={() => { setConfirmAction(null); setOrderOverrides({ force: false, forceBelowMinimum: false }); }}
                 disabled={actionBusy}
                 className="px-3 py-2 bg-zinc-800 text-zinc-400 rounded text-sm hover:bg-zinc-700"
               >
                 Share first
+              </button>
+            </span>
+          ) : confirmAction === 'createOrdersBelowMinimum' ? (
+            <span className="flex flex-wrap items-center gap-2 text-sm">
+              <span className="text-amber-400">
+                {(belowMinimum || []).map((b) => {
+                  const parts = [];
+                  if (b.value > 0) parts.push(`£${b.value.toFixed(2)} short of £${(b.minOrderValue ?? 0).toFixed(2)}`);
+                  if (b.units > 0) parts.push(`${b.units} units short of ${b.minOrderUnits}`);
+                  return `${b.supplierName}: ${parts.join(', ')}`;
+                }).join(' · ')} — send anyway?
+              </span>
+              <button
+                onClick={() => createOrders({ forceBelowMinimum: true })}
+                disabled={actionBusy}
+                className="px-3 py-2 bg-amber-500 text-zinc-900 rounded text-sm font-medium hover:bg-amber-400 disabled:opacity-50"
+              >
+                {actionBusy ? 'Creating…' : 'Send anyway'}
+              </button>
+              <button
+                onClick={() => { setConfirmAction(null); setOrderOverrides({ force: false, forceBelowMinimum: false }); }}
+                disabled={actionBusy}
+                className="px-3 py-2 bg-zinc-800 text-zinc-400 rounded text-sm hover:bg-zinc-700"
+              >
+                Top it up first
               </button>
             </span>
           ) : confirmAction === 'createOrders' ? (
@@ -605,9 +723,22 @@ export default function BuyingListDetail() {
             const orderDays = Array.isArray(meta?.orderDays) && meta.orderDays.length
               ? meta.orderDays.map(d => ({ mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' }[d] || d)).join(' · ')
               : null;
+            const groupUnits = group.rows.reduce((a, { item }) => a + (item.quantity || 0), 0);
             const minShort = meta?.minOrderValue != null && subtotal < meta.minOrderValue
               ? meta.minOrderValue - subtotal
               : null;
+            const unitsShort = meta?.minOrderUnits != null && groupUnits < meta.minOrderUnits
+              ? meta.minOrderUnits - groupUnits
+              : null;
+            // Only once the blocking minimums are met — a saving must never
+            // compete for attention with an order that would be refused.
+            const freeDelShort = meta?.freeDeliveryValue != null
+              && subtotal < meta.freeDeliveryValue
+              && minShort == null && unitsShort == null
+              ? meta.freeDeliveryValue - subtotal
+              : null;
+            const topup = group.supplierId ? topups[group.supplierId] : null;
+            const isShort = minShort != null || unitsShort != null;
             return (
               <div key={group.supplierId || '__none__'} className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
                 <div className="flex items-center justify-between gap-3 px-4 py-3 bg-zinc-800/60 flex-wrap">
@@ -643,6 +774,94 @@ export default function BuyingListDetail() {
                       £{meta.minOrderValue.toFixed(2)} minimum met ✓
                     </div>
                   )
+                )}
+
+                {unitsShort != null && (
+                  <div className="px-4 py-2 bg-amber-500/10 border-b border-amber-500/20 text-xs text-amber-300">
+                    {unitsShort} units short of their {meta.minOrderUnits}-unit minimum ({groupUnits} on the list)
+                  </div>
+                )}
+
+                {freeDelShort != null && (
+                  <div className="px-4 py-1.5 border-b border-zinc-800 text-[11px] text-sky-400">
+                    £{freeDelShort.toFixed(2)} more would make delivery free.
+                  </div>
+                )}
+
+                {/* The fix, not just the warning. Offered whenever the group is
+                    short (or only free delivery is missing) — create-orders
+                    BLOCKS on a short group from this screen, so there has to be
+                    a way to resolve it here. */}
+                {isDraft && group.supplierId && (isShort || freeDelShort != null) && (
+                  <div className="px-4 py-2 border-b border-zinc-800">
+                    {!topup ? (
+                      <button
+                        onClick={() => requestTopup(group.supplierId, group.rows, { includeFreeDelivery: !isShort })}
+                        className="text-xs px-2 py-1 rounded bg-amber-500/20 text-amber-300 hover:bg-amber-500/30"
+                      >
+                        {isShort ? 'Top it up to the minimum' : 'Top it up to free delivery'}
+                      </button>
+                    ) : topup.loading ? (
+                      <span className="text-xs text-zinc-500">Working it out…</span>
+                    ) : topup.error ? (
+                      <span className="text-xs text-red-400">{topup.error}</span>
+                    ) : !topup.plan?.additions?.length ? (
+                      <div className="flex items-center justify-between gap-2 text-xs">
+                        <span className="text-zinc-400">
+                          Nothing from this supplier is worth padding with — it is all either
+                          well stocked already or has no sales to justify buying more.
+                        </span>
+                        <button
+                          onClick={() => setTopups(prev => ({ ...prev, [group.supplierId]: undefined }))}
+                          className="text-zinc-500 hover:text-zinc-300 shrink-0"
+                        >
+                          Dismiss
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <span className="text-xs text-zinc-300">
+                            Add £{topup.plan.valueAdded.toFixed(2)} ({topup.plan.unitsAdded} units)
+                            {topup.targetedFreeDelivery ? ' to reach free delivery' : ' to clear the minimum'}
+                          </span>
+                          <span className="flex items-center gap-2">
+                            <button
+                              onClick={() => applyTopup(group.supplierId)}
+                              className="px-2.5 py-1 rounded bg-emerald-500 text-zinc-900 text-xs font-medium hover:bg-emerald-400"
+                            >
+                              Add these
+                            </button>
+                            <button
+                              onClick={() => setTopups(prev => ({ ...prev, [group.supplierId]: undefined }))}
+                              className="text-xs text-zinc-500 hover:text-zinc-300"
+                            >
+                              No thanks
+                            </button>
+                          </span>
+                        </div>
+                        <ul className="space-y-1">
+                          {topup.plan.additions.map(a => (
+                            <li key={a.sku} className="flex items-baseline justify-between gap-3 text-xs">
+                              <span className="text-zinc-300 truncate">
+                                {a.boxes} × {a.name}
+                                <span className="text-zinc-600"> ({a.units} units)</span>
+                              </span>
+                              <span className="shrink-0 text-zinc-500">{a.reason}</span>
+                              <span className="shrink-0 text-zinc-400">£{a.lineTotal.toFixed(2)}</span>
+                            </li>
+                          ))}
+                        </ul>
+                        {topup.plan.exhausted && (
+                          <p className="text-xs text-amber-400">
+                            Still £{topup.plan.valueRemaining.toFixed(2)} short after this. Nothing
+                            else from this supplier can take more stock without going past four
+                            weeks of cover — worth a call to them rather than buying it.
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 )}
                 {/* Mobile: stacked line cards */}
                 <div className="md:hidden divide-y divide-zinc-800/60">

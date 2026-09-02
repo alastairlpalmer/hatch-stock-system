@@ -110,6 +110,44 @@ export const ordersService = {
    * @param {string[]} [locationIds] - omit/empty = all locations
    * @param {'weekly'|'topup'} [mode]
    */
+  /**
+   * Propose what to add to a supplier's order so it clears their minimum.
+   *
+   * Candidates are that supplier's own products, ranked by how few days of
+   * cover each box adds — padding with something that turns over fast just
+   * means it arrives early, whereas anything that doesn't move is dead money.
+   * Fresh meals, trials and discontinued lines are never proposed, and nothing
+   * is pushed past a cover ceiling; when the minimum can't be reached without
+   * buying stock you'd regret, `plan.exhausted` says so rather than
+   * recommending it anyway.
+   *
+   * @param {Object} p
+   * @param {string} p.supplierId
+   * @param {number} p.subtotal      value of this supplier's lines right now
+   * @param {number} p.totalUnits    units of this supplier's lines right now
+   * @param {string[]} [p.excludeSkus] SKUs already on the buy — the server
+   *   cannot know what the caller has selected
+   * @param {boolean} [p.includeFreeDelivery] also pad up to the free-delivery
+   *   threshold (off by default: a saving, not a requirement)
+   * @param {number} [p.maxCoverDays] cover ceiling, default 20 trading days
+   * @returns {Promise<{ supplier, shortfall, plan, candidatesConsidered }>}
+   *   shortfall: { value, units, freeDelivery, blocked, meetsFreeDelivery }
+   *   plan: { additions: [{ sku, name, boxes, units, unitCost, lineTotal,
+   *     coverAfterDays, reason }], valueAdded, unitsAdded, valueRemaining,
+   *     unitsRemaining, exhausted } — null when nothing is short
+   */
+  topup: async ({ supplierId, subtotal = 0, totalUnits = 0, excludeSkus = [], includeFreeDelivery = false, maxCoverDays }) => {
+    const response = await api.post('/orders/topup', {
+      supplierId,
+      subtotal,
+      totalUnits,
+      excludeSkus,
+      includeFreeDelivery,
+      ...(maxCoverDays ? { maxCoverDays } : {}),
+    });
+    return response.data;
+  },
+
   generateConsolidatedSuggestions: async (locationIds = [], mode = 'weekly') => {
     const response = await api.get('/orders/suggestions/consolidated', {
       params: {
