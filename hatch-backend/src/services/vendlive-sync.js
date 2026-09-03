@@ -106,11 +106,24 @@ const PRICE_EPSILON = 0.005;
 
 /**
  * Compute catalog price/cost updates from one ingest run's sale items.
- * VendLive is the source of truth for pricing: the newest sale's list price
- * (item.price — unaffected by discounts, which arrive separately) and cost
- * price win over whatever the catalog holds. Zero/missing values never
- * overwrite. Returns [{ sku, data: { salePrice?, unitCost? } }] only where
- * a change is actually needed.
+ *
+ * VendLive is the source of truth for the SALE price: the newest sale's list
+ * price (item.price — unaffected by discounts, which arrive separately) wins
+ * over whatever the catalog holds. That is right; VendLive is what the machine
+ * actually charges.
+ *
+ * COST is different. VendLive's costPrice is only ever as good as what was
+ * typed into it, whereas a cost taken off a reconciled supplier invoice is
+ * what we provably paid. `product.costLocked` marks the latter, and a locked
+ * cost is never overwritten here.
+ *
+ * This is the SECOND of the two paths that write products.unit_cost — the
+ * other is syncProductCatalog in vendlive-stock.js. Locking only that one left
+ * this path clobbering invoice-proved costs on every sales sync, which runs
+ * far more often than the nightly catalog pull.
+ *
+ * Zero/missing values never overwrite. Returns [{ sku, data: { salePrice?,
+ * unitCost? } }] only where a change is actually needed.
  */
 export function computeProductPriceUpdates(items, productMap) {
   const latestBySku = new Map();
@@ -131,7 +144,11 @@ export function computeProductPriceUpdates(items, productMap) {
     if (item.price > 0 && Math.abs((product.salePrice ?? 0) - item.price) > PRICE_EPSILON) {
       data.salePrice = item.price;
     }
-    if (item.costPrice > 0 && Math.abs((product.unitCost ?? 0) - item.costPrice) > PRICE_EPSILON) {
+    if (
+      !product.costLocked
+      && item.costPrice > 0
+      && Math.abs((product.unitCost ?? 0) - item.costPrice) > PRICE_EPSILON
+    ) {
       data.unitCost = item.costPrice;
     }
     if (Object.keys(data).length > 0) updates.push({ sku, data });
@@ -158,6 +175,27 @@ async function applyProductPriceUpdates(items, productMap) {
   }
 }
 
+/**
+ * The cost to stamp on a sale row.
+ *
+ * sales.cost_price is a SNAPSHOT taken at ingest — it is what every margin
+ * figure in the app is computed from (services/analytics.js), deliberately
+ * frozen so that restating a product's cost later doesn't silently rewrite
+ * last quarter's reported margin.
+ *
+ * Which cost to freeze is the question. VendLive's costPrice used to win
+ * outright, so margin was computed from a number typed into VendLive rather
+ * than from what we actually paid — the entire point of reconciling invoices.
+ * A cost proved by a reconciled invoice (costLocked) now wins instead;
+ * everything else falls back to the old order.
+ *
+ * Pure; exported for tests.
+ */
+export function resolveSaleCost(item, product) {
+  if (product?.costLocked && product.unitCost != null) return product.unitCost;
+  return item.costPrice || product?.unitCost || null;
+}
+
 /** Build the Sale create payload for a normalized item. */
 function buildSaleData(orderData, item, product, locationName, syncSource) {
   return {
@@ -166,7 +204,7 @@ function buildSaleData(orderData, item, product, locationName, syncSource) {
     productName: item.productName || product.name,
     quantity: 1,
     charged: computeCharged(item),
-    costPrice: item.costPrice || product.unitCost || null,
+    costPrice: resolveSaleCost(item, product),
     paymentMethod: null,
     locationName,
     machineName: orderData.machineName,

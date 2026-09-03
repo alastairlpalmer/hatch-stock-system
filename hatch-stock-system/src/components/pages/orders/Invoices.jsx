@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { format } from 'date-fns';
-import { Receipt, Plus, ChevronRight, AlertTriangle, Check } from 'lucide-react';
+import { Receipt, Plus, ChevronRight, AlertTriangle, Check, History } from 'lucide-react';
 import invoicesService from '../../../services/invoices.service';
 import { useStock } from '../../../context/StockContext';
 import ProductSearchCombobox from '../../ui/ProductSearchCombobox';
@@ -422,6 +422,171 @@ function NewInvoicePanel({ onCreated, onCancel, initialOrderId = '' }) {
   );
 }
 
+/**
+ * Restate historical margin from the invoice trail.
+ *
+ * Every margin figure comes from sales.cost_price, frozen at ingest. Before
+ * invoices could be reconciled that snapshot was VendLive's cost — a number
+ * nobody could prove — so reconciling improves new sales while every past
+ * month keeps reporting against the old guess. This closes that gap.
+ *
+ * Dry run first, always. Restating cost moves reported profit on periods that
+ * may already have been reported on, and doing that behind one click without
+ * showing the size of the change is how a reconciliation tool loses trust.
+ */
+function BackfillPanel() {
+  const toast = useToast();
+  const [open, setOpen] = useState(false);
+  const [preview, setPreview] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  const run = async (dryRun) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await invoicesService.backfillSaleCosts({ dryRun });
+      if (dryRun) {
+        setPreview(res);
+      } else {
+        toast.success(`Restated ${res.applied} sale${res.applied === 1 ? '' : 's'} from the invoice trail`);
+        setPreview(null);
+        setOpen(false);
+      }
+    } catch (err) {
+      setError(err.response?.data?.error || 'Could not run the restatement — check the connection and try again.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => { setOpen(true); run(true); }}
+        className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300"
+      >
+        <History size={13} />
+        Restate historical margin from reconciled invoices
+      </button>
+    );
+  }
+
+  const plan = preview?.plan;
+  const nothingToDo = plan && plan.changeCount === 0;
+
+  return (
+    <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 space-y-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 className="font-medium text-zinc-200 text-sm">Restate historical margin</h3>
+          <p className="text-xs text-zinc-500 mt-0.5 max-w-2xl">
+            Margin is calculated from the cost frozen onto each sale when it was
+            imported — which, before invoices were reconciled, was VendLive's figure
+            rather than what we actually paid. This rewrites those to the
+            invoice-proved cost that was in force on the day of each sale.
+          </p>
+        </div>
+        <button
+          onClick={() => { setOpen(false); setPreview(null); setError(null); }}
+          className="text-xs text-zinc-500 hover:text-zinc-300 shrink-0"
+        >
+          Close
+        </button>
+      </div>
+
+      {error && <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 text-sm text-red-400">{error}</div>}
+
+      {busy && !preview && <p className="text-xs text-zinc-500">Working out what would change…</p>}
+
+      {plan && (
+        nothingToDo ? (
+          <p className="text-sm text-emerald-400">
+            Nothing to restate — every sale already carries its invoice-proved cost.
+            {plan.noHistory > 0 && (
+              <span className="text-zinc-500">
+                {' '}({plan.noHistory} sales have no reconciled invoice covering their date, so they are left alone.)
+              </span>
+            )}
+          </p>
+        ) : (
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="bg-zinc-800/60 rounded-lg p-3">
+                <div className="text-[11px] uppercase text-zinc-500">Sales to restate</div>
+                <div className="text-lg font-semibold text-zinc-100">{plan.changeCount}</div>
+              </div>
+              <div className="bg-zinc-800/60 rounded-lg p-3">
+                <div className="text-[11px] uppercase text-zinc-500">Cost change</div>
+                <div className="text-lg font-semibold text-zinc-100">
+                  {plan.costDelta > 0 ? '+' : ''}£{plan.costDelta.toFixed(2)}
+                </div>
+              </div>
+              <div className="bg-zinc-800/60 rounded-lg p-3">
+                <div className="text-[11px] uppercase text-zinc-500">Reported profit</div>
+                <div className={`text-lg font-semibold ${plan.profitDelta < 0 ? 'text-red-400' : 'text-emerald-400'}`}>
+                  {plan.profitDelta > 0 ? '+' : ''}£{plan.profitDelta.toFixed(2)}
+                </div>
+              </div>
+              <div className="bg-zinc-800/60 rounded-lg p-3">
+                <div className="text-[11px] uppercase text-zinc-500">Margin points</div>
+                <div className={`text-lg font-semibold ${(plan.marginDeltaPct ?? 0) < 0 ? 'text-red-400' : 'text-emerald-400'}`}>
+                  {plan.marginDeltaPct == null ? '—' : `${plan.marginDeltaPct > 0 ? '+' : ''}${plan.marginDeltaPct.toFixed(2)}`}
+                </div>
+              </div>
+            </div>
+
+            {plan.profitDelta < 0 && (
+              <p className="text-xs text-amber-400">
+                Profit falls because we were under-stating what these products cost.
+                The new figure is the one backed by supplier invoices.
+              </p>
+            )}
+
+            <details className="text-xs">
+              <summary className="text-zinc-500 hover:text-zinc-300 cursor-pointer">
+                Show a sample of the changes
+              </summary>
+              <ul className="mt-2 space-y-1">
+                {(plan.changes || []).map((c) => (
+                  <li key={c.id} className="flex items-baseline justify-between gap-3">
+                    <span className="text-zinc-400 font-mono truncate">{c.sku}</span>
+                    <span className="text-zinc-500 shrink-0">
+                      {c.from == null ? 'no cost' : `£${c.from.toFixed(3)}`} → £{c.to.toFixed(3)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              {plan.changeCount > (plan.changes || []).length && (
+                <p className="text-zinc-600 mt-1">
+                  …and {plan.changeCount - plan.changes.length} more.
+                </p>
+              )}
+            </details>
+
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => run(false)}
+                disabled={busy}
+                className="px-4 py-2 bg-emerald-500 text-zinc-900 rounded text-sm font-medium hover:bg-emerald-400 disabled:opacity-50"
+              >
+                {busy ? 'Restating…' : `Restate ${plan.changeCount} sales`}
+              </button>
+              <button
+                onClick={() => run(true)}
+                disabled={busy}
+                className="px-3 py-2 bg-zinc-800 text-zinc-300 rounded text-sm hover:bg-zinc-700 disabled:opacity-50"
+              >
+                Re-check
+              </button>
+            </div>
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
 export default function Invoices() {
   const navigate = useNavigate();
   const [invoices, setInvoices] = useState([]);
@@ -549,6 +714,12 @@ export default function Invoices() {
               </div>
             </button>
           ))}
+        </div>
+      )}
+
+      {!showNew && invoices.some((i) => i.status === 'reconciled') && (
+        <div className="pt-2 border-t border-zinc-800/60">
+          <BackfillPanel />
         </div>
       )}
     </div>

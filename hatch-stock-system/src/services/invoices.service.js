@@ -103,6 +103,29 @@ export const invoicesService = {
     return response.data;
   },
 
+  /**
+   * Restate historical sales.cost_price from the invoice trail.
+   *
+   * Every margin figure in the app comes from sales.cost_price, snapshotted at
+   * ingest — so before invoices were reconcilable, all historical margin was
+   * computed against VendLive's cost rather than what we actually paid.
+   * Reconciling fixes new sales; this fixes the old ones, using the
+   * invoice-proved cost that was in force on the day each sale happened (a
+   * later price rise never rewrites an earlier sale).
+   *
+   * Defaults to a DRY RUN — restating cost moves reported profit on closed
+   * periods, so the change is shown in pounds and margin points first.
+   *
+   * @param {Object} [opts] - { dryRun?, sku?, since?, until?, includeRefunded? }
+   * @returns {Promise<{ dryRun, applied, salesExamined, plan }>}
+   *   plan: { changes (first 50), changeCount, unchanged, noHistory,
+   *           costDelta, profitDelta, revenueAffected, marginDeltaPct }
+   */
+  backfillSaleCosts: async (opts = {}) => {
+    const response = await api.post('/invoices/backfill-sale-costs', opts);
+    return response.data;
+  },
+
   /** Cost trail for one SKU, newest first. */
   priceHistory: async (sku, limit = 24) => {
     const response = await api.get(`/invoices/price-history/${encodeURIComponent(sku)}`, {
