@@ -5,7 +5,9 @@ import { salesService } from '../../services/sales.service';
 import AnalyticsDashboard from './analytics/AnalyticsDashboard';
 import ClientReports from './reports/ClientReports';
 import SalesCharts from './SalesCharts';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 import { londonDay } from '../../utils/helpers';
+import { groupProductRows, rowProfit, DATE_PRESETS, datePresetRange } from '../../utils/salesGrouping';
 
 // Small hoverable (i) marker with an explanatory tooltip
 function InfoTip({ text }) {
@@ -30,6 +32,26 @@ export default function SalesOverview() {
   // Empty array = all locations.
   const [locationFilter, setLocationFilter] = useState([]);
   const [locPickerOpen, setLocPickerOpen] = useState(false);
+  // By Product tab: which family / fresh-meal group rows are expanded
+  const [openGroups, setOpenGroups] = useState(() => new Set());
+  const toggleGroup = (key) => {
+    setOpenGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
+
+  // Quick date presets highlight when the From/To inputs match their range
+  // exactly, so a hand-edited date drops the highlight rather than lying.
+  const activePreset = DATE_PRESETS.find(p => {
+    const r = datePresetRange(p.id);
+    return r && r.start === dateFilter.start && r.end === dateFilter.end;
+  })?.id || null;
+  const applyPreset = (id) => {
+    const r = datePresetRange(id);
+    if (r) setDateFilter(r);
+  };
 
   const toggleLocation = (name) => {
     setLocationFilter(prev =>
@@ -54,7 +76,9 @@ export default function SalesOverview() {
       // /daily defaults to the last 30 days when no start date — ask for
       // effectively-all history to match the unfiltered view
       salesService.getDailySales(dateFilter.start ? params : { ...params, days: 3650 }),
-      salesService.getByProduct({ ...params, limit: 500 }),
+      // Full product list (server cap): families roll up client-side, so a
+      // truncated list would under-count a group's total.
+      salesService.getByProduct({ ...params, limit: 2000 }),
       salesService.getDailyByCategory(dateFilter.start ? params : { ...params, days: 3650 }),
     ])
       .then(([analytics, daily, byProduct, dailyByCategory]) =>
@@ -112,9 +136,25 @@ export default function SalesOverview() {
   // the rows the API returned — the server figures are authoritative.
   const settledSales = filteredSales.filter(s => !s.isRefunded);
 
+  // Grouping fields (family / fresh-meal bucket) come from the product
+  // catalogue so the offline fallback groups the same way the server rows do.
+  const productInfo = new Map((data.products || []).map(p => [p.sku, p]));
+  const parentNameOf = new Map((data.productParents || []).map(pp => [pp.id, pp.name]));
   const clientByProduct = settledSales.reduce((acc, s) => {
     if (!acc[s.productId]) {
-      acc[s.productId] = { sku: s.productId, name: s.productName, category: s.category || 'Other', units: 0, revenue: 0, cost: 0 };
+      const info = productInfo.get(s.productId);
+      acc[s.productId] = {
+        sku: s.productId,
+        name: s.productName,
+        category: s.category || 'Other',
+        parentId: info?.parentId || null,
+        parentName: info?.parentId ? parentNameOf.get(info.parentId) || null : null,
+        isFreshMeal: !!info?.isFreshMeal,
+        mealType: info?.mealType || null,
+        units: 0,
+        revenue: 0,
+        cost: 0,
+      };
     }
     acc[s.productId].units += s.quantity;
     acc[s.productId].revenue += s.charged;
@@ -180,6 +220,11 @@ export default function SalesOverview() {
   const productRows = serverStats
     ? serverStats.byProduct
     : Object.values(clientByProduct);
+
+  // By Product tab: flavours rolled up into families / fresh-meal buckets,
+  // matching the Stock Levels and Analytics grouping. Sorted by revenue.
+  const groupedProductRows = groupProductRows(productRows)
+    .sort((a, b) => b.revenue - a.revenue || a.name.localeCompare(b.name));
 
   const dailyRows = serverStats
     ? serverStats.daily
@@ -308,6 +353,21 @@ export default function SalesOverview() {
             className="bg-zinc-800 border border-zinc-700 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-emerald-500"
           />
         </div>
+        {/* Quick ranges — fill From/To so the inputs always show what's applied */}
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {DATE_PRESETS.map(p => (
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => applyPreset(p.id)}
+              className={`px-3 py-1.5 rounded text-sm transition-colors ${
+                activePreset === p.id ? 'bg-emerald-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400 hover:text-white'
+              }`}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
         {(dateFilter.start || dateFilter.end || locationFilter.length > 0) && (
           <button
             onClick={() => { setDateFilter({ start: '', end: '' }); setLocationFilter([]); }}
@@ -434,33 +494,83 @@ export default function SalesOverview() {
 
       {activeSubTab === 'products' && (
         <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg overflow-hidden">
+          <div className="px-4 py-2 border-b border-zinc-800 flex items-center justify-between gap-3 flex-wrap">
+            <p className="text-xs text-zinc-500">
+              Flavours are rolled up into their product family or Frive meal bucket — the same
+              groups as Stock Levels and Analytics. Click a group to see its members.
+            </p>
+            {groupedProductRows.some(r => r.isGroup) && (
+              <button
+                type="button"
+                onClick={() => {
+                  const allOpen = groupedProductRows.filter(r => r.isGroup).every(r => openGroups.has(r.key));
+                  setOpenGroups(allOpen ? new Set() : new Set(groupedProductRows.filter(r => r.isGroup).map(r => r.key)));
+                }}
+                className="text-xs text-zinc-400 hover:text-white shrink-0"
+              >
+                {groupedProductRows.filter(r => r.isGroup).every(r => openGroups.has(r.key)) ? 'Collapse all' : 'Expand all'}
+              </button>
+            )}
+          </div>
           {/* Mobile: stacked product cards (matches the transactions tab treatment) */}
           <div className="md:hidden divide-y divide-zinc-800/50">
-            {productRows.slice()
-              .sort((a, b) => b.revenue - a.revenue)
-              .map(stats => {
-                const profit = stats.revenue - stats.cost;
-                const margin = stats.revenue > 0 ? (profit / stats.revenue * 100) : 0;
-                return (
-                  <div key={stats.sku} className="px-4 py-3">
+            {groupedProductRows.map(row => {
+              const { profit, margin } = rowProfit(row);
+              const open = row.isGroup && openGroups.has(row.key);
+              const Chevron = open ? ChevronDown : ChevronRight;
+              return (
+                <div key={row.key}>
+                  <div
+                    className={`px-4 py-3 ${row.isGroup ? 'cursor-pointer active:bg-zinc-800/30' : ''}`}
+                    onClick={row.isGroup ? () => toggleGroup(row.key) : undefined}
+                  >
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
-                        <p className="text-sm text-zinc-200 truncate">{stats.name}</p>
-                        <p className="text-xs text-zinc-500">{stats.category}</p>
+                        <p className="text-sm text-zinc-200 truncate flex items-center gap-1.5">
+                          {row.isGroup && <Chevron className="w-4 h-4 text-zinc-500 shrink-0" />}
+                          <span className="truncate">{row.name}</span>
+                        </p>
+                        <p className="text-xs text-zinc-500">
+                          {row.category}
+                          {row.isGroup && (
+                            <span className="ml-2 text-zinc-600">
+                              {row.memberCount} {row.kind === 'meal' ? 'meal' : 'flavour'}{row.memberCount === 1 ? '' : 's'}
+                            </span>
+                          )}
+                        </p>
                       </div>
                       <div className="text-right shrink-0">
-                        <p className="text-emerald-400 font-medium text-sm">£{stats.revenue.toFixed(2)}</p>
-                        <p className="text-xs text-zinc-500">{stats.units} units</p>
+                        <p className="text-emerald-400 font-medium text-sm">£{row.revenue.toFixed(2)}</p>
+                        <p className="text-xs text-zinc-500">{row.units} units</p>
                       </div>
                     </div>
                     <p className="mt-1 text-xs text-zinc-500">
                       Profit <span className="text-emerald-400">£{profit.toFixed(2)}</span>
-                      {' · '}Cost <span className="text-red-400">£{stats.cost.toFixed(2)}</span>
+                      {' · '}Cost <span className="text-red-400">£{row.cost.toFixed(2)}</span>
                       {' · '}Margin {margin.toFixed(1)}%
                     </p>
                   </div>
-                );
-              })}
+                  {open && row.members.map(m => {
+                    const mp = rowProfit(m);
+                    return (
+                      <div key={m.sku} className="pl-9 pr-4 py-2 bg-zinc-900/40 border-t border-zinc-800/30">
+                        <div className="flex items-start justify-between gap-3">
+                          <p className="text-sm text-zinc-400 truncate min-w-0">{m.name}</p>
+                          <div className="text-right shrink-0">
+                            <p className="text-zinc-300 text-sm">£{m.revenue.toFixed(2)}</p>
+                            <p className="text-xs text-zinc-500">{m.units} units</p>
+                          </div>
+                        </div>
+                        <p className="mt-0.5 text-xs text-zinc-500">
+                          Profit £{mp.profit.toFixed(2)}{' · '}Margin {mp.margin.toFixed(1)}%
+                          {row.units > 0 && <>{' · '}{((m.units / row.units) * 100).toFixed(0)}% of group</>}
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })}
           </div>
           {/* Desktop table */}
           <div className="hidden md:block overflow-x-auto">
@@ -477,23 +587,62 @@ export default function SalesOverview() {
               </tr>
             </thead>
             <tbody>
-              {productRows.slice()
-                .sort((a, b) => b.revenue - a.revenue)
-                .map(stats => {
-                  const profit = stats.revenue - stats.cost;
-                  const margin = stats.revenue > 0 ? (profit / stats.revenue * 100) : 0;
-                  return (
-                    <tr key={stats.sku} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
-                      <td className="px-4 py-3 text-zinc-200">{stats.name}</td>
-                      <td className="px-4 py-3 text-zinc-500">{stats.category}</td>
-                      <td className="text-right px-4 py-3 text-zinc-300">{stats.units}</td>
-                      <td className="text-right px-4 py-3 text-emerald-400">£{stats.revenue.toFixed(2)}</td>
-                      <td className="text-right px-4 py-3 text-red-400">£{stats.cost.toFixed(2)}</td>
+              {groupedProductRows.map(row => {
+                const { profit, margin } = rowProfit(row);
+                const open = row.isGroup && openGroups.has(row.key);
+                const Chevron = open ? ChevronDown : ChevronRight;
+                return (
+                  <React.Fragment key={row.key}>
+                    <tr
+                      className={`border-b border-zinc-800/50 hover:bg-zinc-800/30 ${row.isGroup ? 'cursor-pointer' : ''}`}
+                      onClick={row.isGroup ? () => toggleGroup(row.key) : undefined}
+                    >
+                      <td className="px-4 py-3 text-zinc-200">
+                        <span className="inline-flex items-center gap-2">
+                          {row.isGroup
+                            ? <Chevron className="w-4 h-4 text-zinc-500 shrink-0" />
+                            : <span className="w-4 shrink-0" />}
+                          {row.name}
+                          {row.isGroup && (
+                            <span className="text-xs text-zinc-500">
+                              {row.memberCount} {row.kind === 'meal' ? 'meal' : 'flavour'}{row.memberCount === 1 ? '' : 's'}
+                            </span>
+                          )}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-zinc-500">{row.category}</td>
+                      <td className="text-right px-4 py-3 text-zinc-300">{row.units}</td>
+                      <td className="text-right px-4 py-3 text-emerald-400">£{row.revenue.toFixed(2)}</td>
+                      <td className="text-right px-4 py-3 text-red-400">£{row.cost.toFixed(2)}</td>
                       <td className="text-right px-4 py-3 text-emerald-400">£{profit.toFixed(2)}</td>
                       <td className="text-right px-4 py-3 text-zinc-400">{margin.toFixed(1)}%</td>
                     </tr>
-                  );
-                })}
+                    {open && row.members.map(m => {
+                      const mp = rowProfit(m);
+                      const share = row.units > 0 ? (m.units / row.units) * 100 : 0;
+                      return (
+                        <tr key={m.sku} className="border-b border-zinc-800/30 bg-zinc-900/40">
+                          <td className="pl-12 pr-4 py-2">
+                            <div className="flex items-center gap-3">
+                              <span className="text-zinc-400 truncate w-56 shrink-0" title={m.sku}>{m.name}</span>
+                              <div className="flex-1 min-w-[5rem] max-w-[10rem] bg-zinc-800/40 rounded h-1.5 overflow-hidden">
+                                <div className="h-full bg-emerald-500/60 rounded" style={{ width: `${share}%` }} />
+                              </div>
+                              <span className="text-xs text-zinc-500 shrink-0 w-10 text-right">{share.toFixed(0)}%</span>
+                            </div>
+                          </td>
+                          <td className="px-4 py-2 text-zinc-600 text-xs">{m.category}</td>
+                          <td className="text-right px-4 py-2 text-zinc-400">{m.units}</td>
+                          <td className="text-right px-4 py-2 text-zinc-400">£{m.revenue.toFixed(2)}</td>
+                          <td className="text-right px-4 py-2 text-zinc-500">£{m.cost.toFixed(2)}</td>
+                          <td className="text-right px-4 py-2 text-zinc-400">£{mp.profit.toFixed(2)}</td>
+                          <td className="text-right px-4 py-2 text-zinc-500">{mp.margin.toFixed(1)}%</td>
+                        </tr>
+                      );
+                    })}
+                  </React.Fragment>
+                );
+              })}
             </tbody>
           </table>
           </div>

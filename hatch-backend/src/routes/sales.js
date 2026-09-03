@@ -523,7 +523,11 @@ router.get('/daily-by-category', asyncHandler(async (req, res) => {
   res.json(rows);
 }));
 
-// Get sales by product -- aggregated in the database, refunds excluded
+// Get sales by product -- aggregated in the database, refunds excluded.
+// Each row also carries the product's grouping so the UI can roll flavours up
+// the same way stock and ordering do: product families (parent_id → "Barebells")
+// and Frive fresh-meal buckets (is_fresh_meal + meal_type). products.sku is the
+// PK, so grouping by p.sku lets the product columns be selected directly.
 router.get('/by-product', asyncHandler(async (req, res) => {
   const { limit = 50 } = req.query;
   const where = analyticsWhere(req.query);
@@ -532,15 +536,20 @@ router.get('/by-product', asyncHandler(async (req, res) => {
     SELECT
       s.sku,
       COALESCE(MAX(s.product_name), s.sku)                   AS name,
-      COALESCE(MAX(p.category), 'Other')                     AS category,
+      COALESCE(p.category, 'Other')                          AS category,
+      p.parent_id                                            AS "parentId",
+      pp.name                                                AS "parentName",
+      COALESCE(p.is_fresh_meal, false)                       AS "isFreshMeal",
+      p.meal_type                                            AS "mealType",
       COALESCE(SUM(s.charged), 0)::float                     AS revenue,
       COALESCE(SUM(COALESCE(s.cost_price, 0) * s.quantity), 0)::float AS cost,
       COALESCE(SUM(s.quantity), 0)::int                      AS units,
       COUNT(*)::int                                          AS transactions
     FROM sales s
     LEFT JOIN products p ON p.sku = s.sku
+    LEFT JOIN product_parents pp ON pp.id = p.parent_id
     WHERE ${where}
-    GROUP BY s.sku
+    GROUP BY s.sku, p.sku, pp.id
     ORDER BY revenue DESC
     LIMIT ${Math.min(parseInt(limit) || 50, 2000)}
   `;
