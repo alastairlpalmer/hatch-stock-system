@@ -8,6 +8,7 @@ import {
   applyInvoiceCosting,
   buildReconciliation,
 } from '../services/invoice-reconcile.js';
+import { planCostBackfill } from '../services/cost-backfill.js';
 
 const router = express.Router();
 
@@ -394,7 +395,19 @@ router.post('/:id/reconcile', asyncHandler(async (req, res) => {
       }
     }
 
-    // 2/3. Cost trail + current cost, for SKUs whose price actually moved.
+    // 2/3. Cost trail + current cost.
+    //
+    // Two different things happen here, and conflating them was a bug:
+    //
+    //   * price_history gets a row only when the cost MOVED. An invoice that
+    //     confirms last week's price is not a price change, and recording it
+    //     as one would fill the trail with noise and make a real rise hard to
+    //     spot.
+    //   * cost_locked is set for EVERY matched SKU regardless. The invoice
+    //     proves the cost whether or not it changed, and leaving a confirmed
+    //     cost unlocked let the next VendLive sync overwrite it with their
+    //     figure — silently undoing the reconciliation for exactly the
+    //     products whose price was stable.
     const priceChanges = [];
     if (updateCosts && skuCosts.length > 0) {
       const products = await tx.product.findMany({
@@ -409,23 +422,25 @@ router.post('/:id/reconcile', asyncHandler(async (req, res) => {
         // Round both sides to the pound-and-pence a human would compare, so a
         // 0.0001 float wobble doesn't register as a price change.
         const moved = previous == null || round4(previous) !== unitCost;
-        if (!moved) continue;
 
-        await tx.priceHistory.create({
-          data: {
-            sku,
-            supplierId: invoice.supplierId,
-            unitCost,
-            source: 'invoice',
-            invoiceId: invoice.id,
-            effectiveFrom,
-          },
-        });
+        if (moved) {
+          await tx.priceHistory.create({
+            data: {
+              sku,
+              supplierId: invoice.supplierId,
+              unitCost,
+              source: 'invoice',
+              invoiceId: invoice.id,
+              effectiveFrom,
+            },
+          });
+          priceChanges.push({ sku, previous, unitCost, delta: round4(unitCost - (previous ?? unitCost)) });
+        }
+
         await tx.product.update({
           where: { sku },
           data: { unitCost, costLocked: true },
         });
-        priceChanges.push({ sku, previous, unitCost, delta: round4(unitCost - (previous ?? unitCost)) });
       }
     }
 
@@ -474,6 +489,107 @@ router.post('/:id/unreconcile', asyncHandler(async (req, res) => {
   });
 
   res.json(updated);
+}));
+
+// ============ COST BACKFILL ============
+
+/**
+ * Restate historical sales.cost_price from the invoice trail.
+ *
+ * Every margin figure in the app comes from sales.cost_price, a snapshot taken
+ * at ingest. Before invoices were reconcilable that snapshot could only be
+ * VendLive's costPrice, so all historical margin is computed against a number
+ * nobody could prove. Reconciling fixes new sales; this fixes the old ones.
+ *
+ * Defaults to a DRY RUN. Restating cost moves reported profit on closed
+ * periods — that is not something to do on a single click without first
+ * showing the operator, in pounds and in margin points, exactly what it will
+ * change.
+ *
+ * Refunded sales are excluded by default: they are already netted out of every
+ * revenue figure, so restating their cost moves nothing and only inflates the
+ * change count.
+ */
+router.post('/backfill-sale-costs', asyncHandler(async (req, res) => {
+  const { dryRun, sku, since, until, includeRefunded, limit } = z.object({
+    // Opt IN to writing. A misread dry run is recoverable; a surprise
+    // restatement of a closed quarter is not.
+    dryRun: z.coerce.boolean().default(true),
+    sku: z.string().min(1).nullish(),
+    since: z.string().nullish().refine((v) => v == null || !isNaN(Date.parse(v)), { message: 'since must be a valid date' }),
+    until: z.string().nullish().refine((v) => v == null || !isNaN(Date.parse(v)), { message: 'until must be a valid date' }),
+    includeRefunded: z.coerce.boolean().default(false),
+    limit: z.coerce.number().int().min(1).max(200000).default(100000),
+  }).parse(req.body ?? {});
+
+  // Only invoice-proved history counts. The 'manual' baselines seeded by
+  // manual-sql/033 were copied FROM products.unit_cost — restating a sale from
+  // one would launder the guess we are trying to correct.
+  const history = await prisma.priceHistory.findMany({
+    where: { source: 'invoice', ...(sku ? { sku } : {}) },
+    select: { sku: true, unitCost: true, effectiveFrom: true },
+    orderBy: [{ sku: 'asc' }, { effectiveFrom: 'asc' }],
+  });
+
+  if (history.length === 0) {
+    return res.json({
+      dryRun,
+      applied: 0,
+      message: 'No invoice-proved costs yet — reconcile an invoice first, then run this.',
+      plan: { changes: [], unchanged: 0, noHistory: 0, costDelta: 0, profitDelta: 0, marginDeltaPct: null },
+    });
+  }
+
+  const historyBySku = {};
+  for (const row of history) (historyBySku[row.sku] ||= []).push(row);
+
+  const sales = await prisma.sale.findMany({
+    where: {
+      sku: { in: Object.keys(historyBySku) },
+      ...(includeRefunded ? {} : { isRefunded: false }),
+      ...(since || until ? {
+        timestamp: {
+          ...(since ? { gte: new Date(since) } : {}),
+          ...(until ? { lte: new Date(until) } : {}),
+        },
+      } : {}),
+    },
+    select: { id: true, sku: true, quantity: true, charged: true, costPrice: true, timestamp: true },
+    take: limit,
+  });
+
+  const plan = planCostBackfill(sales, historyBySku);
+
+  if (dryRun) {
+    return res.json({
+      dryRun: true,
+      applied: 0,
+      salesExamined: sales.length,
+      plan: { ...plan, changes: plan.changes.slice(0, 50), changeCount: plan.changes.length },
+    });
+  }
+
+  // Chunked, outside one giant transaction: this can touch tens of thousands
+  // of rows, and a single transaction that size risks a statement timeout that
+  // would roll back the whole restatement. Each row is an independent, exact
+  // write, so a partial run is safe — re-running finishes the job (already
+  // correct rows fall out as `unchanged`).
+  const CHUNK = 500;
+  let applied = 0;
+  for (let i = 0; i < plan.changes.length; i += CHUNK) {
+    const slice = plan.changes.slice(i, i + CHUNK);
+    await prisma.$transaction(
+      slice.map((c) => prisma.sale.update({ where: { id: c.id }, data: { costPrice: c.to } })),
+    );
+    applied += slice.length;
+  }
+
+  res.json({
+    dryRun: false,
+    applied,
+    salesExamined: sales.length,
+    plan: { ...plan, changes: plan.changes.slice(0, 50), changeCount: plan.changes.length },
+  });
 }));
 
 // ============ PRICE TRAIL ============

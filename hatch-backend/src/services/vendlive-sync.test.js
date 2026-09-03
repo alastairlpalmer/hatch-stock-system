@@ -19,6 +19,7 @@ import {
   normalizePollPayload,
   computeCharged,
   computeProductPriceUpdates,
+  resolveSaleCost,
   processVendliveOrder,
   resolveSalesMachineMapping,
 } from './vendlive-sync.js';
@@ -439,5 +440,79 @@ describe('processVendliveOrder', () => {
       where: { id: 'map-1' },
       data: { salesMachineId: 42 },
     });
+  });
+});
+
+describe('computeProductPriceUpdates — invoice-proved costs', () => {
+  const item = (over = {}) => ({
+    productExternalId: 'COKE',
+    price: 2.5,
+    costPrice: 1.1,
+    timestamp: '2026-09-01T10:00:00Z',
+    productSaleId: 1,
+    ...over,
+  });
+
+  it('does NOT overwrite a cost proved by a reconciled invoice', () => {
+    // This is the second of the two VendLive cost-write paths. Locking only
+    // the nightly catalog sync left this one clobbering invoice-proved costs
+    // on every sales sync.
+    const locked = new Map([['COKE', { sku: 'COKE', salePrice: 2.5, unitCost: 0.85, costLocked: true }]]);
+    expect(computeProductPriceUpdates([item()], locked)).toEqual([]);
+  });
+
+  it('still updates the SALE price on a cost-locked product', () => {
+    // VendLive IS the authority on what the machine charges — only cost is
+    // locked, and locking both would freeze prices we do not control.
+    const locked = new Map([['COKE', { sku: 'COKE', salePrice: 2.0, unitCost: 0.85, costLocked: true }]]);
+    expect(computeProductPriceUpdates([item()], locked)).toEqual([
+      { sku: 'COKE', data: { salePrice: 2.5 } },
+    ]);
+  });
+
+  it('updates cost as before when the product is not locked', () => {
+    const unlocked = new Map([['COKE', { sku: 'COKE', salePrice: 2.5, unitCost: 0.85, costLocked: false }]]);
+    expect(computeProductPriceUpdates([item()], unlocked)).toEqual([
+      { sku: 'COKE', data: { unitCost: 1.1 } },
+    ]);
+  });
+
+  it('treats a missing costLocked field as unlocked', () => {
+    // Rows read before manual-sql/033 was applied, and any test fixture that
+    // predates the column.
+    const legacy = new Map([['COKE', { sku: 'COKE', salePrice: 2.5, unitCost: 0.85 }]]);
+    expect(computeProductPriceUpdates([item()], legacy)).toEqual([
+      { sku: 'COKE', data: { unitCost: 1.1 } },
+    ]);
+  });
+});
+
+describe('resolveSaleCost', () => {
+  it('prefers an invoice-proved cost over VendLive', () => {
+    const cost = resolveSaleCost(
+      { costPrice: 1.1 },
+      { unitCost: 0.85, costLocked: true },
+    );
+    expect(cost).toBe(0.85);
+  });
+
+  it('falls back to VendLive when nothing is proved', () => {
+    expect(resolveSaleCost({ costPrice: 1.1 }, { unitCost: 0.85, costLocked: false })).toBe(1.1);
+  });
+
+  it('falls back to the catalogue cost when VendLive sends none', () => {
+    expect(resolveSaleCost({ costPrice: 0 }, { unitCost: 0.85, costLocked: false })).toBe(0.85);
+  });
+
+  it('ignores the lock when the locked product somehow has no cost', () => {
+    expect(resolveSaleCost({ costPrice: 1.1 }, { unitCost: null, costLocked: true })).toBe(1.1);
+  });
+
+  it('returns null when no cost is known anywhere', () => {
+    expect(resolveSaleCost({ costPrice: 0 }, { unitCost: null })).toBeNull();
+  });
+
+  it('survives a missing product', () => {
+    expect(resolveSaleCost({ costPrice: 1.1 }, null)).toBe(1.1);
   });
 });
