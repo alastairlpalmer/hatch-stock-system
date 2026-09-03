@@ -469,16 +469,24 @@ export default function SalesOverview() {
 
           {/* Top products */}
           <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-6">
-            <h3 className="text-sm font-medium text-zinc-400 mb-4">Top Selling Products</h3>
+            <h3 className="text-sm font-medium text-zinc-400 mb-4">
+              Top Selling Products
+              <InfoTip text="Ranked by units. Flavours count together as their product family or Frive meal bucket — the same groups as the By Product tab." />
+            </h3>
             <div className="space-y-3">
-              {productRows.slice()
+              {groupedProductRows.slice()
                 .sort((a, b) => b.units - a.units)
                 .slice(0, 10)
                 .map(stats => (
-                  <div key={stats.sku} className="flex items-center justify-between py-2 border-b border-zinc-800 last:border-0">
+                  <div key={stats.key} className="flex items-center justify-between py-2 border-b border-zinc-800 last:border-0">
                     <div>
                       <span className="text-zinc-300">{stats.name}</span>
                       <span className="text-zinc-600 text-xs ml-2">{stats.category}</span>
+                      {stats.isGroup && (
+                        <span className="text-zinc-600 text-xs ml-2">
+                          {stats.memberCount} {stats.kind === 'meal' ? 'meal' : 'flavour'}{stats.memberCount === 1 ? '' : 's'}
+                        </span>
+                      )}
                     </div>
                     <div className="flex gap-6 text-sm">
                       <span className="text-zinc-500">{stats.units} sold</span>
@@ -690,7 +698,7 @@ export default function SalesOverview() {
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <div className="text-zinc-200 text-sm truncate">{sale.productName}</div>
-                      <div className="text-zinc-500 text-xs">{sale.category}</div>
+                      <div className="text-zinc-500 text-xs truncate">{sale.category} · {sale.locationName || 'Unknown'}</div>
                     </div>
                     <div className="text-right shrink-0">
                       <div className="text-emerald-400 text-sm">£{sale.charged.toFixed(2)}</div>
@@ -727,6 +735,7 @@ export default function SalesOverview() {
                 <th className="text-left px-4 py-3 text-zinc-500 font-medium">Date/Time</th>
                 <th className="text-left px-4 py-3 text-zinc-500 font-medium">Product</th>
                 <th className="text-left px-4 py-3 text-zinc-500 font-medium">Category</th>
+                <th className="text-left px-4 py-3 text-zinc-500 font-medium">Location</th>
                 <th className="text-right px-4 py-3 text-zinc-500 font-medium">Price</th>
                 <th className="text-right px-4 py-3 text-zinc-500 font-medium">Charged</th>
                 <th className="text-left px-4 py-3 text-zinc-500 font-medium">Type</th>
@@ -744,6 +753,7 @@ export default function SalesOverview() {
                     </td>
                     <td className="px-4 py-3 text-zinc-200">{sale.productName}</td>
                     <td className="px-4 py-3 text-zinc-500">{sale.category}</td>
+                    <td className="px-4 py-3 text-zinc-400">{sale.locationName || 'Unknown'}</td>
                     <td className="text-right px-4 py-3 text-zinc-300">£{sale.price.toFixed(2)}</td>
                     <td className="text-right px-4 py-3 text-emerald-400">£{sale.charged.toFixed(2)}</td>
                     <td className="px-4 py-3">
